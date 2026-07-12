@@ -15,7 +15,9 @@ describe('parseSocketUrl', () => {
   });
 
   it('decodes percent-encoded credentials', () => {
-    const parsed = parseSocketUrl('postgres://user%40x:p%23ss@localhost/db?host=/cloudsql/a:b:c');
+    const parsed = parseSocketUrl(
+      'postgres://user%40x:p%23ss@localhost/db?host=/cloudsql/a:b:c',
+    );
     expect(parsed).toEqual({
       host: '/cloudsql/a:b:c',
       database: 'db',
@@ -25,11 +27,15 @@ describe('parseSocketUrl', () => {
   });
 
   it('returns null for plain TCP URLs', () => {
-    expect(parseSocketUrl('postgres://postgres:sower@localhost:5432/sower')).toBeNull();
+    expect(
+      parseSocketUrl('postgres://postgres:sower@localhost:5432/sower'),
+    ).toBeNull();
   });
 
   it('returns null when host param is not an absolute path', () => {
-    expect(parseSocketUrl('postgres://u:p@localhost/db?host=example.com')).toBeNull();
+    expect(
+      parseSocketUrl('postgres://u:p@localhost/db?host=example.com'),
+    ).toBeNull();
   });
 
   it('returns null for garbage input', () => {

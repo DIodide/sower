@@ -12,7 +12,9 @@ if (!databaseUrl) {
 const migrationsFolder = fileURLToPath(new URL('../drizzle', import.meta.url));
 
 const socket = parseSocketUrl(databaseUrl);
-const client = socket ? postgres({ ...socket, max: 1 }) : postgres(databaseUrl, { max: 1 });
+const client = socket
+  ? postgres({ ...socket, max: 1 })
+  : postgres(databaseUrl, { max: 1 });
 const db = drizzle(client);
 
 try {

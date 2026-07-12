@@ -13,9 +13,12 @@ export { schema };
  * a host option containing '/' makes postgres-js connect to
  * `${host}/.s.PGSQL.5432` as a unix socket.
  */
-export function parseSocketUrl(
-  connectionString: string,
-): { host: string; database: string; username: string; password: string } | null {
+export function parseSocketUrl(connectionString: string): {
+  host: string;
+  database: string;
+  username: string;
+  password: string;
+} | null {
   let url: URL;
   try {
     url = new URL(connectionString);
