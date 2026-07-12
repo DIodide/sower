@@ -1,0 +1,17 @@
+# Dashboard image (Next.js standalone). Auth is enforced by Cloud Run IAP in
+# front of this service — the app itself stays auth-free.
+# Uses Dockerfile.dashboard.dockerignore (BuildKit per-Dockerfile ignore).
+FROM node:22-slim AS build
+RUN corepack enable
+WORKDIR /app
+COPY . .
+RUN corepack pnpm install --frozen-lockfile --filter @sower/dashboard...
+RUN corepack pnpm --filter @sower/dashboard build
+
+FROM node:22-slim
+WORKDIR /app
+ENV NODE_ENV=production HOSTNAME=0.0.0.0 PORT=8080
+COPY --from=build /app/apps/dashboard/.next/standalone ./
+COPY --from=build /app/apps/dashboard/.next/static ./apps/dashboard/.next/static
+EXPOSE 8080
+CMD ["node", "apps/dashboard/server.js"]

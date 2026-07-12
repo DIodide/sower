@@ -75,3 +75,23 @@ jobs:
           --region us-east1
           --project ${{ secrets.GCP_PROJECT_ID }}
           --quiet
+
+      - name: Build dashboard image
+        run: >
+          docker build
+          -t us-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/sower/dashboard:${{ github.sha }}
+          -f Dockerfile.dashboard .
+
+      - name: Push dashboard image
+        run: docker push us-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/sower/dashboard:${{ github.sha }}
+
+      - name: Deploy dashboard to Cloud Run
+        # --iap re-asserts IAP on every deploy so a config drift can never
+        # silently expose the dashboard
+        run: >
+          gcloud run deploy sower-dashboard
+          --image us-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/sower/dashboard:${{ github.sha }}
+          --region us-east1
+          --project ${{ secrets.GCP_PROJECT_ID }}
+          --iap
+          --quiet
