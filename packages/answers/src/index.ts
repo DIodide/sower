@@ -18,7 +18,9 @@ export type {
   ResolveOptions,
 } from './resolve.js';
 export {
+  normalizeCompanyKey,
   normalizeLabel,
   resolveAnswers,
+  selectBankValue,
   splitMissingByRequired,
 } from './resolve.js';

@@ -462,8 +462,12 @@ export default async function TaskPage({
         >
           {resolvedCount} resolved · {missingCount} unanswered
           {task.state === 'NEEDS_INPUT'
-            ? ' — fill in the fields below; saved answers go to the answers bank and apply on requeue.'
-            : ''}
+            ? ' — fill in the fields below; saved answers go to the '
+            : ' — saved answers come from your profile, documents, and the '}
+          <Link href="/answers" style={linkStyle}>
+            answer library
+          </Link>
+          {task.state === 'NEEDS_INPUT' ? ' and apply on requeue.' : '.'}
         </p>
       ) : null}
       {!spec ? (
@@ -475,6 +479,7 @@ export default async function TaskPage({
           taskId={task.id}
           views={views}
           documents={documentOptions}
+          company={job?.company ?? spec.company ?? ''}
         />
       ) : (
         <QuestionsPanel views={views} />

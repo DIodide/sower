@@ -130,10 +130,16 @@ export async function processTask(
     // bank (user-entered values keyed by normalized label), and stored
     // documents (resume/cover letter files) extend the profile as answer
     // sources. Truthfulness is preserved: nothing is ever guessed.
+    //
+    // The user bank is COMPANY-AWARE: each row carries its company scope
+    // ('' = global) and resolveAnswers matches this job's companyKey — a
+    // company-scoped answer resolves ONLY for its own company, and wins over
+    // a global answer for the same question (isolation invariant).
     const bankRows = await db
       .select({
         normalizedLabel: answers.normalizedLabel,
         value: answers.value,
+        company: answers.company,
       })
       .from(answers);
     const documentRows = await db
@@ -143,6 +149,11 @@ export async function processTask(
         filename: documents.filename,
       })
       .from(documents);
+    // This job's companyKey: the ingest-recorded company, else the discovered
+    // spec's (a raw-URL ingest records none), normalized like bank scopes.
+    const companyKey = (job.company ?? jobSpec.company ?? '')
+      .toLowerCase()
+      .trim();
     const { resolved, missing } = await resolveAnswers(
       jobSpec.questions,
       profile,
@@ -150,9 +161,11 @@ export async function processTask(
         bank: bankRows.map((row) => ({
           normalizedLabel: row.normalizedLabel,
           value: row.value as string | string[],
+          company: row.company,
         })),
         documents: documentRows,
         answerBank: deps.answerBank,
+        company: companyKey,
       },
     );
     // REVIEW gates on REQUIRED answers only; optional gaps never block.

@@ -22,10 +22,28 @@ export function normalizeLabel(label: string): string {
     .trim();
 }
 
+/**
+ * Normalize a company name to the key the answer library scopes on:
+ * lowercase and trimmed. '' (from undefined, '', or whitespace) means
+ * GLOBAL — the entry applies to any company.
+ */
+export function normalizeCompanyKey(company: string | undefined): string {
+  // Lowercase, trim, and collapse internal whitespace so "Flow  Traders" and
+  // "Flow Traders" scope to the same company.
+  return (company ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
 /** A previously saved answer, keyed by its normalized question label. */
 export interface BankEntry {
   normalizedLabel: string;
   value: string | string[];
+  /**
+   * Company key scoping this entry ('' or undefined = global). A scoped
+   * entry resolves ONLY when the job's company matches; a global entry
+   * resolves for any company but loses to a scoped match. Compared after
+   * normalizeCompanyKey, so raw company names are tolerated.
+   */
+  company?: string;
 }
 
 /** A stored document available for file-type questions. */
@@ -38,6 +56,14 @@ export interface DocumentEntry {
 export interface ResolveOptions {
   bank?: BankEntry[];
   documents?: DocumentEntry[];
+  /**
+   * The current job's company key (pass company.toLowerCase().trim(); a raw
+   * name is normalized again defensively). Selects which bank entries may
+   * answer: entries scoped to this company win, global entries ('' /
+   * undefined company) are the fallback, and entries scoped to any OTHER
+   * company are ignored. Omitted or '' = only global entries match.
+   */
+  company?: string;
   /**
    * Curated answer bank (see answer-bank.ts): dedupes near-identical
    * question wordings via aliases and answers them from the profile,
@@ -379,6 +405,39 @@ function documentKindForFileQuestion(
 }
 
 /**
+ * Pick the user-bank value that may answer this question, honoring company
+ * scope. Among entries whose normalizedLabel exactly equals the question's
+ * normalized label:
+ *  - an entry scoped to `company` wins (first such entry, matching the
+ *    bank's first-entry-wins duplicate semantics);
+ *  - else a GLOBAL entry ('' / undefined company) is the fallback;
+ *  - an entry scoped to a DIFFERENT company is never used — company-scoped
+ *    answers (essays like "Why do you want to work here?") must not leak
+ *    across companies. When `company` is '' / undefined, only global
+ *    entries match.
+ * Returns undefined when no entry may answer.
+ */
+export function selectBankValue(
+  question: Question,
+  bank: BankEntry[],
+  company?: string,
+): string | string[] | undefined {
+  const label = normalizeLabel(question.label);
+  const companyKey = normalizeCompanyKey(company);
+  let global: BankEntry | undefined;
+  for (const entry of bank) {
+    if (entry.normalizedLabel !== label) continue;
+    const entryKey = normalizeCompanyKey(entry.company);
+    if (entryKey === '') {
+      global ??= entry;
+    } else if (companyKey !== '' && entryKey === companyKey) {
+      return entry.value;
+    }
+  }
+  return global?.value;
+}
+
+/**
  * Deterministically resolve answers to questions.
  *
  * Resolution order per question:
@@ -387,7 +446,9 @@ function documentKindForFileQuestion(
  *  3) guarded yes/no regexes (authorization/sponsorship) -> profile
  *  4) curated answer bank (opts.answerBank): alias match + strategy
  *     (range/bucket selects, consents, EEO decline, ...) -> profile
- *  5) answers bank, exact normalized-label match -> source 'bank'
+ *  5) answers bank, exact normalized-label match, company-scoped entry for
+ *     opts.company preferred over global (see selectBankValue) -> source
+ *     'bank'
  *  6) file questions: matching stored document -> source 'document'
  *  7) profile.custom, exact normalized-label match -> profile
  * A stage only wins when it yields a final valid answer (selects require an
@@ -413,13 +474,10 @@ export function resolveAnswers(
     customByNormalizedLabel.set(normalizeLabel(key), value);
   }
 
-  // Bank labels are stored pre-normalized; first entry wins on duplicates.
-  const bankByNormalizedLabel = new Map<string, string | string[]>();
-  for (const entry of opts?.bank ?? []) {
-    if (!bankByNormalizedLabel.has(entry.normalizedLabel)) {
-      bankByNormalizedLabel.set(entry.normalizedLabel, entry.value);
-    }
-  }
+  // Bank labels are stored pre-normalized; selectBankValue applies the
+  // company scoping and first-entry-wins duplicate semantics per question.
+  const bank = opts?.bank ?? [];
+  const company = opts?.company;
 
   const documents = opts?.documents ?? [];
   const answerBank = opts?.answerBank;
@@ -429,8 +487,9 @@ export function resolveAnswers(
     // kind (never from text stages); otherwise they go to a human.
     if (question.type === 'file') {
       // (a) Honor an explicit document pick: the dashboard stores the chosen
-      // document's storagePath in the answers bank keyed by the question label.
-      const picked = bankByNormalizedLabel.get(normalizeLabel(question.label));
+      // document's storagePath in the answers bank keyed by the question
+      // label (company-scoped picks apply only to their company).
+      const picked = selectBankValue(question, bank, company);
       const pickedPath =
         typeof picked === 'string'
           ? documents.find((d) => d.storagePath === picked)?.storagePath
@@ -462,7 +521,7 @@ export function resolveAnswers(
       (answerBank === undefined
         ? null
         : resolveFromAnswerBank(question, profile, answerBank)) ??
-      finalize(question, bankByNormalizedLabel.get(label), 'bank') ??
+      finalize(question, selectBankValue(question, bank, company), 'bank') ??
       finalize(question, customByNormalizedLabel.get(label), 'profile');
 
     if (answer === null) {

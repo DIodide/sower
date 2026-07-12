@@ -116,6 +116,8 @@ function createFakeTaskDb(initial: {
   company?: string | null;
   title?: string | null;
   descriptions?: FakeDescriptionRow[];
+  /** answers-table rows the bank select resolves (company '' = global). */
+  bank?: Array<{ normalizedLabel: string; value: unknown; company: string }>;
 }) {
   const task: FakeTaskRow = {
     id: 'task-1',
@@ -138,6 +140,7 @@ function createFakeTaskDb(initial: {
   };
   const eventRows: FakeEventRow[] = [];
   const descriptionRows: FakeDescriptionRow[] = initial.descriptions ?? [];
+  const bankRows = initial.bank ?? [];
 
   // A jobs backfill sets only company/title; everything else (claim,
   // jobSpec, resolution, transitions) targets the task row.
@@ -164,7 +167,9 @@ function createFakeTaskDb(initial: {
           .slice(0, 1)
           .map((d) => ({ version: d.version, contentHash: d.contentHash }));
         result = latest;
-      } else if (isBankSelect || isDocumentsSelect) {
+      } else if (isBankSelect) {
+        result = bankRows.map((row) => ({ ...row }));
+      } else if (isDocumentsSelect) {
         result = [];
       } else {
         result = [{ task: { ...task }, job }];
@@ -362,9 +367,14 @@ describe('processTask', () => {
       ['RESOLVED_ALL', 'PREPARING', 'REVIEW'],
     ]);
     // A per-task recorder is handed to the adapter, and the answers bank +
-    // documents (empty here) are passed through to resolveAnswers.
+    // documents (empty here) + the job's companyKey ('' — the fake job has no
+    // company) are passed through to resolveAnswers.
     expect(adapterState.lastDiscoverOpts?.recorder).toBeTypeOf('function');
-    expect(answersState.lastOpts).toEqual({ bank: [], documents: [] });
+    expect(answersState.lastOpts).toEqual({
+      bank: [],
+      documents: [],
+      company: '',
+    });
   });
 
   it('passes the startup-loaded curated answer bank through to resolveAnswers', async () => {
@@ -378,6 +388,7 @@ describe('processTask', () => {
       bank: [],
       documents: [],
       answerBank,
+      company: '',
     });
   });
 
@@ -552,6 +563,78 @@ describe('processTask', () => {
       fromState: 'PREPARING',
       toState: 'FAILED',
       data: { error: 'boom', attempt: 1 },
+    });
+  });
+});
+
+describe('processTask company-scoped answer bank (Contract C)', () => {
+  it("passes the job's normalized companyKey as opts.company", async () => {
+    // The ingest-recorded company is authoritative and gets normalized
+    // (lowercase + trim) into the companyKey resolveAnswers matches on.
+    const { db } = createFakeTaskDb({
+      state: 'QUEUED',
+      company: '  Acme Corp ',
+    });
+
+    await processTask(createDeps(db), 'task-1');
+
+    expect((answersState.lastOpts as { company?: string }).company).toBe(
+      'acme corp',
+    );
+  });
+
+  it('falls back to the discovered spec company when the job has none', async () => {
+    // Raw-URL ingest: jobs.company is null; the adapter discovers the company.
+    const { db } = createFakeTaskDb({ state: 'QUEUED', company: null });
+    adapterState.company = 'Globex';
+
+    await processTask(createDeps(db), 'task-1');
+
+    expect((answersState.lastOpts as { company?: string }).company).toBe(
+      'globex',
+    );
+  });
+
+  it('passes each bank row through with its company scope intact', async () => {
+    const { db } = createFakeTaskDb({
+      state: 'QUEUED',
+      company: 'Acme',
+      bank: [
+        {
+          normalizedLabel: 'why do you want to work here',
+          value: 'Because Acme builds anvils.',
+          company: 'acme',
+        },
+        {
+          normalizedLabel: 'why do you want to work here',
+          value: 'Because Globex is global.',
+          company: 'globex',
+        },
+        { normalizedLabel: 'pronouns', value: 'they/them', company: '' },
+      ],
+    });
+
+    await processTask(createDeps(db), 'task-1');
+
+    // Every row — including the OTHER company's — reaches resolveAnswers with
+    // its scope attached; the isolation decision (only 'acme' or global may
+    // resolve for this job) belongs to @sower/answers and is tested there.
+    expect(answersState.lastOpts).toEqual({
+      bank: [
+        {
+          normalizedLabel: 'why do you want to work here',
+          value: 'Because Acme builds anvils.',
+          company: 'acme',
+        },
+        {
+          normalizedLabel: 'why do you want to work here',
+          value: 'Because Globex is global.',
+          company: 'globex',
+        },
+        { normalizedLabel: 'pronouns', value: 'they/them', company: '' },
+      ],
+      documents: [],
+      company: 'acme',
     });
   });
 });

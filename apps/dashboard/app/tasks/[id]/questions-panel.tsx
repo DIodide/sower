@@ -113,12 +113,48 @@ function ResolvedValue({ view }: { view: QuestionView }) {
   );
 }
 
+/**
+ * Scope control for essay (text/textarea) answers: unchecked (default) the
+ * saveAnswers action stores the answer for this task's company only; checked
+ * it is stored globally. Rendered only when the task has a company.
+ */
+function EssayScopeChoice({
+  questionId,
+  company,
+}: {
+  questionId: string;
+  company: string;
+}) {
+  return (
+    <label
+      style={{
+        display: 'flex',
+        alignItems: 'baseline',
+        gap: '0.5rem',
+        marginTop: '0.375rem',
+        maxWidth: '32rem',
+        fontSize: '0.75rem',
+        color: MUTED,
+        cursor: 'pointer',
+      }}
+    >
+      <input type="checkbox" name={`global:${questionId}`} value="1" />
+      <span>
+        reuse for all companies — otherwise this answer is saved for{' '}
+        <strong style={{ color: '#c4b5fd' }}>{company}</strong> only
+      </span>
+    </label>
+  );
+}
+
 function MissingInput({
   view,
   documents,
+  scopeCompany,
 }: {
   view: QuestionView;
   documents: DocumentOption[];
+  scopeCompany?: string;
 }) {
   const inputId = `q-${view.id}`;
 
@@ -239,26 +275,36 @@ function MissingInput({
 
   if (view.type === 'textarea') {
     return (
-      <textarea
-        id={inputId}
-        name={`q:${view.id}`}
-        rows={4}
-        maxLength={20000}
-        aria-required={view.required}
-        style={{ ...inputStyle, resize: 'vertical' }}
-      />
+      <div>
+        <textarea
+          id={inputId}
+          name={`q:${view.id}`}
+          rows={4}
+          maxLength={20000}
+          aria-required={view.required}
+          style={{ ...inputStyle, resize: 'vertical' }}
+        />
+        {scopeCompany ? (
+          <EssayScopeChoice questionId={view.id} company={scopeCompany} />
+        ) : null}
+      </div>
     );
   }
 
   return (
-    <input
-      id={inputId}
-      name={`q:${view.id}`}
-      type="text"
-      maxLength={20000}
-      aria-required={view.required}
-      style={inputStyle}
-    />
+    <div>
+      <input
+        id={inputId}
+        name={`q:${view.id}`}
+        type="text"
+        maxLength={20000}
+        aria-required={view.required}
+        style={inputStyle}
+      />
+      {scopeCompany ? (
+        <EssayScopeChoice questionId={view.id} company={scopeCompany} />
+      ) : null}
+    </div>
   );
 }
 
@@ -266,11 +312,17 @@ export function QuestionsPanel({
   views,
   interactive = false,
   documents = [],
+  scopeCompany,
 }: {
   views: QuestionView[];
   /** When true, missing questions render form controls (NEEDS_INPUT form). */
   interactive?: boolean;
   documents?: DocumentOption[];
+  /**
+   * The task's company (display name). When set, interactive essay inputs
+   * offer the company-scoped/global save choice.
+   */
+  scopeCompany?: string;
 }) {
   if (views.length === 0) {
     return <Empty>the job spec contains no questions.</Empty>;
@@ -312,7 +364,11 @@ export function QuestionsPanel({
             <ResolvedValue view={view} />
           ) : view.status === 'missing' ? (
             interactive ? (
-              <MissingInput view={view} documents={documents} />
+              <MissingInput
+                view={view}
+                documents={documents}
+                scopeCompany={scopeCompany}
+              />
             ) : (
               <span style={{ fontSize: '0.8rem', color: '#fbbf24' }}>
                 unanswered

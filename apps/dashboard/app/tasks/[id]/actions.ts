@@ -12,9 +12,9 @@
 import { randomUUID } from 'node:crypto';
 import { normalizeLabel } from '@sower/answers';
 import type { Question } from '@sower/core';
-import { answers, applicationTasks, documents } from '@sower/db';
+import { answers, applicationTasks, documents, jobs } from '@sower/db';
 import { createStorage } from '@sower/storage';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { getDb } from '../../../lib/db';
@@ -44,31 +44,38 @@ function optionValueSet(question: Question): Set<string> {
   return new Set((question.options ?? []).map((o) => String(o.value)));
 }
 
+/**
+ * Upsert a bank answer keyed by (company, normalized label). `company` is a
+ * normalized company key ('' = GLOBAL): a company-scoped save never touches
+ * the global row and vice versa, so one company's essay answer can never
+ * overwrite — or leak to — another company's.
+ */
 async function upsertAnswer(
   db: ReturnType<typeof getDb>,
   question: Question,
   value: string | string[],
+  company: string,
 ): Promise<void> {
   const normalized = normalizeLabel(question.label);
-  const existing = await db
-    .select({ id: answers.id })
-    .from(answers)
-    .where(eq(answers.normalizedLabel, normalized))
-    .limit(1);
-  const row = existing[0];
-  if (row) {
-    await db
-      .update(answers)
-      .set({ questionLabel: question.label, value, source: 'user' })
-      .where(eq(answers.id, row.id));
-  } else {
-    await db.insert(answers).values({
+  // A label that normalizes to '' (e.g. all punctuation) can't be a bank key —
+  // it would collide with every other empty-label answer in the same scope.
+  if (normalized === '') return;
+  // Atomic upsert on the (company, normalized_label) unique index: a concurrent
+  // double-save can't create two rows, and a company-scoped write never touches
+  // the global row or another company's.
+  await db
+    .insert(answers)
+    .values({
       questionLabel: question.label,
       normalizedLabel: normalized,
       value,
       source: 'user',
+      company,
+    })
+    .onConflictDoUpdate({
+      target: [answers.company, answers.normalizedLabel],
+      set: { questionLabel: question.label, value, source: 'user' },
     });
-  }
 }
 
 async function handleFileQuestion(
@@ -97,8 +104,9 @@ async function handleFileQuestion(
       sizeBytes: upload.size,
     });
     // Record the pick so resolution binds THIS question to THIS document
-    // (not merely the first document of the kind).
-    await upsertAnswer(db, question, storagePath);
+    // (not merely the first document of the kind). Document picks are global:
+    // the same resume/cover letter is reusable across companies.
+    await upsertAnswer(db, question, storagePath, '');
     return true;
   }
 
@@ -131,7 +139,7 @@ async function handleFileQuestion(
       );
       return false;
     }
-    await upsertAnswer(db, question, found[0].storagePath);
+    await upsertAnswer(db, question, found[0].storagePath, '');
     return true;
   }
   return false;
@@ -144,6 +152,13 @@ async function handleFileQuestion(
  * and multiselect values are rejected unless they exactly match one of the
  * question's option values. Question ids not present in this task's
  * job_spec are ignored entirely.
+ *
+ * Scoping: text/textarea (essay) answers are saved COMPANY-SCOPED to this
+ * task's company by default — they only auto-fill future applications at the
+ * same company. The per-question "reuse for all companies" checkbox
+ * (`global:<id>`) saves them globally instead. Select/multiselect/file
+ * answers are always global. When the task has no company, everything is
+ * saved globally.
  *
  * When formData carries intent=save_requeue the task is also requeued via
  * the api service.
@@ -168,8 +183,10 @@ export async function saveAnswers(
     .select({
       id: applicationTasks.id,
       jobSpec: applicationTasks.jobSpec,
+      jobCompany: jobs.company,
     })
     .from(applicationTasks)
+    .leftJoin(jobs, eq(applicationTasks.jobId, jobs.id))
     .where(eq(applicationTasks.id, idParse.data))
     .limit(1);
   const task = taskRows[0];
@@ -182,6 +199,12 @@ export async function saveAnswers(
       message: 'this task has no job spec yet, so there is nothing to answer.',
     };
   }
+
+  // Normalized company key for scoping essay answers ('' when unknown) —
+  // same normalization the resolver uses (see @sower/answers ResolveOptions).
+  const companyKey = (task.jobCompany ?? task.jobSpec.company ?? '')
+    .toLowerCase()
+    .trim();
 
   const errors: string[] = [];
   let savedCount = 0;
@@ -211,7 +234,7 @@ export async function saveAnswers(
           );
           continue;
         }
-        await upsertAnswer(db, question, raw);
+        await upsertAnswer(db, question, raw, '');
         savedCount += 1;
         continue;
       }
@@ -226,12 +249,13 @@ export async function saveAnswers(
           );
           continue;
         }
-        await upsertAnswer(db, question, raw);
+        await upsertAnswer(db, question, raw, '');
         savedCount += 1;
         continue;
       }
 
-      // text / textarea
+      // text / textarea — company-scoped by default; the "reuse for all
+      // companies" checkbox saves it globally instead.
       const parsed = textAnswerSchema.safeParse(raw);
       if (!parsed.success) {
         errors.push(
@@ -239,7 +263,13 @@ export async function saveAnswers(
         );
         continue;
       }
-      await upsertAnswer(db, question, parsed.data);
+      const reuseEverywhere = formData.get(`global:${question.id}`) === '1';
+      await upsertAnswer(
+        db,
+        question,
+        parsed.data,
+        reuseEverywhere ? '' : companyKey,
+      );
       savedCount += 1;
     } catch (err) {
       errors.push(

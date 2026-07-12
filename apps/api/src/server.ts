@@ -9,6 +9,7 @@ import {
 import { asc, desc, eq } from 'drizzle-orm';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { registerAnswerLibraryRoutes } from './answer-library.js';
 import { markApprovalCardSubmitted, registerDiscordRoutes } from './discord.js';
 import { ingestJob } from './ingest.js';
 import { processTask } from './process.js';
@@ -291,6 +292,10 @@ export function buildServer(deps: Deps): FastifyInstance {
       skippedNoAdapter,
     };
   });
+
+  // /answer-library CRUD (company-scoped answer library; x-api-key like all
+  // other routes via the server-wide preHandler above).
+  registerAnswerLibraryRoutes(app, deps);
 
   // POST /discord/interactions (signature-authenticated, raw-body parsed).
   registerDiscordRoutes(app, deps);

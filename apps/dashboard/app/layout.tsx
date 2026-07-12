@@ -61,6 +61,9 @@ export default function RootLayout({ children }: { children: ReactNode }) {
               <Link href="/" style={navLinkStyle}>
                 Tasks
               </Link>
+              <Link href="/answers" style={navLinkStyle}>
+                Answers
+              </Link>
               <Link href="/platforms" style={navLinkStyle}>
                 Platforms
               </Link>

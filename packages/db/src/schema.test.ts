@@ -83,6 +83,7 @@ describe('schema', () => {
   it('defines the answers table', () => {
     expect(getTableName(answers)).toBe('answers');
     expect(sqlColumnNames(answers)).toEqual([
+      'company',
       'created_at',
       'id',
       'normalized_label',
@@ -91,6 +92,23 @@ describe('schema', () => {
       'value',
     ]);
     expect(answers.value.notNull).toBe(true);
+    // '' = GLOBAL: NOT NULL with a '' default so pre-migration rows (and
+    // writers that omit the field) stay global rather than becoming a
+    // distinct NULL scope.
+    expect(answers.company.notNull).toBe(true);
+    expect(answers.company.default).toBe('');
+  });
+
+  it('enforces one answer per (company, normalized_label) on answers', () => {
+    const config = getTableConfig(answers);
+    const unique = config.indexes.find(
+      (idx) => idx.config.name === 'answers_company_normalized_label_uq',
+    );
+    expect(unique).toBeDefined();
+    expect(unique?.config.unique).toBe(true);
+    expect(
+      unique?.config.columns.map((c) => ('name' in c ? c.name : null)),
+    ).toEqual(['company', 'normalized_label']);
   });
 
   it('defines the api_calls table', () => {

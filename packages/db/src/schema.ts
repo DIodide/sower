@@ -73,14 +73,35 @@ export const events = pgTable(
   (table) => [index('events_task_id_idx').on(table.taskId)],
 );
 
-export const answers = pgTable('answers', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  questionLabel: text('question_label').notNull(),
-  normalizedLabel: text('normalized_label').notNull(),
-  value: jsonb('value').notNull(),
-  source: text('source').notNull().default('user'),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
-});
+export const answers = pgTable(
+  'answers',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    /**
+     * Normalized company key scoping this answer: the job's company
+     * lowercased and trimmed, or '' for a GLOBAL answer that applies to any
+     * company. Company-scoped answers (essays like "Why do you want to work
+     * here?") resolve ONLY for their company; a global answer resolves for
+     * any company but loses to a company-scoped match (see the user-bank
+     * stage in @sower/answers resolve.ts). Rows written before migration
+     * 0006 default to '' and stay global.
+     */
+    company: text('company').notNull().default(''),
+    questionLabel: text('question_label').notNull(),
+    normalizedLabel: text('normalized_label').notNull(),
+    value: jsonb('value').notNull(),
+    source: text('source').notNull().default('user'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  },
+  (table) => [
+    // One answer per (company, question): upserts key on this pair, so a
+    // concurrent double-save cannot create two rows for the same scope.
+    uniqueIndex('answers_company_normalized_label_uq').on(
+      table.company,
+      table.normalizedLabel,
+    ),
+  ],
+);
 
 export const apiCalls = pgTable(
   'api_calls',

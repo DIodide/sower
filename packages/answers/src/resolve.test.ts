@@ -3,8 +3,10 @@ import { describe, expect, it } from 'vitest';
 import type { AnswerBank } from './answer-bank.js';
 import type { Profile } from './profile.js';
 import {
+  normalizeCompanyKey,
   normalizeLabel,
   resolveAnswers,
+  selectBankValue,
   splitMissingByRequired,
 } from './resolve.js';
 
@@ -799,6 +801,194 @@ describe('answers bank', () => {
     });
     expect(result.resolved).toEqual([]);
     expect(result.missing).toEqual([question]);
+  });
+});
+
+describe('company-scoped answers bank', () => {
+  const essay = q({
+    id: 'q_essay',
+    label: 'Why do you want to work here?',
+    type: 'textarea' as const,
+  });
+  const essayLabel = 'why do you want to work here';
+  const acmeEntry = {
+    normalizedLabel: essayLabel,
+    value: 'Acme builds rockets and I love rockets.',
+    company: 'acme',
+  };
+  const globexEntry = {
+    normalizedLabel: essayLabel,
+    value: 'Globex has the best fission reactors.',
+    company: 'globex',
+  };
+  const globalEntry = {
+    normalizedLabel: essayLabel,
+    value: 'I admire the engineering culture.',
+  };
+
+  it('normalizeCompanyKey lowercases, trims, and maps absent to global', () => {
+    expect(normalizeCompanyKey('  Acme Corp  ')).toBe('acme corp');
+    expect(normalizeCompanyKey(undefined)).toBe('');
+    expect(normalizeCompanyKey('   ')).toBe('');
+  });
+
+  it('resolves a company-scoped answer for its company', () => {
+    const result = resolveAnswers([essay], profile, {
+      bank: [acmeEntry],
+      company: 'acme',
+    });
+    expect(result.missing).toEqual([]);
+    expect(result.resolved).toEqual([
+      { questionId: 'q_essay', source: 'bank', value: acmeEntry.value },
+    ]);
+  });
+
+  it("never leaks another company's answer: the other company's or global entry wins instead", () => {
+    // Same normalized label saved for acme, globex, and globally. Resolving
+    // for globex must pick globex's answer — never acme's.
+    const forGlobex = resolveAnswers([essay], profile, {
+      bank: [acmeEntry, globexEntry, globalEntry],
+      company: 'globex',
+    });
+    expect(forGlobex.resolved).toEqual([
+      { questionId: 'q_essay', source: 'bank', value: globexEntry.value },
+    ]);
+
+    // With only acme's answer stored, globex gets nothing (stays missing).
+    const onlyOther = resolveAnswers([essay], profile, {
+      bank: [acmeEntry],
+      company: 'globex',
+    });
+    expect(onlyOther.resolved).toEqual([]);
+    expect(onlyOther.missing).toEqual([essay]);
+
+    // With acme's and a global answer, globex falls back to the global one.
+    const withGlobal = resolveAnswers([essay], profile, {
+      bank: [acmeEntry, globalEntry],
+      company: 'globex',
+    });
+    expect(withGlobal.resolved).toEqual([
+      { questionId: 'q_essay', source: 'bank', value: globalEntry.value },
+    ]);
+  });
+
+  it('resolves a global answer when no company-scoped answer exists', () => {
+    const result = resolveAnswers([essay], profile, {
+      bank: [globalEntry],
+      company: 'acme',
+    });
+    expect(result.resolved).toEqual([
+      { questionId: 'q_essay', source: 'bank', value: globalEntry.value },
+    ]);
+  });
+
+  it('company-scoped wins over global for its company, regardless of bank order', () => {
+    for (const bank of [
+      [globalEntry, acmeEntry],
+      [acmeEntry, globalEntry],
+    ]) {
+      const result = resolveAnswers([essay], profile, {
+        bank,
+        company: 'acme',
+      });
+      expect(result.resolved).toEqual([
+        { questionId: 'q_essay', source: 'bank', value: acmeEntry.value },
+      ]);
+    }
+  });
+
+  it('a company-scoped answer never resolves for a job with no company', () => {
+    // Isolation invariant: without opts.company (or with ''), only global
+    // entries may answer — acme's essay must not fill an unknown-company job.
+    for (const company of [undefined, '']) {
+      const scopedOnly = resolveAnswers([essay], profile, {
+        bank: [acmeEntry],
+        company,
+      });
+      expect(scopedOnly.resolved).toEqual([]);
+      expect(scopedOnly.missing).toEqual([essay]);
+
+      const withGlobal = resolveAnswers([essay], profile, {
+        bank: [acmeEntry, globalEntry],
+        company,
+      });
+      expect(withGlobal.resolved).toEqual([
+        { questionId: 'q_essay', source: 'bank', value: globalEntry.value },
+      ]);
+    }
+  });
+
+  it('matches companies case- and whitespace-insensitively', () => {
+    const result = resolveAnswers([essay], profile, {
+      bank: [{ ...acmeEntry, company: '  Acme  ' }],
+      company: 'Acme',
+    });
+    expect(result.resolved).toEqual([
+      { questionId: 'q_essay', source: 'bank', value: acmeEntry.value },
+    ]);
+  });
+
+  it('company-scopes explicit document picks for file questions', () => {
+    const question = q({ id: 'resume', label: 'Resume/CV', type: 'file' });
+    const documents = [
+      {
+        kind: 'resume',
+        storagePath: 'documents/a/general.pdf',
+        filename: 'general.pdf',
+      },
+      {
+        kind: 'resume',
+        storagePath: 'documents/b/acme-tailored.pdf',
+        filename: 'acme-tailored.pdf',
+      },
+    ];
+    const bank = [
+      {
+        normalizedLabel: 'resume cv',
+        value: 'documents/b/acme-tailored.pdf',
+        company: 'acme',
+      },
+    ];
+
+    // Acme's pick applies for acme...
+    const forAcme = resolveAnswers([question], profile, {
+      documents,
+      bank,
+      company: 'acme',
+    });
+    expect(forAcme.resolved[0]?.value).toBe('documents/b/acme-tailored.pdf');
+
+    // ...but another company falls back to kind-matching (first resume).
+    const forGlobex = resolveAnswers([question], profile, {
+      documents,
+      bank,
+      company: 'globex',
+    });
+    expect(forGlobex.resolved[0]?.value).toBe('documents/a/general.pdf');
+  });
+
+  it('selectBankValue keeps first-entry-wins semantics within each scope', () => {
+    const first = {
+      normalizedLabel: essayLabel,
+      value: 'first',
+      company: 'acme',
+    };
+    const second = {
+      normalizedLabel: essayLabel,
+      value: 'second',
+      company: 'acme',
+    };
+    expect(selectBankValue(essay, [first, second], 'acme')).toBe('first');
+
+    const globalFirst = { normalizedLabel: essayLabel, value: 'g-first' };
+    const globalSecond = { normalizedLabel: essayLabel, value: 'g-second' };
+    expect(selectBankValue(essay, [globalFirst, globalSecond], undefined)).toBe(
+      'g-first',
+    );
+    // No matching label at all -> undefined (never fabricates).
+    expect(
+      selectBankValue(q({ id: 'q_other', label: 'Other question' }), [first]),
+    ).toBeUndefined();
   });
 });
 

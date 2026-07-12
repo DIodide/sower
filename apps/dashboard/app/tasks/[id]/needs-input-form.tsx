@@ -22,10 +22,13 @@ export function NeedsInputForm({
   taskId,
   views,
   documents,
+  company,
 }: {
   taskId: string;
   views: QuestionView[];
   documents: DocumentOption[];
+  /** The task's company (display name); '' when unknown. */
+  company?: string;
 }) {
   const [result, formAction, pending] = useActionState<
     ActionResult | null,
@@ -34,7 +37,12 @@ export function NeedsInputForm({
 
   return (
     <form action={formAction}>
-      <QuestionsPanel views={views} interactive documents={documents} />
+      <QuestionsPanel
+        views={views}
+        interactive
+        documents={documents}
+        scopeCompany={company}
+      />
       <p
         style={{
           margin: '1rem 0 0.5rem',
@@ -45,7 +53,15 @@ export function NeedsInputForm({
       >
         <strong style={{ color: '#93c5fd' }}>Save answers</strong> stores your
         answers on this task but leaves it here in Needs&nbsp;Input — nothing
-        re-runs, so you can fill things in over several visits.{' '}
+        re-runs, so you can fill things in over several visits.
+        {company ? (
+          <>
+            {' '}
+            Written (essay) answers are saved for{' '}
+            <strong style={{ color: '#c4b5fd' }}>{company}</strong> only unless
+            you tick “reuse for all companies”.
+          </>
+        ) : null}{' '}
         <strong style={{ color: '#4ade80' }}>Save &amp; re-run</strong> also
         re-processes the task: it re-checks every required question, and if
         they&rsquo;re all answered it advances to <em>Review</em> (where you
