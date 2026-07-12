@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [check, gitleaks]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-east1-docker.pkg.dev --quiet
+
+      - name: Build image
+        run: >
+          docker build
+          -t us-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/sower/api:${{ github.sha }}
+          -f Dockerfile .
+
+      - name: Push image
+        run: docker push us-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/sower/api:${{ github.sha }}
+
+      - name: Deploy to Cloud Run
+        run: >
+          gcloud run deploy sower-api
+          --image us-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/sower/api:${{ github.sha }}
+          --region us-east1
+          --project ${{ secrets.GCP_PROJECT_ID }}
+          --quiet

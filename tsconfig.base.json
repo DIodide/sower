@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "preserve",
+    "allowImportingTsExtensions": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@sower/core": ["./packages/core/src/index.ts"],
+      "@sower/db": ["./packages/db/src/index.ts"],
+      "@sower/queue": ["./packages/queue/src/index.ts"],
+      "@sower/platforms": ["./packages/platforms/src/index.ts"],
+      "@sower/answers": ["./packages/answers/src/index.ts"],
+      "@sower/sources": ["./packages/sources/src/index.ts"]
+    }
+  }
+}

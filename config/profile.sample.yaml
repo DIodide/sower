@@ -1,0 +1,31 @@
+# SAMPLE — copy to profile.yaml (gitignored) and fill with real data; real profiles NEVER get committed
+name:
+  first: Jane
+  last: Doe
+email: jane.doe@example.com
+phone: '+1 555 0100'
+location:
+  city: Princeton
+  state: NJ
+  country: USA
+links:
+  website: https://janedoe.example.com
+  github: https://github.com/janedoe
+  linkedin: https://www.linkedin.com/in/janedoe-example
+education:
+  - school: Example University
+    degree: BSE
+    major: Computer Science
+    gpa: 3.9
+    startDate: '2024-09'
+    endDate: '2028-05'
+work:
+  - company: Example Corp
+    title: Software Engineering Intern
+    startDate: '2025-06'
+    endDate: '2025-08'
+    description: Built internal tooling for data pipelines.
+authorization:
+  usWorkAuthorized: true
+  requiresSponsorship: false
+custom: {}

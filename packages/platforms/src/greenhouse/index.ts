@@ -1,0 +1,245 @@
+import type {
+  JobSpec,
+  PlatformRef,
+  Question,
+  QuestionOption,
+  ResolvedAnswer,
+} from '@sower/core';
+import type { PlatformAdapter } from '../contract.js';
+
+interface GreenhouseFieldValue {
+  label: string;
+  value: string | number;
+}
+
+interface GreenhouseField {
+  name: string;
+  type: string;
+  values?: GreenhouseFieldValue[] | null;
+}
+
+interface GreenhouseQuestion {
+  label: string;
+  required: boolean | null;
+  fields: GreenhouseField[];
+}
+
+interface GreenhouseComplianceBlock {
+  type: string;
+  description?: string | null;
+  questions?: GreenhouseQuestion[] | null;
+}
+
+interface GreenhouseDemographicAnswerOption {
+  id: number;
+  label: string;
+  free_form?: boolean;
+  decline_to_answer?: boolean;
+}
+
+/**
+ * Demographic questions use a different shape from regular questions: the
+ * type lives on the question itself and options are `answer_options` keyed
+ * by numeric id (regular/compliance selects key options by `value`, which
+ * for compliance questions is a string like '1'/'2'/'3').
+ */
+interface GreenhouseDemographicQuestion {
+  id: number;
+  label: string;
+  required: boolean | null;
+  type: string;
+  answer_options?: GreenhouseDemographicAnswerOption[] | null;
+}
+
+interface GreenhouseDemographicSection {
+  header?: string | null;
+  description?: string | null;
+  questions?: GreenhouseDemographicQuestion[] | null;
+}
+
+interface GreenhouseJobPayload {
+  title: string;
+  company_name?: string | null;
+  location?: { name?: string | null } | null;
+  absolute_url: string;
+  questions?: GreenhouseQuestion[] | null;
+  location_questions?: GreenhouseQuestion[] | null;
+  compliance?: GreenhouseComplianceBlock[] | null;
+  demographic_questions?: GreenhouseDemographicSection | null;
+}
+
+const FIELD_TYPE_MAP: Record<string, Question['type']> = {
+  input_text: 'text',
+  textarea: 'textarea',
+  input_file: 'file',
+  multi_value_single_select: 'select',
+  multi_value_multi_select: 'multiselect',
+};
+
+function mapFieldType(
+  rawType: string,
+  options: QuestionOption[],
+): Question['type'] {
+  const mapped = FIELD_TYPE_MAP[rawType];
+  if (mapped) {
+    return mapped;
+  }
+  // Unknown field types that carry options must stay 'select' so answer
+  // resolution keeps its option-matching protection; only option-less
+  // unknowns degrade to free text.
+  return options.length > 0 ? 'select' : 'text';
+}
+
+function toOptions(values: GreenhouseFieldValue[] | null | undefined) {
+  return (values ?? []).map(
+    (value): QuestionOption => ({ label: value.label, value: value.value }),
+  );
+}
+
+function toQuestions(raw: GreenhouseQuestion): Question[] {
+  // input_hidden fields (e.g. longitude/latitude on location questions) are
+  // machine-populated and never human-facing — skip them entirely.
+  const visibleFields = raw.fields.filter(
+    (field) => field.type !== 'input_hidden',
+  );
+  if (visibleFields.length === 0) {
+    if (raw.fields.length > 0) {
+      console.debug(
+        `[sower] greenhouse: omitting hidden-only question ${JSON.stringify(
+          raw.label,
+        )} (fields: ${raw.fields.map((field) => field.name).join(', ')})`,
+      );
+    }
+    return [];
+  }
+  // The first visible field is the question itself; additional visible fields
+  // (e.g. resume_text alongside resume) are optional alternate ways to answer.
+  return visibleFields.map((field, index): Question => {
+    const isAlternate = index > 0;
+    const options = toOptions(field.values);
+    const question: Question = {
+      id: field.name,
+      label: isAlternate
+        ? `${raw.label} (alternate: ${field.name})`
+        : raw.label,
+      type: mapFieldType(field.type, options),
+      required: isAlternate ? false : raw.required === true,
+    };
+    if (options.length > 0) {
+      question.options = options;
+    }
+    return question;
+  });
+}
+
+function toDemographicQuestion(raw: GreenhouseDemographicQuestion): Question {
+  const options = (raw.answer_options ?? []).map(
+    (option): QuestionOption => ({ label: option.label, value: option.id }),
+  );
+  const type = mapFieldType(raw.type, options);
+  const question: Question = {
+    // Mirror greenhouse's own field-name convention: multi-selects get a
+    // trailing '[]' (compare question_67165646[] in regular questions).
+    id: `demographic_question_${raw.id}${type === 'multiselect' ? '[]' : ''}`,
+    label: raw.label,
+    type,
+    required: raw.required === true,
+  };
+  if (options.length > 0) {
+    question.options = options;
+  }
+  return question;
+}
+
+export class GreenhouseAdapter implements PlatformAdapter {
+  readonly platform = 'greenhouse' as const;
+
+  async discover(ref: PlatformRef, url: string): Promise<JobSpec> {
+    const { tenant, externalId } = ref;
+    if (!tenant || !externalId) {
+      throw new Error(
+        `greenhouse discover requires a board tenant and job id, got tenant=${JSON.stringify(
+          tenant,
+        )} externalId=${JSON.stringify(externalId)} for url ${url}`,
+      );
+    }
+
+    const endpoint = `https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(
+      tenant,
+    )}/jobs/${encodeURIComponent(externalId)}?questions=true`;
+    const response = await fetch(endpoint, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) {
+      throw new Error(
+        `greenhouse job fetch failed with status ${response.status} for ${endpoint}`,
+      );
+    }
+    const payload = (await response.json()) as GreenhouseJobPayload;
+
+    const rawQuestions = [
+      ...(payload.questions ?? []),
+      ...(payload.location_questions ?? []),
+      ...(payload.compliance ?? []).flatMap((block) => block.questions ?? []),
+    ];
+    const questions: Question[] = [];
+    for (const raw of rawQuestions) {
+      questions.push(...toQuestions(raw));
+    }
+    for (const raw of payload.demographic_questions?.questions ?? []) {
+      questions.push(toDemographicQuestion(raw));
+    }
+
+    const spec: JobSpec = {
+      platform: 'greenhouse',
+      tenant,
+      externalId,
+      title: payload.title,
+      applyUrl: payload.absolute_url,
+      questions,
+    };
+    const company = payload.company_name || tenant;
+    if (company) {
+      spec.company = company;
+    }
+    const location = payload.location?.name;
+    if (location) {
+      spec.location = location;
+    }
+    return spec;
+  }
+
+  buildSubmitPayload(
+    _spec: JobSpec,
+    answers: ResolvedAnswer[],
+  ): Record<string, unknown> {
+    const payload: Record<string, unknown> = {};
+    for (const answer of answers) {
+      if (answer.value === null) {
+        continue;
+      }
+      payload[answer.questionId] = answer.value;
+    }
+    return payload;
+  }
+
+  /**
+   * GUARDRAIL: never actually posts an application. Throws unless
+   * SOWER_SUBMIT_ENABLED === 'true'; when enabled it only logs the dry-run
+   * payload and returns { dryRun: true }. No HTTP request is ever made here.
+   */
+  async submit(
+    spec: JobSpec,
+    answers: ResolvedAnswer[],
+  ): Promise<{ dryRun: boolean }> {
+    if (process.env.SOWER_SUBMIT_ENABLED !== 'true') {
+      throw new Error('submit disabled: SOWER_SUBMIT_ENABLED guardrail');
+    }
+    const payload = this.buildSubmitPayload(spec, answers);
+    console.warn(
+      '[sower] DRY RUN — greenhouse submit (no request was sent):',
+      JSON.stringify({ applyUrl: spec.applyUrl, payload }, null, 2),
+    );
+    return { dryRun: true };
+  }
+}
