@@ -183,24 +183,33 @@ function computeProfileValue(
   label: string,
   profile: Profile,
 ): string | null {
-  // 1) Exact match on greenhouse standard field ids.
+  // 1) Exact match on stable platform standard-field ids. Greenhouse uses
+  //    first_name/last_name/email/phone; Ashby uses _systemfield_* paths whose
+  //    label ("Legal Name", a long location prompt) the dictionary would miss.
   switch (question.id) {
     case 'first_name':
       return profile.name.first;
     case 'last_name':
       return profile.name.last;
+    case '_systemfield_name':
+      return `${profile.name.first} ${profile.name.last}`;
     case 'email':
+    case '_systemfield_email':
       return profile.email;
     case 'phone':
+    case '_systemfield_phone':
       return profile.phone;
     case 'resume':
     case 'cover_letter':
+    case '_systemfield_resume':
+    case '_systemfield_cover_letter':
       // File fields carry no profile text value.
       return null;
     case 'location':
     case 'city':
     case 'candidate_location':
     case 'job_application_location':
+    case '_systemfield_location':
       return cityState(profile);
     default:
       break;

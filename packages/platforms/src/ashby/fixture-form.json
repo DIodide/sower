@@ -1,0 +1,154 @@
+{
+  "sections": [
+    {
+      "title": null,
+      "fieldEntries": [
+        {
+          "field": {
+            "id": "8cc43f6b-2f13-4519-90f4-c557f6875e1c",
+            "path": "_systemfield_name",
+            "humanReadablePath": "Name",
+            "title": "Legal Name",
+            "isNullable": false,
+            "isPrivate": false,
+            "isDeactivated": false,
+            "isMany": false,
+            "metadata": {},
+            "type": "String",
+            "__autoSerializationID": "StringField"
+          },
+          "isRequired": true
+        },
+        {
+          "field": {
+            "id": "a9ce219d-28a1-4653-a03f-a55e147fccf1",
+            "path": "_systemfield_email",
+            "humanReadablePath": "Email",
+            "title": "Email",
+            "isNullable": false,
+            "isPrivate": false,
+            "isDeactivated": false,
+            "isMany": false,
+            "metadata": {},
+            "type": "Email",
+            "__autoSerializationID": "EmailField"
+          },
+          "isRequired": true
+        },
+        {
+          "field": {
+            "id": "c6e1c4d1-4725-4d69-9f89-817a9a9e12ba",
+            "path": "c6e1c4d1-4725-4d69-9f89-817a9a9e12ba",
+            "humanReadablePath": "",
+            "title": "Phone",
+            "isNullable": false,
+            "isPrivate": false,
+            "isDeactivated": false,
+            "isMany": false,
+            "metadata": {},
+            "type": "Phone",
+            "__autoSerializationID": "PhoneField"
+          },
+          "isRequired": true
+        },
+        {
+          "field": {
+            "id": "03d8f76a-f329-4d4b-b52f-72fea2a8ccff",
+            "path": "_systemfield_location",
+            "humanReadablePath": "Location",
+            "title": "Where do you plan on working from (for payroll tax purposes)?",
+            "isNullable": false,
+            "isPrivate": false,
+            "isDeactivated": false,
+            "isMany": false,
+            "metadata": {},
+            "type": "Location",
+            "locationTypes": ["Country", "Region", "City"],
+            "__autoSerializationID": "LocationField"
+          },
+          "isRequired": true
+        },
+        {
+          "field": {
+            "id": "c966ce61-dbfb-4355-9bbf-9aa87199b28e",
+            "path": "_systemfield_resume",
+            "humanReadablePath": "Resume",
+            "title": "Resume",
+            "isNullable": false,
+            "isPrivate": false,
+            "isDeactivated": false,
+            "isMany": false,
+            "metadata": {},
+            "type": "File",
+            "__autoSerializationID": "FileField"
+          },
+          "isRequired": true
+        },
+        {
+          "field": {
+            "id": "cada42c9-d96d-4eaf-9577-8a2dfd8e739c",
+            "path": "cada42c9-d96d-4eaf-9577-8a2dfd8e739c",
+            "humanReadablePath": "",
+            "title": "LinkedIn Profile",
+            "isNullable": false,
+            "isPrivate": false,
+            "isDeactivated": false,
+            "isMany": false,
+            "metadata": {},
+            "type": "String",
+            "__autoSerializationID": "StringField"
+          },
+          "isRequired": true
+        },
+        {
+          "field": {
+            "id": "9f6739f5-0381-4feb-b5ee-5821dfe9515c",
+            "path": "d34c05b6-7bb8-4c9e-90e3-19d7b8a96738",
+            "humanReadablePath": "",
+            "title": "Do you have at least 2+ years in technical consulting, solutions engineering, implementation, or a similar customer-facing technical role, ideally in a SaaS or fintech environment?",
+            "isNullable": false,
+            "isPrivate": false,
+            "isDeactivated": false,
+            "isMany": false,
+            "metadata": {},
+            "type": "Boolean",
+            "__autoSerializationID": "BooleanField"
+          },
+          "isRequired": true
+        },
+        {
+          "field": {
+            "id": "0f4f458e-e8f7-489f-982c-07ff0d845505",
+            "path": "c86941ec-fd4e-4308-a44d-2c3b7f4694b1",
+            "humanReadablePath": "",
+            "title": "Have you worked with with ERP systems (e.g. NetSuite, Sage Intacct, Microsoft Dynamics, Oracle Fusion) and finance/accounting workflows?",
+            "isNullable": false,
+            "isPrivate": false,
+            "isDeactivated": false,
+            "isMany": false,
+            "metadata": {},
+            "type": "Boolean",
+            "__autoSerializationID": "BooleanField"
+          },
+          "isRequired": true
+        },
+        {
+          "field": {
+            "id": "8ebe62f4-6deb-4cb3-8e22-6117c82969c9",
+            "path": "27a0cc97-a223-48f0-b591-e7d164d316f2",
+            "humanReadablePath": "",
+            "title": "At Ramp, we love using AI to work smarter. Tell us about a time you used or built something with AI that you're genuinely proud of. What did you make, and what tools did you use?",
+            "isNullable": false,
+            "isPrivate": false,
+            "isDeactivated": false,
+            "isMany": false,
+            "metadata": {},
+            "type": "LongText",
+            "__autoSerializationID": "LongTextField"
+          },
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}

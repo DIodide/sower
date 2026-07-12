@@ -1119,3 +1119,42 @@ describe('resolveAnswers — jsonb numeric coercion', () => {
     expect(result.resolved[0]?.value).toEqual(['731269094']);
   });
 });
+
+describe('resolveAnswers — Ashby system field ids', () => {
+  it('resolves Ashby _systemfield_* standard fields from the profile', () => {
+    const questions: Question[] = [
+      q({ id: '_systemfield_name', label: 'Legal Name' }),
+      q({ id: '_systemfield_email', label: 'Email' }),
+      q({
+        id: '_systemfield_location',
+        label: 'Where do you plan on working from?',
+      }),
+    ];
+    const result = resolveAnswers(questions, profile);
+    expect(result.missing).toEqual([]);
+    const byId = Object.fromEntries(
+      result.resolved.map((r) => [r.questionId, r.value]),
+    );
+    expect(byId._systemfield_name).toBe('Jane Doe');
+    expect(byId._systemfield_email).toBe('jane.doe@example.com');
+    expect(byId._systemfield_location).toBe('Princeton, NJ');
+  });
+
+  it('resolves an Ashby resume file (_systemfield_resume) from a document', () => {
+    const question = q({
+      id: '_systemfield_resume',
+      label: 'Resume',
+      type: 'file',
+    });
+    const result = resolveAnswers([question], profile, {
+      documents: [
+        { kind: 'resume', storagePath: 'documents/a/r.pdf', filename: 'r.pdf' },
+      ],
+    });
+    expect(result.resolved[0]).toEqual({
+      questionId: '_systemfield_resume',
+      source: 'document',
+      value: 'documents/a/r.pdf',
+    });
+  });
+});

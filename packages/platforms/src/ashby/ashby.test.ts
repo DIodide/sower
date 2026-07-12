@@ -3,12 +3,16 @@ import type { JobSpec, PlatformRef, ResolvedAnswer } from '@sower/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SubmitFile } from '../contract.js';
 import type { ApiCallRecord } from '../recorder.js';
-import { AshbyAdapter, mapAshbyApplicationForm } from './index.js';
+import {
+  AshbyAdapter,
+  fetchAshbyApplicationForm,
+  mapAshbyApplicationForm,
+} from './index.js';
 
 // Raw response from GET api.ashbyhq.com/posting-api/job-board/linear?includeCompensation=true
-// (fetched live 2026-07; trimmed to 3 jobs, descriptions truncated). The
-// public posting API exposes NO applicationForm for any org we probed
-// (ramp, notion, openai, linear) — so real discoveries yield 0 questions.
+// (fetched live 2026-07; trimmed to 3 jobs, descriptions truncated). This
+// metadata endpoint carries NO applicationForm, so discover falls back to the
+// public job-board GraphQL for the real form (see fixture-form.json).
 const fixture = JSON.parse(
   readFileSync(new URL('./fixture-linear.json', import.meta.url), 'utf8'),
 ) as { jobs: Record<string, unknown>[]; apiVersion: number };
@@ -52,10 +56,15 @@ describe('AshbyAdapter.discover', () => {
 
   it('requests the documented posting API with includeCompensation=true', async () => {
     await adapter.discover(ref, url);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock).toHaveBeenCalledWith(
+    // First call is the posting-api metadata endpoint; because that endpoint
+    // carries no form, a second call to the GraphQL form endpoint follows.
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
       'https://api.ashbyhq.com/posting-api/job-board/linear?includeCompensation=true',
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(fetchMock.mock.calls[1]?.[0]).toContain(
+      'jobs.ashbyhq.com/api/non-user-graphql',
     );
   });
 
@@ -206,9 +215,35 @@ describe('AshbyAdapter.discover', () => {
     await expect(adapter.discover(ref, url)).rejects.toThrow(/404/);
   });
 
-  it('passes the recorder through recordedFetch and records exactly one discover call', async () => {
+  it('passes the recorder through recordedFetch and records the discover call', async () => {
+    // Give the metadata payload a form so discover needs no second GraphQL
+    // fetch — this isolates the recorder behavior on the primary call.
+    const withForm = {
+      jobs: [
+        {
+          ...fixture.jobs[0],
+          applicationForm: {
+            sections: [
+              {
+                fieldEntries: [
+                  {
+                    isRequired: true,
+                    field: {
+                      path: '_systemfield_name',
+                      title: 'Name',
+                      type: 'String',
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ],
+      apiVersion: 1,
+    };
     fetchMock.mockResolvedValue(
-      new Response(JSON.stringify(fixture), {
+      new Response(JSON.stringify(withForm), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       }),
@@ -481,5 +516,67 @@ describe('AshbyAdapter.submit guardrail', () => {
     // Redaction: the log is a field-key summary, never applicant values.
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('fields=['));
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('Ashby application form (public GraphQL)', () => {
+  const formFixture = JSON.parse(
+    readFileSync(new URL('./fixture-form.json', import.meta.url), 'utf8'),
+  ) as unknown;
+
+  it('maps the real GraphQL form fixture to typed questions', () => {
+    const questions = mapAshbyApplicationForm(formFixture);
+    expect(questions.length).toBe(9);
+    const byId = Object.fromEntries(questions.map((q) => [q.id, q]));
+    expect(byId._systemfield_name?.type).toBe('text');
+    expect(byId._systemfield_email?.type).toBe('text');
+    expect(byId._systemfield_resume?.type).toBe('file');
+    // Boolean fields become two-option Yes/No selects (faithful, not invented).
+    const booleans = questions.filter(
+      (q) => q.type === 'select' && q.options?.length === 2,
+    );
+    expect(booleans.length).toBeGreaterThanOrEqual(1);
+    for (const b of booleans) {
+      expect(b.options?.map((o) => o.label).sort()).toEqual(['No', 'Yes']);
+    }
+    // Every question has a non-empty id (real Ashby paths) and label.
+    for (const q of questions) {
+      expect(q.id.length).toBeGreaterThan(0);
+      expect(q.label.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('fetchAshbyApplicationForm extracts the form from a GraphQL response', async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            data: { jobPosting: { applicationForm: formFixture } },
+          }),
+          { status: 200 },
+        ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const form = await fetchAshbyApplicationForm('ramp', 'posting-1');
+    expect(mapAshbyApplicationForm(form).length).toBe(9);
+    // POSTs the GraphQL endpoint with the tenant + posting id in variables.
+    const [calledUrl, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(calledUrl).toContain('jobs.ashbyhq.com/api/non-user-graphql');
+    expect(init.method).toBe('POST');
+    expect(String(init.body)).toContain('ramp');
+    expect(String(init.body)).toContain('posting-1');
+    vi.unstubAllGlobals();
+  });
+
+  it('fetchAshbyApplicationForm returns undefined on a non-200 (never fabricates)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('nope', { status: 500 })),
+    );
+    expect(await fetchAshbyApplicationForm('ramp', 'x')).toBeUndefined();
+    vi.unstubAllGlobals();
   });
 });

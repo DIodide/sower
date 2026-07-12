@@ -187,6 +187,49 @@ export function mapAshbyApplicationForm(form: unknown): Question[] {
   return questions;
 }
 
+/**
+ * The public Ashby job board (jobs.ashbyhq.com) renders each posting's
+ * application form from this GraphQL endpoint — the same request the browser
+ * makes, no API key. `field` is a JSON scalar carrying {path,title,type,
+ * selectableValues,...}; mapAshbyApplicationForm already understands the
+ * {sections:[{fieldEntries:[{field,isRequired}]}]} shape. Returns undefined on
+ * any failure (never fabricates questions).
+ */
+const ASHBY_FORM_QUERY =
+  'query ApiJobPosting($organizationHostedJobsPageName: String!, $jobPostingId: String!) { jobPosting(organizationHostedJobsPageName: $organizationHostedJobsPageName, jobPostingId: $jobPostingId) { applicationForm { sections { title fieldEntries { field isRequired } } } } }';
+
+export async function fetchAshbyApplicationForm(
+  tenant: string,
+  postingId: string,
+  recorder?: Recorder,
+): Promise<unknown> {
+  const response = await recordedFetch(
+    recorder,
+    'discover_form',
+    'https://jobs.ashbyhq.com/api/non-user-graphql?op=ApiJobPosting',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        operationName: 'ApiJobPosting',
+        variables: {
+          organizationHostedJobsPageName: tenant,
+          jobPostingId: postingId,
+        },
+        query: ASHBY_FORM_QUERY,
+      }),
+      signal: AbortSignal.timeout(15_000),
+    },
+  );
+  if (!response.ok) {
+    return undefined;
+  }
+  const payload = (await response.json()) as {
+    data?: { jobPosting?: { applicationForm?: unknown } | null } | null;
+  };
+  return payload.data?.jobPosting?.applicationForm ?? undefined;
+}
+
 export class AshbyAdapter implements PlatformAdapter {
   readonly platform = 'ashby' as const;
 
@@ -229,11 +272,22 @@ export class AshbyAdapter implements PlatformAdapter {
       questions = mapAshbyApplicationForm(posting.applicationForm);
     }
     if (questions.length === 0) {
-      // NOTE: the public posting API does not expose the application form —
-      // we return zero questions rather than fabricating any; the task will
-      // park NEEDS_INPUT downstream.
+      // The posting-api metadata endpoint omits the form; fetch it from the
+      // public job-board GraphQL (same request the hosted board makes).
+      const form = await fetchAshbyApplicationForm(
+        tenant,
+        externalId,
+        opts?.recorder,
+      );
+      if (form !== undefined) {
+        questions = mapAshbyApplicationForm(form);
+      }
+    }
+    if (questions.length === 0) {
+      // Both sources yielded no form — return zero questions rather than
+      // fabricating any (truthfulness); the task parks NEEDS_INPUT downstream.
       console.info(
-        `[sower] ashby: no application form available from the public posting API for ${tenant}/${externalId}; returning 0 questions`,
+        `[sower] ashby: no application form available for ${tenant}/${externalId}; returning 0 questions`,
       );
     }
 
