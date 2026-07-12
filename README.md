@@ -88,7 +88,7 @@ sower-api` in `us-east1`.
    names, emails, or keys anywhere; `.env` is gitignored and `.env.example`
    holds placeholders only.
 4. **All mutating HTTP routes require `x-api-key === INGEST_API_KEY`**
-   (Fastify preHandler; only `GET /healthz` is exempt).
+   (Fastify preHandler; only `GET /health` is exempt).
 
 ### Accepted risks
 

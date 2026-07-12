@@ -44,9 +44,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> Waiting for API healthz"
+echo "==> Waiting for API health"
 for attempt in $(seq 1 60); do
-  if curl -fsS "$API_URL/healthz" >/dev/null 2>&1; then
+  if curl -fsS "$API_URL/health" >/dev/null 2>&1; then
     break
   fi
   if [ "$attempt" -eq 60 ]; then

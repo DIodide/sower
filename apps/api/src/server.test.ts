@@ -139,10 +139,10 @@ beforeEach(() => {
 });
 
 describe('buildServer', () => {
-  it('GET /healthz responds 200 without an api key', async () => {
+  it('GET /health responds 200 without an api key', async () => {
     const { deps } = createDeps(createFakeDb());
     const app = buildServer(deps);
-    const res = await app.inject({ method: 'GET', url: '/healthz' });
+    const res = await app.inject({ method: 'GET', url: '/health' });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true, env: 'test' });
   });

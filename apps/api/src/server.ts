@@ -41,10 +41,10 @@ export function buildServer(deps: Deps): FastifyInstance {
           },
   });
 
-  // Every route except GET /healthz requires the ingest API key.
+  // Every route except GET /health requires the ingest API key.
   app.addHook('preHandler', async (request, reply) => {
     const path = request.url.split('?')[0] ?? request.url;
-    if (request.method === 'GET' && path === '/healthz') {
+    if (request.method === 'GET' && path === '/health') {
       return;
     }
     const apiKey = request.headers['x-api-key'];
@@ -57,7 +57,7 @@ export function buildServer(deps: Deps): FastifyInstance {
     }
   });
 
-  app.get('/healthz', async () => ({ ok: true, env: deps.config.SOWER_ENV }));
+  app.get('/health', async () => ({ ok: true, env: deps.config.SOWER_ENV }));
 
   app.get('/tasks', async () => {
     const tasks = await deps.db
