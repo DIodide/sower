@@ -69,6 +69,10 @@ describe('AshbyAdapter.discover', () => {
   });
 
   it('maps the posting found by id to a JobSpec', async () => {
+    const job0 = fixture.jobs[0] as {
+      descriptionHtml: string;
+      descriptionPlain: string;
+    };
     const spec = await adapter.discover(ref, url);
     expect(spec).toEqual({
       platform: 'ashby',
@@ -80,6 +84,9 @@ describe('AshbyAdapter.discover', () => {
       applyUrl:
         'https://jobs.ashbyhq.com/linear/d3bc1ced-3ce4-4086-a050-555055dbb1ff/application',
       questions: [],
+      // descriptionHtml/descriptionPlain come straight from the posting API.
+      descriptionHtml: job0.descriptionHtml,
+      description: job0.descriptionPlain,
     });
   });
 

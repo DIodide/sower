@@ -13,6 +13,26 @@ export interface SubmitFile {
   filename: string;
 }
 
+/** Options for a real (double-gated) submit. */
+export interface SubmitOptions {
+  recorder?: Recorder;
+  /**
+   * Reads the bytes of a stored document by its storage path so they can be
+   * attached as multipart file parts. When absent, file parts are still added
+   * but carry no bytes (the double gate below still governs whether any POST
+   * happens at all).
+   */
+  getFileBytes?: (storagePath: string) => Promise<Uint8Array>;
+}
+
+/**
+ * Result of submit(). Ashby/Lever stay dry-run only ({ dryRun: boolean }); a
+ * double-gated real POST returns { submitted: true, status, dryRun: false }.
+ */
+export type SubmitResult =
+  | { dryRun: boolean }
+  | { submitted: true; status: number; dryRun: false };
+
 /** Common interface every ATS adapter implements. */
 export interface PlatformAdapter {
   platform: Platform;
@@ -41,10 +61,14 @@ export interface PlatformAdapter {
   ): Promise<{ dryRun: true; payload: Record<string, unknown> }>;
   /**
    * Submit an application. GUARDRAIL: implementations must throw unless
-   * SOWER_SUBMIT_ENABLED === 'true', and even then must only dry-run.
+   * SOWER_SUBMIT_ENABLED === 'true'. Dry-run-only adapters (ashby/lever) never
+   * POST; the double-gated real path (greenhouse via realSubmit) additionally
+   * requires an explicit SOWER_SUBMIT_TARGET_URL and never uses spec.applyUrl.
    */
   submit(
     spec: JobSpec,
     answers: ResolvedAnswer[],
-  ): Promise<{ dryRun: boolean }>;
+    files?: SubmitFile[],
+    opts?: SubmitOptions,
+  ): Promise<SubmitResult>;
 }

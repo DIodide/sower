@@ -5,8 +5,15 @@ import type {
   QuestionOption,
   ResolvedAnswer,
 } from '@sower/core';
-import type { PlatformAdapter, SubmitFile } from '../contract.js';
+import type {
+  PlatformAdapter,
+  SubmitFile,
+  SubmitOptions,
+  SubmitResult,
+} from '../contract.js';
+import { htmlEntityEncodedToPlainText } from '../description.js';
 import { type Recorder, recordedFetch, safeRecord } from '../recorder.js';
+import { realSubmit } from '../submit-common.js';
 
 interface GreenhouseFieldValue {
   label: string;
@@ -63,6 +70,8 @@ interface GreenhouseJobPayload {
   company_name?: string | null;
   location?: { name?: string | null } | null;
   absolute_url: string;
+  /** HTML-entity-encoded HTML description (present only with ?content=true). */
+  content?: string | null;
   questions?: GreenhouseQuestion[] | null;
   location_questions?: GreenhouseQuestion[] | null;
   compliance?: GreenhouseComplianceBlock[] | null;
@@ -171,7 +180,7 @@ export class GreenhouseAdapter implements PlatformAdapter {
 
     const endpoint = `https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(
       tenant,
-    )}/jobs/${encodeURIComponent(externalId)}?questions=true`;
+    )}/jobs/${encodeURIComponent(externalId)}?questions=true&content=true`;
     const response = await recordedFetch(opts?.recorder, 'discover', endpoint, {
       signal: AbortSignal.timeout(10_000),
     });
@@ -203,13 +212,18 @@ export class GreenhouseAdapter implements PlatformAdapter {
       applyUrl: payload.absolute_url,
       questions,
     };
-    const company = payload.company_name || tenant;
+    const company = payload.company_name ?? spec.company ?? tenant;
     if (company) {
       spec.company = company;
     }
     const location = payload.location?.name;
     if (location) {
       spec.location = location;
+    }
+    // Greenhouse `content` is HTML-entity-encoded HTML (needs ?content=true).
+    if (payload.content) {
+      spec.descriptionHtml = payload.content;
+      spec.description = htmlEntityEncodedToPlainText(payload.content);
     }
     return spec;
   }
@@ -262,22 +276,19 @@ export class GreenhouseAdapter implements PlatformAdapter {
   }
 
   /**
-   * GUARDRAIL: never actually posts an application. Throws unless
-   * SOWER_SUBMIT_ENABLED === 'true'; when enabled it only logs the dry-run
-   * payload and returns { dryRun: true }. No HTTP request is ever made here.
+   * DOUBLE-GATED real submit. Delegates to realSubmit, which throws unless
+   * BOTH SOWER_SUBMIT_ENABLED === 'true' AND an explicit
+   * SOWER_SUBMIT_TARGET_URL are set; only then does it POST a multipart body
+   * to that target. It NEVER falls back to spec.applyUrl, so an accidental
+   * real-employer submission is structurally impossible.
    */
   async submit(
     spec: JobSpec,
     answers: ResolvedAnswer[],
-  ): Promise<{ dryRun: boolean }> {
-    if (process.env.SOWER_SUBMIT_ENABLED !== 'true') {
-      throw new Error('submit disabled: SOWER_SUBMIT_ENABLED guardrail');
-    }
+    files: SubmitFile[] = [],
+    opts?: SubmitOptions,
+  ): Promise<SubmitResult> {
     const payload = this.buildSubmitPayload(spec, answers);
-    console.warn(
-      '[sower] DRY RUN — greenhouse submit (no request was sent):',
-      JSON.stringify({ applyUrl: spec.applyUrl, payload }, null, 2),
-    );
-    return { dryRun: true };
+    return realSubmit(this.platform, spec, payload, files, opts);
   }
 }

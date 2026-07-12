@@ -7,6 +7,7 @@ import {
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 
@@ -113,6 +114,38 @@ export const documents = pgTable('documents', {
   sizeBytes: integer('size_bytes'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
+
+export const jobDescriptions = pgTable(
+  'job_descriptions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    jobId: uuid('job_id')
+      .notNull()
+      .references(() => jobs.id),
+    /**
+     * Monotonic per-job version, starting at 1. process.ts inserts a new
+     * version (max(version)+1) only when a re-discover yields a description
+     * whose content_hash differs from the latest stored row, so the history
+     * captures every change without duplicating unchanged re-fetches.
+     */
+    version: integer('version').notNull(),
+    // Plain-text description (JobSpec.description) as fetched from the source.
+    content: text('content').notNull(),
+    // sha256 of `content`, used to detect whether a re-discover changed it.
+    contentHash: text('content_hash').notNull(),
+    fetchedAt: timestamp('fetched_at', { withTimezone: true }).defaultNow(),
+  },
+  (table) => [
+    // The task detail page reads the latest description by job_id.
+    index('job_descriptions_job_id_idx').on(table.jobId),
+    // One row per (job, version): a concurrent double-discover can't create
+    // two rows for the same version.
+    uniqueIndex('job_descriptions_job_id_version_uq').on(
+      table.jobId,
+      table.version,
+    ),
+  ],
+);
 
 export const accounts = pgTable('accounts', {
   id: uuid('id').primaryKey().defaultRandom(),

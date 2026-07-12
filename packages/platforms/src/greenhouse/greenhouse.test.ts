@@ -75,11 +75,11 @@ describe('GreenhouseAdapter.discover', () => {
     vi.restoreAllMocks();
   });
 
-  it('requests the boards API with questions=true', async () => {
+  it('requests the boards API with questions=true and content=true', async () => {
     await adapter.discover(ref, url);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://boards-api.greenhouse.io/v1/boards/stripe/jobs/7954688?questions=true',
+      'https://boards-api.greenhouse.io/v1/boards/stripe/jobs/7954688?questions=true&content=true',
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
   });
@@ -93,6 +93,35 @@ describe('GreenhouseAdapter.discover', () => {
     expect(spec.company).toBe('Stripe');
     expect(spec.location).toBe('San Francisco, CA');
     expect(spec.applyUrl).toBe('https://stripe.com/jobs/search?gh_jid=7954688');
+  });
+
+  it('extracts descriptionHtml (raw content) and plain-text description', async () => {
+    const spec = await adapter.discover(ref, url);
+    // descriptionHtml is the raw (entity-encoded) content, verbatim.
+    expect(spec.descriptionHtml).toBe(fixture.content as string);
+    // description is decoded, tag-stripped, whitespace-collapsed plain text.
+    expect(spec.description).toContain(
+      'Stripe is a financial infrastructure platform for businesses',
+    );
+    // No residual tags or entities leak into the plain text.
+    expect(spec.description).not.toMatch(/<[^>]+>/);
+    expect(spec.description).not.toContain('&lt;');
+    expect(spec.description).not.toContain('&amp;');
+  });
+
+  it('omits description fields when the payload carries no content', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        title: 'No content job',
+        absolute_url: 'https://example.com/jobs/1',
+        questions: [],
+      }),
+    });
+    const spec = await adapter.discover(ref, url);
+    expect(spec.description).toBeUndefined();
+    expect(spec.descriptionHtml).toBeUndefined();
   });
 
   it('flattens questions, location_questions, and compliance questions', async () => {
@@ -244,7 +273,7 @@ describe('GreenhouseAdapter.discover', () => {
     expect(call).toMatchObject({
       phase: 'discover',
       method: 'GET',
-      url: 'https://boards-api.greenhouse.io/v1/boards/stripe/jobs/7954688?questions=true',
+      url: 'https://boards-api.greenhouse.io/v1/boards/stripe/jobs/7954688?questions=true&content=true',
       responseStatus: 200,
     });
     expect(call.durationMs).toBeGreaterThanOrEqual(0);
@@ -616,11 +645,14 @@ describe('GreenhouseAdapter.dryRunSubmit', () => {
   });
 });
 
-describe('GreenhouseAdapter.submit guardrail', () => {
+describe('GreenhouseAdapter.submit — double-gated realSubmit', () => {
   const adapter = new GreenhouseAdapter();
   const answers: ResolvedAnswer[] = [
     { questionId: 'first_name', source: 'profile', value: 'Jane' },
+    { questionId: 'question_67165646[]', source: 'bank', value: ['US', 'CA'] },
   ];
+  // A deliberately fake, local-only target — no real employer URL is ever used.
+  const MOCK_TARGET = 'http://localhost:9999/mock-submit';
 
   afterEach(() => {
     vi.unstubAllEnvs();
@@ -628,30 +660,129 @@ describe('GreenhouseAdapter.submit guardrail', () => {
     vi.restoreAllMocks();
   });
 
-  it('throws when SOWER_SUBMIT_ENABLED is unset', async () => {
+  it('throws and sends NO request when SOWER_SUBMIT_ENABLED is unset', async () => {
     delete process.env.SOWER_SUBMIT_ENABLED;
+    vi.stubEnv('SOWER_SUBMIT_TARGET_URL', MOCK_TARGET);
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
     await expect(adapter.submit(sampleSpec, answers)).rejects.toThrow(
       'submit disabled: SOWER_SUBMIT_ENABLED guardrail',
     );
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('throws when SOWER_SUBMIT_ENABLED is "false"', async () => {
+  it('throws and sends NO request when SOWER_SUBMIT_ENABLED is "false"', async () => {
     vi.stubEnv('SOWER_SUBMIT_ENABLED', 'false');
+    vi.stubEnv('SOWER_SUBMIT_TARGET_URL', MOCK_TARGET);
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
     await expect(adapter.submit(sampleSpec, answers)).rejects.toThrow(
       'submit disabled: SOWER_SUBMIT_ENABLED guardrail',
     );
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('only dry-runs when enabled: logs the payload, returns dryRun, sends no request', async () => {
+  it('throws and sends NO request when enabled but SOWER_SUBMIT_TARGET_URL is unset', async () => {
     vi.stubEnv('SOWER_SUBMIT_ENABLED', 'true');
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const fetchMock = vi.fn();
+    delete process.env.SOWER_SUBMIT_TARGET_URL;
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await expect(adapter.submit(sampleSpec, answers)).rejects.toThrow(
+      /no explicit SOWER_SUBMIT_TARGET_URL/,
+    );
+    // The guardrail refuses BEFORE any network call — applyUrl is never posted.
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('POSTs a multipart body to the TARGET (never applyUrl) when both gates are set', async () => {
+    vi.stubEnv('SOWER_SUBMIT_ENABLED', 'true');
+    vi.stubEnv('SOWER_SUBMIT_TARGET_URL', MOCK_TARGET);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fetchMock = vi.fn(async () => new Response('ok', { status: 201 }));
     vi.stubGlobal('fetch', fetchMock);
 
     const result = await adapter.submit(sampleSpec, answers);
 
-    expect(result).toEqual({ dryRun: true });
-    expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result).toEqual({ submitted: true, status: 201, dryRun: false });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [calledUrl, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    // SAFETY: the POST target is the explicit env target, NEVER spec.applyUrl.
+    expect(calledUrl).toBe(MOCK_TARGET);
+    expect(calledUrl).not.toBe(sampleSpec.applyUrl);
+    expect(init.method).toBe('POST');
+    expect(init.body).toBeInstanceOf(FormData);
+    const entries = [...(init.body as FormData).entries()];
+    // Scalar field present; array field expanded into repeated parts.
+    expect(entries).toContainEqual(['first_name', 'Jane']);
+    expect(
+      entries
+        .filter(([key]) => key === 'question_67165646[]')
+        .map(([, v]) => v),
+    ).toEqual(['US', 'CA']);
+  });
+
+  it('attaches file parts, reading bytes via getFileBytes', async () => {
+    vi.stubEnv('SOWER_SUBMIT_ENABLED', 'true');
+    vi.stubEnv('SOWER_SUBMIT_TARGET_URL', MOCK_TARGET);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fetchMock = vi.fn(async () => new Response('ok', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const files: SubmitFile[] = [
+      {
+        questionId: 'resume',
+        storagePath: 'documents/abc/resume.pdf',
+        filename: 'resume.pdf',
+      },
+    ];
+    const getFileBytes = vi.fn(async () => new Uint8Array([1, 2, 3, 4]));
+
+    const result = await adapter.submit(sampleSpec, answers, files, {
+      getFileBytes,
+    });
+
+    expect(result).toEqual({ submitted: true, status: 200, dryRun: false });
+    expect(getFileBytes).toHaveBeenCalledWith('documents/abc/resume.pdf');
+    const [, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    const resumeEntry = [...(init.body as FormData).entries()].find(
+      ([key]) => key === 'resume',
+    );
+    const resumeFile = resumeEntry?.[1] as File;
+    expect(resumeFile).toBeInstanceOf(File);
+    expect(resumeFile.name).toBe('resume.pdf');
+    // Bytes were read via getFileBytes (4 bytes), not skipped.
+    expect(resumeFile.size).toBe(4);
+  });
+
+  it('records the submit under phase "submit" via the recorder', async () => {
+    vi.stubEnv('SOWER_SUBMIT_ENABLED', 'true');
+    vi.stubEnv('SOWER_SUBMIT_TARGET_URL', MOCK_TARGET);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('ok', { status: 200 })),
+    );
+    const recorder = vi.fn();
+
+    await adapter.submit(sampleSpec, answers, [], { recorder });
+
+    expect(recorder).toHaveBeenCalledTimes(1);
+    const call = recorder.mock.calls[0]?.[0] as ApiCallRecord;
+    expect(call).toMatchObject({
+      phase: 'submit',
+      method: 'POST',
+      url: MOCK_TARGET,
+      responseStatus: 200,
+    });
+    // The recorder must never capture the real applyUrl as the submit target.
+    expect(call.url).not.toBe(sampleSpec.applyUrl);
   });
 });

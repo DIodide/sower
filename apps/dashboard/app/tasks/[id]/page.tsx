@@ -1,6 +1,13 @@
 import type { Question, ResolvedAnswer } from '@sower/core';
 import type { Document } from '@sower/db';
-import { apiCalls, applicationTasks, documents, events, jobs } from '@sower/db';
+import {
+  apiCalls,
+  applicationTasks,
+  documents,
+  events,
+  jobDescriptions,
+  jobs,
+} from '@sower/db';
 import { asc, desc, eq } from 'drizzle-orm';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
@@ -18,6 +25,7 @@ import {
   SectionHeading,
   StateBadge,
 } from '../../../lib/ui';
+import { JobDescriptionPanel } from './job-description-panel';
 import { NeedsInputForm } from './needs-input-form';
 import { documentKind } from './question-kind';
 import type { DocumentOption, QuestionView } from './questions-panel';
@@ -182,21 +190,30 @@ export default async function TaskPage({
   const task = taskRows[0];
   if (!task) notFound();
 
-  const [jobRows, eventRows, callRows, documentRows] = await Promise.all([
-    db.select().from(jobs).where(eq(jobs.id, task.jobId)).limit(1),
-    db
-      .select()
-      .from(events)
-      .where(eq(events.taskId, id))
-      .orderBy(asc(events.createdAt)),
-    db
-      .select()
-      .from(apiCalls)
-      .where(eq(apiCalls.taskId, id))
-      .orderBy(asc(apiCalls.seq)),
-    db.select().from(documents).orderBy(desc(documents.createdAt)),
-  ]);
+  const [jobRows, eventRows, callRows, documentRows, descriptionRows] =
+    await Promise.all([
+      db.select().from(jobs).where(eq(jobs.id, task.jobId)).limit(1),
+      db
+        .select()
+        .from(events)
+        .where(eq(events.taskId, id))
+        .orderBy(asc(events.createdAt)),
+      db
+        .select()
+        .from(apiCalls)
+        .where(eq(apiCalls.taskId, id))
+        .orderBy(asc(apiCalls.seq)),
+      db.select().from(documents).orderBy(desc(documents.createdAt)),
+      // Newest description version first; row [0] is the current one and the
+      // array length is the total number of stored versions for this job.
+      db
+        .select()
+        .from(jobDescriptions)
+        .where(eq(jobDescriptions.jobId, task.jobId))
+        .orderBy(desc(jobDescriptions.version)),
+    ]);
   const job = jobRows[0];
+  const latestDescription = descriptionRows[0];
 
   const spec = task.jobSpec;
   const resolution = task.resolution;
@@ -350,6 +367,19 @@ export default async function TaskPage({
           ) : null}
         </div>
       </header>
+
+      {/* ---- job description ---- */}
+      <SectionHeading>job description</SectionHeading>
+      {latestDescription ? (
+        <JobDescriptionPanel
+          content={latestDescription.content}
+          version={latestDescription.version}
+          fetchedAt={latestDescription.fetchedAt}
+          versionCount={descriptionRows.length}
+        />
+      ) : (
+        <Empty>no job description captured for this posting yet.</Empty>
+      )}
 
       {/* ---- state timeline ---- */}
       <SectionHeading>state timeline</SectionHeading>

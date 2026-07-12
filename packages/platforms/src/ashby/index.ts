@@ -34,6 +34,10 @@ interface AshbyJobPosting {
   isRemote?: boolean;
   jobUrl?: string | null;
   applyUrl?: string | null;
+  /** Rendered HTML description from the posting API. */
+  descriptionHtml?: string | null;
+  /** Plain-text description from the posting API. */
+  descriptionPlain?: string | null;
   /** Not present on the public posting API today; mapped when present. */
   applicationForm?: unknown;
 }
@@ -305,6 +309,12 @@ export class AshbyAdapter implements PlatformAdapter {
     const location = posting.location;
     if (location) {
       spec.location = location;
+    }
+    if (posting.descriptionHtml) {
+      spec.descriptionHtml = posting.descriptionHtml;
+    }
+    if (posting.descriptionPlain) {
+      spec.description = posting.descriptionPlain;
     }
     return spec;
   }

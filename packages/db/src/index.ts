@@ -59,3 +59,5 @@ export type ApiCall = typeof schema.apiCalls.$inferSelect;
 export type NewApiCall = typeof schema.apiCalls.$inferInsert;
 export type Document = typeof schema.documents.$inferSelect;
 export type NewDocument = typeof schema.documents.$inferInsert;
+export type JobDescription = typeof schema.jobDescriptions.$inferSelect;
+export type NewJobDescription = typeof schema.jobDescriptions.$inferInsert;

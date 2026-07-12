@@ -8,6 +8,7 @@ import {
   applicationTasks,
   documents,
   events,
+  jobDescriptions,
   jobs,
 } from './schema.js';
 
@@ -147,6 +148,34 @@ describe('schema', () => {
     expect(documents.storagePath.notNull).toBe(true);
     expect(documents.contentType.notNull).toBe(false);
     expect(documents.sizeBytes.notNull).toBe(false);
+  });
+
+  it('defines the job_descriptions table', () => {
+    expect(getTableName(jobDescriptions)).toBe('job_descriptions');
+    expect(sqlColumnNames(jobDescriptions)).toEqual([
+      'content',
+      'content_hash',
+      'fetched_at',
+      'id',
+      'job_id',
+      'version',
+    ]);
+    expect(jobDescriptions.jobId.notNull).toBe(true);
+    expect(jobDescriptions.version.notNull).toBe(true);
+    expect(jobDescriptions.content.notNull).toBe(true);
+    expect(jobDescriptions.contentHash.notNull).toBe(true);
+    // fetched_at is server-defaulted, so it stays nullable at the type level.
+    expect(jobDescriptions.fetchedAt.notNull).toBe(false);
+  });
+
+  it('references jobs and indexes job_id on job_descriptions', () => {
+    const config = getTableConfig(jobDescriptions);
+    const fk = config.foreignKeys[0]?.reference();
+    expect(fk?.foreignTable && getTableName(fk.foreignTable)).toBe('jobs');
+    expect(fk?.columns.map((c) => c.name)).toEqual(['job_id']);
+    expect(config.indexes.map((idx) => idx.config.name ?? null)).toContain(
+      'job_descriptions_job_id_idx',
+    );
   });
 
   it('defines the accounts table', () => {

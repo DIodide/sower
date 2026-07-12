@@ -178,6 +178,10 @@ interface LeverPostingPayload {
   workplaceType?: string | null;
   hostedUrl?: string | null;
   applyUrl?: string | null;
+  /** Rendered HTML description. */
+  description?: string | null;
+  /** Plain-text description. */
+  descriptionPlain?: string | null;
   /** Description content blocks — never mapped to questions. */
   lists?: { text: string; content: string }[] | null;
 }
@@ -249,6 +253,12 @@ export class LeverAdapter implements PlatformAdapter {
     const location = payload.categories?.location ?? payload.country;
     if (location) {
       spec.location = location;
+    }
+    if (payload.description) {
+      spec.descriptionHtml = payload.description;
+    }
+    if (payload.descriptionPlain) {
+      spec.description = payload.descriptionPlain;
     }
     return spec;
   }

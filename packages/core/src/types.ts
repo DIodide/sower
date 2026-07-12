@@ -52,6 +52,10 @@ export interface JobSpec {
   location?: string;
   applyUrl: string;
   questions: Question[];
+  /** Plain-text job description (tags/entities stripped). Back-compat optional. */
+  description?: string;
+  /** Raw HTML (or entity-encoded HTML) job description as returned by the source. */
+  descriptionHtml?: string;
 }
 
 export interface ResolvedAnswer {

@@ -1,9 +1,22 @@
+import { createHash } from 'node:crypto';
 import { loadProfile, resolveAnswers } from '@sower/answers';
-import type { Platform, ResolutionResult, TaskState } from '@sower/core';
+import type {
+  JobSpec,
+  Platform,
+  ResolutionResult,
+  TaskState,
+} from '@sower/core';
 import { transition } from '@sower/core';
-import { answers, applicationTasks, documents, events, jobs } from '@sower/db';
+import {
+  answers,
+  applicationTasks,
+  documents,
+  events,
+  jobDescriptions,
+  jobs,
+} from '@sower/db';
 import { getAdapter } from '@sower/platforms';
-import { and, eq, inArray, lt, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, lt, sql } from 'drizzle-orm';
 import { postReviewApprovalCard } from './discord.js';
 import { createTaskRecorder } from './recorder.js';
 import { transitionTask } from './transitions.js';
@@ -103,6 +116,15 @@ export async function processTask(
       .set({ jobSpec, updatedAt: new Date() })
       .where(eq(applicationTasks.id, taskId));
 
+    // Contract D: reflect the discovered spec back onto the jobs row. A raw-URL
+    // ingest records no company/title (Ashby/Lever URL ingests especially), so
+    // backfill the blanks; and capture the plain-text description as a new
+    // versioned row when it first appears or changes. Best-effort shape: both
+    // run inside the processing try, so a DB hiccup here surfaces as a normal
+    // FAIL/retry rather than silently dropping the discovered data.
+    await backfillJobFields(db, job, jobSpec);
+    await recordJobDescription(db, job.id, jobSpec);
+
     const profile = await loadProfile(config.PROFILE_PATH);
     // The curated answer bank (loaded once at startup, on deps), the answers
     // bank (user-entered values keyed by normalized label), and stored
@@ -189,4 +211,71 @@ export async function processTask(
       gaveUp: claimed.attempt >= MAX_ATTEMPTS,
     };
   }
+}
+
+/**
+ * Backfill the jobs row's company/title from the discovered JobSpec when the
+ * ingest-time values are missing. A raw-URL ingest records no company/title
+ * (and Ashby's posting-api has no org display name at all), so without this an
+ * Ashby/Lever URL-ingested task would show a BLANK company & title on the
+ * dashboard. Only blanks are filled — a value the ingest already recorded is
+ * never overwritten, and empty discovered values are ignored.
+ */
+async function backfillJobFields(
+  db: Deps['db'],
+  job: { id: string; company: string | null; title: string | null },
+  spec: JobSpec,
+): Promise<void> {
+  const updates: { company?: string; title?: string } = {};
+  if (!job.company && spec.company) {
+    updates.company = spec.company;
+  }
+  if (!job.title && spec.title) {
+    updates.title = spec.title;
+  }
+  if (Object.keys(updates).length === 0) {
+    return;
+  }
+  await db.update(jobs).set(updates).where(eq(jobs.id, job.id));
+}
+
+/**
+ * Version the job description. Computes the sha256 of the plain-text
+ * description and compares it against the latest stored row; a new version
+ * (max(version)+1, or 1 when none exists) is inserted ONLY when the content
+ * changed. A re-discover that returns an identical description stores nothing,
+ * so the history captures every real change without duplicating unchanged
+ * re-fetches. No description on the spec (e.g. an adapter that does not expose
+ * one) is a no-op.
+ */
+async function recordJobDescription(
+  db: Deps['db'],
+  jobId: string,
+  spec: JobSpec,
+): Promise<void> {
+  const content = spec.description;
+  if (!content) {
+    return;
+  }
+  const contentHash = createHash('sha256').update(content).digest('hex');
+  const latestRows = await db
+    .select({
+      version: jobDescriptions.version,
+      contentHash: jobDescriptions.contentHash,
+    })
+    .from(jobDescriptions)
+    .where(eq(jobDescriptions.jobId, jobId))
+    .orderBy(desc(jobDescriptions.version))
+    .limit(1);
+  const latest = latestRows[0];
+  if (latest && latest.contentHash === contentHash) {
+    // Unchanged since the last discover — store nothing extra.
+    return;
+  }
+  await db.insert(jobDescriptions).values({
+    jobId,
+    version: latest ? latest.version + 1 : 1,
+    content,
+    contentHash,
+  });
 }

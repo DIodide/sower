@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
 import { MAX_ATTEMPTS, processTask } from './process.js';
@@ -7,6 +8,11 @@ const adapterState = vi.hoisted(() => ({
   discoverError: null as string | null,
   questions: [] as unknown[],
   lastDiscoverOpts: undefined as { recorder?: unknown } | undefined,
+  // Contract D: optional spec fields the discover mock echoes back so tests can
+  // exercise company/title backfill and description versioning.
+  company: undefined as string | undefined,
+  title: undefined as string | undefined,
+  description: undefined as string | undefined,
 }));
 
 const answersState = vi.hoisted(() => ({
@@ -34,9 +40,15 @@ vi.mock('@sower/platforms', () => ({
               platform: 'greenhouse',
               tenant: 'acme',
               externalId: 'swe-1',
-              title: 'Software Engineer Intern',
+              title: adapterState.title ?? 'Software Engineer Intern',
               applyUrl: 'https://boards.greenhouse.io/acme/jobs/123',
               questions: adapterState.questions,
+              ...(adapterState.company !== undefined
+                ? { company: adapterState.company }
+                : {}),
+              ...(adapterState.description !== undefined
+                ? { description: adapterState.description }
+                : {}),
             };
           },
           submit: async () => {
@@ -75,13 +87,36 @@ interface FakeEventRow {
   data: unknown;
 }
 
+interface FakeJobRow {
+  id: string;
+  url: string;
+  platform: string;
+  tenant: string;
+  externalId: string;
+  company: string | null;
+  title: string | null;
+}
+
+interface FakeDescriptionRow {
+  jobId: string;
+  version: number;
+  content: string;
+  contentHash: string;
+}
+
 /**
  * Stateful fake db holding a single task row. Mimics the drizzle surface
  * processTask uses. The claim (`update ... returning()`) is applied atomically
  * at await-time so concurrent claims race exactly like they would against
  * Postgres: only one caller gets the row back.
  */
-function createFakeTaskDb(initial: { state: string; attempt?: number }) {
+function createFakeTaskDb(initial: {
+  state: string;
+  attempt?: number;
+  company?: string | null;
+  title?: string | null;
+  descriptions?: FakeDescriptionRow[];
+}) {
   const task: FakeTaskRow = {
     id: 'task-1',
     jobId: 'job-1',
@@ -92,27 +127,53 @@ function createFakeTaskDb(initial: { state: string; attempt?: number }) {
     lastError: null,
     updatedAt: new Date(0),
   };
-  const job = {
+  const job: FakeJobRow = {
     id: 'job-1',
     url: 'https://boards.greenhouse.io/acme/jobs/123',
     platform: 'greenhouse',
     tenant: 'acme',
     externalId: 'swe-1',
+    company: initial.company ?? null,
+    title: initial.title ?? null,
   };
   const eventRows: FakeEventRow[] = [];
+  const descriptionRows: FakeDescriptionRow[] = initial.descriptions ?? [];
+
+  // A jobs backfill sets only company/title; everything else (claim,
+  // jobSpec, resolution, transitions) targets the task row.
+  const isJobUpdate = (setArg: Record<string, unknown>) => {
+    const keys = Object.keys(setArg);
+    return (
+      keys.length > 0 && keys.every((k) => k === 'company' || k === 'title')
+    );
+  };
 
   const db = {
     select: (fields?: Record<string, unknown>) => {
-      // Bank (answers) and documents selects resolve empty; the task+job
-      // lookup resolves the single task row.
+      // Bank (answers) and documents selects resolve empty; a job_descriptions
+      // select resolves the latest stored version (desc by version, limit 1);
+      // the task+job lookup resolves the single task row.
       const isBankSelect = fields !== undefined && 'normalizedLabel' in fields;
       const isDocumentsSelect = fields !== undefined && 'kind' in fields;
-      const result =
-        isBankSelect || isDocumentsSelect ? [] : [{ task: { ...task }, job }];
+      const isDescriptionSelect =
+        fields !== undefined && 'contentHash' in fields;
+      let result: unknown[];
+      if (isDescriptionSelect) {
+        const latest = [...descriptionRows]
+          .sort((a, b) => b.version - a.version)
+          .slice(0, 1)
+          .map((d) => ({ version: d.version, contentHash: d.contentHash }));
+        result = latest;
+      } else if (isBankSelect || isDocumentsSelect) {
+        result = [];
+      } else {
+        result = [{ task: { ...task }, job }];
+      }
       const chain = {
         from: () => chain,
         innerJoin: () => chain,
         where: () => chain,
+        orderBy: () => chain,
         limit: () => chain,
         // biome-ignore lint/suspicious/noThenProperty: mimics drizzle's awaitable builder
         then: (onFulfilled: (value: unknown) => unknown) =>
@@ -124,9 +185,12 @@ function createFakeTaskDb(initial: { state: string; attempt?: number }) {
       set: (setArg: Record<string, unknown>) => ({
         where: () => {
           const applyPlain = () => {
+            const target = isJobUpdate(setArg)
+              ? (job as unknown as Record<string, unknown>)
+              : (task as unknown as Record<string, unknown>);
             for (const [key, value] of Object.entries(setArg)) {
               if (key === 'attempt') continue; // claim-only sql expression
-              (task as unknown as Record<string, unknown>)[key] = value;
+              target[key] = value;
             }
             return [];
           };
@@ -155,12 +219,17 @@ function createFakeTaskDb(initial: { state: string; attempt?: number }) {
       }),
     }),
     insert: () => ({
-      values: (row: FakeEventRow) => ({
+      values: (row: FakeEventRow | FakeDescriptionRow) => ({
         // biome-ignore lint/suspicious/noThenProperty: mimics drizzle's awaitable builder
         then: (onFulfilled: (value: unknown) => unknown) =>
           Promise.resolve()
             .then(() => {
-              eventRows.push(row);
+              // job_descriptions rows carry content_hash; events do not.
+              if ('contentHash' in row) {
+                descriptionRows.push(row);
+              } else {
+                eventRows.push(row);
+              }
               return [];
             })
             .then(onFulfilled),
@@ -168,7 +237,13 @@ function createFakeTaskDb(initial: { state: string; attempt?: number }) {
     }),
   };
 
-  return { db: db as unknown as Deps['db'], task, eventRows };
+  return {
+    db: db as unknown as Deps['db'],
+    task,
+    job,
+    eventRows,
+    descriptionRows,
+  };
 }
 
 /** Fake db whose only select resolves to no rows (task deleted). */
@@ -241,9 +316,17 @@ beforeEach(() => {
   adapterState.discoverError = null;
   adapterState.questions = [];
   adapterState.lastDiscoverOpts = undefined;
+  adapterState.company = undefined;
+  adapterState.title = undefined;
+  adapterState.description = undefined;
   answersState.result = { resolved: [], missing: [] };
   answersState.lastOpts = undefined;
 });
+
+/** sha256 hex of `content`, matching process.ts's content_hash computation. */
+function sha256Hex(content: string): string {
+  return createHash('sha256').update(content).digest('hex');
+}
 
 describe('processTask', () => {
   it('returns not_found for a deleted task', async () => {
@@ -558,5 +641,132 @@ describe('processTask Discord approval card (REVIEW hook)', () => {
     expect(task.lastError).toBeNull();
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+describe('processTask Contract D (company/title backfill)', () => {
+  it('backfills blank company & title from the discovered spec', async () => {
+    // Raw-URL ingest: the jobs row has no company/title. Discover surfaces both.
+    const { db, job } = createFakeTaskDb({
+      state: 'QUEUED',
+      company: null,
+      title: null,
+    });
+    adapterState.company = 'Acme Corp';
+    adapterState.title = 'Backend Engineer';
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome.kind).toBe('processed');
+    expect(job.company).toBe('Acme Corp');
+    expect(job.title).toBe('Backend Engineer');
+  });
+
+  it('never overwrites a company/title the ingest already recorded', async () => {
+    const { db, job } = createFakeTaskDb({
+      state: 'QUEUED',
+      company: 'Ingest Co',
+      title: 'Ingest Title',
+    });
+    adapterState.company = 'Discovered Co';
+    adapterState.title = 'Discovered Title';
+
+    await processTask(createDeps(db), 'task-1');
+
+    expect(job.company).toBe('Ingest Co');
+    expect(job.title).toBe('Ingest Title');
+  });
+
+  it('leaves company null when the spec has no company (fills only blanks)', async () => {
+    const { db, job } = createFakeTaskDb({
+      state: 'QUEUED',
+      company: null,
+      title: null,
+    });
+    // No adapterState.company set: spec carries no company (e.g. Ashby without
+    // an org display name would fall back to tenant in the adapter, but here we
+    // model an adapter that surfaces none).
+    adapterState.title = 'Only A Title';
+
+    await processTask(createDeps(db), 'task-1');
+
+    expect(job.company).toBeNull();
+    expect(job.title).toBe('Only A Title');
+  });
+});
+
+describe('processTask Contract D (description versioning)', () => {
+  const DESC = 'We are hiring a backend engineer to build our platform.';
+
+  it('inserts version 1 the first time a description is discovered', async () => {
+    const { db, descriptionRows } = createFakeTaskDb({ state: 'QUEUED' });
+    adapterState.description = DESC;
+
+    await processTask(createDeps(db), 'task-1');
+
+    expect(descriptionRows).toHaveLength(1);
+    expect(descriptionRows[0]).toEqual({
+      jobId: 'job-1',
+      version: 1,
+      content: DESC,
+      contentHash: sha256Hex(DESC),
+    });
+  });
+
+  it('stores nothing on re-discover when the description is unchanged', async () => {
+    const descriptionRows: FakeDescriptionRow[] = [
+      {
+        jobId: 'job-1',
+        version: 1,
+        content: DESC,
+        contentHash: sha256Hex(DESC),
+      },
+    ];
+    const { db } = createFakeTaskDb({
+      state: 'QUEUED',
+      descriptions: descriptionRows,
+    });
+    adapterState.description = DESC;
+
+    await processTask(createDeps(db), 'task-1');
+
+    // Same content_hash as the latest row: no new version is written.
+    expect(descriptionRows).toHaveLength(1);
+  });
+
+  it('inserts version 2 when a re-discover changes the description', async () => {
+    const descriptionRows: FakeDescriptionRow[] = [
+      {
+        jobId: 'job-1',
+        version: 1,
+        content: DESC,
+        contentHash: sha256Hex(DESC),
+      },
+    ];
+    const { db } = createFakeTaskDb({
+      state: 'QUEUED',
+      descriptions: descriptionRows,
+    });
+    const NEXT = `${DESC} Updated with new responsibilities.`;
+    adapterState.description = NEXT;
+
+    await processTask(createDeps(db), 'task-1');
+
+    expect(descriptionRows).toHaveLength(2);
+    expect(descriptionRows[1]).toEqual({
+      jobId: 'job-1',
+      version: 2,
+      content: NEXT,
+      contentHash: sha256Hex(NEXT),
+    });
+  });
+
+  it('stores nothing when the spec carries no description', async () => {
+    const { db, descriptionRows } = createFakeTaskDb({ state: 'QUEUED' });
+    // adapterState.description left undefined.
+
+    await processTask(createDeps(db), 'task-1');
+
+    expect(descriptionRows).toHaveLength(0);
   });
 });

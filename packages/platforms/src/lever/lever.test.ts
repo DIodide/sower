@@ -80,6 +80,9 @@ describe('LeverAdapter.discover', () => {
       applyUrl:
         'https://jobs.lever.co/leverdemo/33538a2f-d27d-4a96-8f05-fa4b0e4d940e/apply',
       questions: [],
+      // descriptionHtml/descriptionPlain come straight from the postings API.
+      descriptionHtml: fixture.description as string,
+      description: fixture.descriptionPlain as string,
     });
   });
 
