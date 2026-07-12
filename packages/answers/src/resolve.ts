@@ -265,37 +265,46 @@ function matchOption(
  * Turn a raw candidate value from one resolution stage into a final
  * ResolvedAnswer, or null when the candidate cannot answer this question
  * (so the next stage may try). Selects and multiselects require every value
- * to EXACTLY match one option label; text fields accept only plain strings.
+ * to EXACTLY match one option label or value; text fields accept only plain
+ * strings.
+ *
+ * Values are coerced from number to string first: option value ids are numeric,
+ * and a select answer stored in the answers bank comes back from jsonb as a
+ * number (not the original string), so `731269090` must still match the
+ * option whose value is `731269090`.
  */
+type RawCandidate = string | number | Array<string | number> | null | undefined;
+
 function finalize(
   question: Question,
-  raw: string | string[] | null | undefined,
+  raw: RawCandidate,
   source: ResolvedAnswer['source'],
 ): ResolvedAnswer | null {
   if (raw === null || raw === undefined) return null;
 
   if (question.type === 'select') {
-    if (typeof raw !== 'string') return null;
-    const option = matchOption(raw, question.options ?? []);
+    if (typeof raw !== 'string' && typeof raw !== 'number') return null;
+    const option = matchOption(String(raw), question.options ?? []);
     if (option === undefined) return null;
     return { questionId: question.id, source, value: String(option.value) };
   }
 
   if (question.type === 'multiselect') {
-    const values = typeof raw === 'string' ? [raw] : raw;
+    const values = Array.isArray(raw) ? raw : [raw];
     if (values.length === 0) return null;
     const matched: string[] = [];
     for (const value of values) {
-      const option = matchOption(value, question.options ?? []);
+      if (typeof value !== 'string' && typeof value !== 'number') return null;
+      const option = matchOption(String(value), question.options ?? []);
       if (option === undefined) return null;
       matched.push(String(option.value));
     }
     return { questionId: question.id, source, value: matched };
   }
 
-  // text / textarea: only a plain string can fill a single field.
-  if (typeof raw !== 'string') return null;
-  return { questionId: question.id, source, value: raw };
+  // text / textarea: a single scalar fills the field (numbers coerced).
+  if (typeof raw !== 'string' && typeof raw !== 'number') return null;
+  return { questionId: question.id, source, value: String(raw) };
 }
 
 /**

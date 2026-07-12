@@ -1069,3 +1069,53 @@ describe('resolveAnswers — milestone fixes', () => {
     expect(result.resolved[0]?.value).toBe('documents/a/only.pdf');
   });
 });
+
+describe('resolveAnswers — jsonb numeric coercion', () => {
+  it('resolves a select when the bank value is a NUMBER (jsonb round-trip)', () => {
+    const question = q({
+      id: 'q_school',
+      label: 'What school do you currently attend?',
+      type: 'select',
+      options: [
+        { label: 'Yale University', value: 731269089 },
+        { label: 'Other', value: 731269090 },
+      ],
+    });
+    // The answers bank stores option values; postgres jsonb returns them as
+    // numbers, not the original strings.
+    const result = resolveAnswers([question], profile, {
+      bank: [
+        {
+          normalizedLabel: 'what school do you currently attend',
+          value: 731269090 as unknown as string,
+        },
+      ],
+    });
+    expect(result.resolved[0]).toEqual({
+      questionId: 'q_school',
+      source: 'bank',
+      value: '731269090',
+    });
+  });
+
+  it('resolves a multiselect with numeric bank values', () => {
+    const question = q({
+      id: 'q_grad',
+      label: 'Expected graduation',
+      type: 'multiselect',
+      options: [
+        { label: 'Spring 2027', value: 731269094 },
+        { label: 'Fall 2027', value: 731269095 },
+      ],
+    });
+    const result = resolveAnswers([question], profile, {
+      bank: [
+        {
+          normalizedLabel: 'expected graduation',
+          value: [731269094] as unknown as string[],
+        },
+      ],
+    });
+    expect(result.resolved[0]?.value).toEqual(['731269094']);
+  });
+});
