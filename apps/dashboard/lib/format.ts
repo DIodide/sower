@@ -34,30 +34,79 @@ export function relativeTime(value: Date | string | null | undefined): string {
   return 'just now';
 }
 
-/** Badge colors for every task state (dark theme: pill bg + text fg). */
-export const STATE_COLORS: Record<TaskState, { bg: string; fg: string }> = {
-  INGESTED: { bg: '#16283f', fg: '#60a5fa' },
-  PARSED: { bg: '#16283f', fg: '#60a5fa' },
-  QUEUED: { bg: '#16283f', fg: '#93c5fd' },
-  PREPARING: { bg: '#2a2140', fg: '#a78bfa' },
-  NEEDS_INPUT: { bg: '#3a2f14', fg: '#fbbf24' },
-  REVIEW: { bg: '#3a2f14', fg: '#fbbf24' },
-  AWAITING_OTP: { bg: '#3a2f14', fg: '#fcd34d' },
-  FILLING: { bg: '#2a2140', fg: '#c4b5fd' },
-  SUBMITTED: { bg: '#143322', fg: '#34d399' },
-  CONFIRMED: { bg: '#143322', fg: '#4ade80' },
-  FAILED: { bg: '#3a1a1a', fg: '#f87171' },
-  DUPLICATE: { bg: '#26262b', fg: '#9ca3af' },
+/** Semantic color families shared by badges, banners, and stat cards. */
+export type Tone = 'attention' | 'progress' | 'success' | 'danger' | 'neutral';
+
+/**
+ * Buckets group the 12 raw machine states into the four things a person
+ * actually scans for: work waiting on them, work the system is doing,
+ * finished work, and problems.
+ */
+export type Bucket = 'action' | 'active' | 'done' | 'stalled';
+
+export interface StateMeta {
+  /** Human-readable label ("Needs input", not NEEDS_INPUT). */
+  label: string;
+  tone: Tone;
+  bucket: Bucket;
+}
+
+export const STATE_META: Record<TaskState, StateMeta> = {
+  INGESTED: { label: 'Ingested', tone: 'progress', bucket: 'active' },
+  PARSED: { label: 'Parsed', tone: 'progress', bucket: 'active' },
+  QUEUED: { label: 'Queued', tone: 'progress', bucket: 'active' },
+  PREPARING: { label: 'Processing', tone: 'progress', bucket: 'active' },
+  NEEDS_INPUT: { label: 'Needs input', tone: 'attention', bucket: 'action' },
+  REVIEW: { label: 'Ready to review', tone: 'attention', bucket: 'action' },
+  AWAITING_OTP: { label: 'Awaiting OTP', tone: 'attention', bucket: 'action' },
+  FILLING: { label: 'Filling', tone: 'progress', bucket: 'active' },
+  SUBMITTED: { label: 'Submitted', tone: 'success', bucket: 'done' },
+  CONFIRMED: { label: 'Confirmed', tone: 'success', bucket: 'done' },
+  FAILED: { label: 'Failed', tone: 'danger', bucket: 'stalled' },
+  DUPLICATE: { label: 'Duplicate', tone: 'neutral', bucket: 'stalled' },
 };
 
-export const FALLBACK_STATE_COLOR = { bg: '#26262b', fg: '#9ca3af' };
+const FALLBACK_META: StateMeta = {
+  label: 'Unknown',
+  tone: 'neutral',
+  bucket: 'stalled',
+};
 
-/** STATE_COLORS lookup that tolerates unknown/legacy state strings. */
-export function stateColor(state: string): { bg: string; fg: string } {
-  return (
-    (STATE_COLORS as Record<string, { bg: string; fg: string }>)[state] ??
-    FALLBACK_STATE_COLOR
-  );
+/** STATE_META lookup that tolerates unknown/legacy state strings. */
+export function stateMeta(state: string): StateMeta {
+  const meta = (STATE_META as Record<string, StateMeta>)[state];
+  if (meta) return meta;
+  return { ...FALLBACK_META, label: state.toLowerCase().replace(/_/g, ' ') };
+}
+
+export const BUCKETS: Record<
+  Bucket,
+  { label: string; tone: Tone; states: TaskState[] }
+> = {
+  action: {
+    label: 'Needs you',
+    tone: 'attention',
+    states: ['NEEDS_INPUT', 'REVIEW', 'AWAITING_OTP'],
+  },
+  active: {
+    label: 'In progress',
+    tone: 'progress',
+    states: ['INGESTED', 'PARSED', 'QUEUED', 'PREPARING', 'FILLING'],
+  },
+  done: {
+    label: 'Submitted',
+    tone: 'success',
+    states: ['SUBMITTED', 'CONFIRMED'],
+  },
+  stalled: {
+    label: 'Problems',
+    tone: 'danger',
+    states: ['FAILED', 'DUPLICATE'],
+  },
+};
+
+export function isBucket(value: string): value is Bucket {
+  return value in BUCKETS;
 }
 
 /** Truncates to `max` characters, appending an ellipsis when cut. */

@@ -2,16 +2,7 @@ import { applicationTasks, jobs } from '@sower/db';
 import { count, eq } from 'drizzle-orm';
 import Link from 'next/link';
 import { getDb } from '../../lib/db';
-import {
-  cellStyle,
-  Empty,
-  headStyle,
-  linkStyle,
-  MONO,
-  MUTED,
-  StateBadge,
-  TableWrap,
-} from '../../lib/ui';
+import { Empty, StateBadge } from '../../lib/ui';
 
 export const dynamic = 'force-dynamic';
 
@@ -68,44 +59,53 @@ export default async function PlatformsPage() {
     summary.states.sort((a, b) => b.n - a.n);
   }
 
-  if (list.length === 0) {
-    return <Empty>no platforms yet — ingest a job to get started.</Empty>;
-  }
-
   return (
-    <TableWrap>
-      <thead>
-        <tr>
-          <th style={headStyle}>platform</th>
-          <th style={headStyle}>jobs</th>
-          <th style={headStyle}>tasks</th>
-          <th style={headStyle}>by state</th>
-        </tr>
-      </thead>
-      <tbody>
-        {list.map((summary) => (
-          <tr key={summary.platform}>
-            <td style={{ ...cellStyle, fontFamily: MONO }}>
-              <Link
-                href={`/platforms/${encodeURIComponent(summary.platform)}`}
-                style={linkStyle}
-              >
-                {summary.platform}
-              </Link>
-            </td>
-            <td style={cellStyle}>{summary.jobs}</td>
-            <td style={cellStyle}>{summary.tasks}</td>
-            <td style={cellStyle}>
-              {summary.states.length === 0 ? (
-                <span style={{ color: MUTED }}>no tasks</span>
-              ) : (
+    <div>
+      <h1 className="page-title">Platforms</h1>
+      <p className="page-sub">
+        Every ATS sower knows how to talk to, with its job and task counts.
+      </p>
+      {list.length === 0 ? (
+        <div className="card">
+          <p className="hint" style={{ margin: 0 }}>
+            No platforms yet — ingest a job to get started.
+          </p>
+        </div>
+      ) : (
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(17rem, 1fr))',
+            gap: '1.25rem',
+          }}
+        >
+          {list.map((summary) => (
+            <Link
+              key={summary.platform}
+              href={`/platforms/${encodeURIComponent(summary.platform)}`}
+              className="stat stat--neutral"
+              style={{ color: 'var(--ink)' }}
+            >
+              <div className="row" style={{ alignItems: 'baseline' }}>
                 <span
-                  style={{
-                    display: 'inline-flex',
-                    flexWrap: 'wrap',
-                    gap: '0.375rem',
-                    alignItems: 'center',
-                  }}
+                  className="mono"
+                  style={{ fontSize: '1.0625rem', fontWeight: 800 }}
+                >
+                  {summary.platform}
+                </span>
+                <span className="hint faint spread num">
+                  {summary.jobs} job{summary.jobs === 1 ? '' : 's'} ·{' '}
+                  {summary.tasks} task{summary.tasks === 1 ? '' : 's'}
+                </span>
+              </div>
+              {summary.states.length === 0 ? (
+                <p className="hint faint" style={{ margin: '0.625rem 0 0' }}>
+                  no tasks yet
+                </p>
+              ) : (
+                <div
+                  className="row"
+                  style={{ marginTop: '0.625rem', gap: '0.375rem' }}
                 >
                   {summary.states.map(({ state, n }) => (
                     <span
@@ -117,17 +117,18 @@ export default async function PlatformsPage() {
                       }}
                     >
                       <StateBadge state={state} />
-                      <span style={{ color: MUTED, fontSize: '0.75rem' }}>
-                        {n}
-                      </span>
+                      <span className="hint faint num">{n}</span>
                     </span>
                   ))}
-                </span>
+                </div>
               )}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </TableWrap>
+            </Link>
+          ))}
+        </div>
+      )}
+      {list.length > 0 ? (
+        <Empty>Select a platform for its tenants and field census.</Empty>
+      ) : null}
+    </div>
   );
 }

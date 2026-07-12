@@ -1,9 +1,8 @@
 // Read-only "job description" panel for the task detail page. Pure
 // presentation (no client directive): renders the latest job_descriptions
-// row's plain-text content in a scroll-capped panel, with a small version
-// caption when the description has been re-fetched into multiple versions.
+// row's plain-text content inside a collapsed clay panel so it never pushes
+// the answer form below the fold.
 import { formatDate } from '../../../lib/format';
-import { BORDER, MONO, MUTED, PANEL_BG } from '../../../lib/ui';
 
 export interface JobDescriptionView {
   /** Plain-text description (JobSpec.description) of the latest version. */
@@ -34,37 +33,23 @@ function caption(view: JobDescriptionView): string {
 
 export function JobDescriptionPanel(view: JobDescriptionView) {
   return (
-    <div
-      style={{
-        backgroundColor: PANEL_BG,
-        border: `1px solid ${BORDER}`,
-        borderRadius: '0.5rem',
-        padding: '1rem 1.25rem',
-      }}
-    >
-      <div
-        style={{
-          fontSize: '0.7rem',
-          color: MUTED,
-          fontFamily: MONO,
-          marginBottom: '0.75rem',
-        }}
-      >
-        {caption(view)}
+    <details className="panel">
+      <summary>
+        Job description <span className="hint">{caption(view)}</span>
+      </summary>
+      <div className="panel-body">
+        <div
+          className="scroll-cap"
+          style={{
+            whiteSpace: 'pre-wrap',
+            overflowWrap: 'anywhere',
+            fontSize: '0.9rem',
+            lineHeight: 1.65,
+          }}
+        >
+          {view.content}
+        </div>
       </div>
-      <div
-        style={{
-          maxHeight: '24rem',
-          overflowY: 'auto',
-          whiteSpace: 'pre-wrap',
-          overflowWrap: 'anywhere',
-          fontSize: '0.875rem',
-          lineHeight: 1.65,
-          color: '#d7dae0',
-        }}
-      >
-        {view.content}
-      </div>
-    </div>
+    </details>
   );
 }

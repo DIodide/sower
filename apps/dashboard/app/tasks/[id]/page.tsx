@@ -1,4 +1,4 @@
-import type { Question, ResolvedAnswer } from '@sower/core';
+import type { Question, ResolvedAnswer, TaskState } from '@sower/core';
 import type { Document } from '@sower/db';
 import {
   apiCalls,
@@ -11,17 +11,12 @@ import {
 import { asc, desc, eq } from 'drizzle-orm';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import type { CSSProperties, ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { getDb } from '../../../lib/db';
-import { formatDate, relativeTime } from '../../../lib/format';
+import { formatDate, relativeTime, type Tone } from '../../../lib/format';
 import {
-  BORDER,
   Empty,
   ExpandableText,
-  linkStyle,
-  MONO,
-  MUTED,
-  PANEL_BG,
   SectionHeading,
   StateBadge,
 } from '../../../lib/ui';
@@ -31,37 +26,38 @@ import { documentKind } from './question-kind';
 import type { DocumentOption, QuestionView } from './questions-panel';
 import { QuestionsPanel } from './questions-panel';
 import { TaskActions } from './task-actions';
-import { Badge, FAINT, JsonDetails } from './ui';
+import { Badge, JsonDetails } from './ui';
 
 export const dynamic = 'force-dynamic';
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const FALLBACK_STATUS_COLOR = { bg: '#26262b', fg: '#9ca3af' };
-
-const metaTermStyle: CSSProperties = {
-  fontSize: '0.7rem',
-  color: MUTED,
-  textTransform: 'uppercase',
-  letterSpacing: '0.05em',
-  fontFamily: MONO,
-};
-
-const metaValueStyle: CSSProperties = {
-  fontSize: '0.875rem',
-  margin: 0,
-  overflowWrap: 'anywhere',
-};
-
 const CALL_GRID_COLUMNS =
   '2.5rem 6.5rem 3.5rem minmax(10rem, 1fr) 3.5rem 5rem 4.5rem';
+
+/** Pipeline positions for the stepper (FAILED/DUPLICATE render no stepper). */
+const STEPS: { label: string; states: TaskState[] }[] = [
+  { label: 'Ingested', states: ['INGESTED', 'PARSED'] },
+  { label: 'Queued', states: ['QUEUED'] },
+  { label: 'Processing', states: ['PREPARING', 'FILLING'] },
+  { label: 'Your input', states: ['NEEDS_INPUT', 'AWAITING_OTP'] },
+  { label: 'Review', states: ['REVIEW'] },
+  { label: 'Submitted', states: ['SUBMITTED', 'CONFIRMED'] },
+];
 
 function MetaItem({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div style={{ minWidth: 0 }}>
-      <div style={metaTermStyle}>{label}</div>
-      <div style={metaValueStyle}>{children}</div>
+      <div
+        className="hint faint"
+        style={{ fontSize: '0.72rem', fontWeight: 800 }}
+      >
+        {label}
+      </div>
+      <div style={{ fontSize: '0.875rem', overflowWrap: 'anywhere' }}>
+        {children}
+      </div>
     </div>
   );
 }
@@ -88,8 +84,8 @@ function EventData({ data }: { data: unknown }) {
   return (
     <div style={{ marginTop: '0.25rem' }}>
       {primitives.map(([key, value]) => (
-        <div key={key} style={{ fontSize: '0.75rem', marginTop: '0.125rem' }}>
-          <span style={{ color: MUTED, fontFamily: MONO }}>{key}: </span>
+        <div key={key} style={{ fontSize: '0.8125rem', marginTop: '0.125rem' }}>
+          <span className="mono faint">{key}: </span>
           <ExpandableText text={String(value)} max={160} />
         </div>
       ))}
@@ -100,11 +96,11 @@ function EventData({ data }: { data: unknown }) {
   );
 }
 
-function httpStatusColor(status: number | null): { bg: string; fg: string } {
-  if (status === null) return FALLBACK_STATUS_COLOR;
-  if (status >= 200 && status < 300) return { bg: '#143322', fg: '#4ade80' };
-  if (status >= 400) return { bg: '#3a1a1a', fg: '#f87171' };
-  return { bg: '#3a2f14', fg: '#fbbf24' };
+function httpStatusTone(status: number | null): Tone {
+  if (status === null) return 'neutral';
+  if (status >= 200 && status < 300) return 'success';
+  if (status >= 400) return 'danger';
+  return 'attention';
 }
 
 function buildQuestionViews(
@@ -172,6 +168,113 @@ function buildQuestionViews(
   });
 }
 
+/** The "what happens next" strip: one glance = the task's current ask. */
+function NextStep({
+  task,
+  requiredMissing,
+  optionalMissing,
+}: {
+  task: { id: string; state: string; lastError: string | null };
+  requiredMissing: number;
+  optionalMissing: number;
+}) {
+  switch (task.state) {
+    case 'NEEDS_INPUT': {
+      const summary =
+        requiredMissing > 0
+          ? `${requiredMissing} required question${requiredMissing === 1 ? '' : 's'} need${requiredMissing === 1 ? 's' : ''} your answer` +
+            (optionalMissing > 0 ? ` (plus ${optionalMissing} optional)` : '')
+          : optionalMissing > 0
+            ? `${optionalMissing} optional question${optionalMissing === 1 ? '' : 's'} remain — or just re-run it`
+            : 'Nothing could be auto-resolved yet — re-run once your profile or answer library covers it';
+      return (
+        <div className="banner banner--attention">
+          <p>
+            <strong>Waiting on you.</strong> {summary}.
+          </p>
+          <a href="#answers" className="btn btn--primary btn--sm spread">
+            Answer questions ↓
+          </a>
+        </div>
+      );
+    }
+    case 'REVIEW':
+      return (
+        <div className="banner banner--attention">
+          <div style={{ flex: '1 1 20rem' }}>
+            <p style={{ marginBottom: '0.625rem' }}>
+              <strong>Ready for your review.</strong> Every required question is
+              answered — skim the answers below, then approve. Approval runs a{' '}
+              <strong>dry-run</strong> only: the payload is constructed and
+              recorded, nothing is sent to the platform.
+            </p>
+            <TaskActions taskId={task.id} mode="approve" />
+          </div>
+        </div>
+      );
+    case 'FAILED':
+      return (
+        <div className="banner banner--danger">
+          <div style={{ flex: '1 1 20rem' }}>
+            <p
+              style={{ marginBottom: task.lastError ? '0.375rem' : '0.625rem' }}
+            >
+              <strong>Processing failed.</strong>
+            </p>
+            {task.lastError ? (
+              <p
+                className="mono"
+                style={{ fontSize: '0.8125rem', marginBottom: '0.625rem' }}
+              >
+                <ExpandableText text={task.lastError} max={160} />
+              </p>
+            ) : null}
+            <TaskActions taskId={task.id} mode="requeue" />
+          </div>
+        </div>
+      );
+    case 'AWAITING_OTP':
+      return (
+        <div className="banner banner--attention">
+          <p>
+            <strong>Waiting on a one-time passcode.</strong> The platform sent a
+            verification code that has to be entered before this can move on.
+          </p>
+        </div>
+      );
+    case 'SUBMITTED':
+    case 'CONFIRMED':
+      return (
+        <div className="banner banner--success">
+          <p>
+            <strong>
+              {task.state === 'CONFIRMED' ? 'Confirmed.' : 'Submitted.'}
+            </strong>{' '}
+            Nothing left to do here — the full payload and history are below.
+          </p>
+        </div>
+      );
+    case 'DUPLICATE':
+      return (
+        <div className="banner banner--neutral">
+          <p>
+            <strong>Duplicate.</strong> This job was already ingested as another
+            task, so this one is parked.
+          </p>
+        </div>
+      );
+    default:
+      return (
+        <div className="banner banner--progress">
+          <p>
+            <strong>In the pipeline.</strong> The worker is on it — nothing for
+            you to do right now.
+          </p>
+        </div>
+      );
+  }
+}
+
 export default async function TaskPage({
   params,
 }: {
@@ -234,54 +337,72 @@ export default async function TaskPage({
     createdLabel: formatDate(d.createdAt),
   }));
   const resolvedCount = views.filter((v) => v.status === 'resolved').length;
-  const missingCount = views.filter((v) => v.status === 'missing').length;
+  const missingViews = views.filter((v) => v.status === 'missing');
+  const requiredMissing = missingViews.filter((v) => v.required).length;
+  const optionalMissing = missingViews.length - requiredMissing;
+
+  const stepIndex = STEPS.findIndex((s) =>
+    (s.states as string[]).includes(task.state),
+  );
 
   return (
     <div>
-      <p style={{ margin: '0 0 0.75rem 0', fontSize: '0.8rem' }}>
-        <Link href="/" style={{ ...linkStyle, color: MUTED }}>
-          ← tasks
+      <p style={{ margin: '0 0 1rem' }}>
+        <Link href="/" className="hint">
+          ← All applications
         </Link>
       </p>
 
       {/* ---- header ---- */}
-      <header>
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'baseline',
-            gap: '0.75rem',
-            flexWrap: 'wrap',
-            marginBottom: '0.75rem',
-          }}
-        >
-          <h2 style={{ margin: 0, fontSize: '1.125rem', fontWeight: 600 }}>
+      <header className="card">
+        <div className="row" style={{ alignItems: 'baseline' }}>
+          <h1 className="page-title" style={{ margin: 0 }}>
             {job?.company ?? '—'}{' '}
-            <span style={{ color: MUTED, fontWeight: 400 }}>
+            <span
+              style={{
+                color: 'var(--ink-muted)',
+                fontWeight: 600,
+                fontSize: '1.125rem',
+              }}
+            >
               — {job?.title ?? 'untitled role'}
             </span>
-          </h2>
+          </h1>
           <StateBadge state={task.state} />
-          <span style={{ fontSize: '0.75rem', color: FAINT, fontFamily: MONO }}>
-            attempt {task.attempt}
-          </span>
+          {task.attempt > 0 ? (
+            <span className="q-meta">attempt {task.attempt}</span>
+          ) : null}
         </div>
+
+        {stepIndex >= 0 ? (
+          <ol className="steps">
+            {STEPS.map((step, i) => (
+              <li
+                key={step.label}
+                className={
+                  i < stepIndex ? 'done' : i === stepIndex ? 'current' : ''
+                }
+                aria-current={i === stepIndex ? 'step' : undefined}
+              >
+                {step.label}
+              </li>
+            ))}
+          </ol>
+        ) : null}
+
+        <hr className="divider-soft" />
         <div
           style={{
             display: 'grid',
             gridTemplateColumns: 'repeat(auto-fill, minmax(11rem, 1fr))',
             gap: '0.75rem 1.5rem',
-            backgroundColor: PANEL_BG,
-            border: `1px solid ${BORDER}`,
-            borderRadius: '0.5rem',
-            padding: '1rem 1.25rem',
           }}
         >
-          <MetaItem label="platform">
+          <MetaItem label="Platform">
             {job ? (
               <Link
                 href={`/platforms/${encodeURIComponent(job.platform)}`}
-                style={{ ...linkStyle, fontFamily: MONO }}
+                className="mono"
               >
                 {job.platform}
               </Link>
@@ -289,11 +410,11 @@ export default async function TaskPage({
               '—'
             )}
           </MetaItem>
-          <MetaItem label="tenant">
+          <MetaItem label="Tenant">
             {job?.tenant ? (
               <Link
                 href={`/tenants/${encodeURIComponent(job.platform)}/${encodeURIComponent(job.tenant)}`}
-                style={{ ...linkStyle, fontFamily: MONO }}
+                className="mono"
               >
                 {job.tenant}
               </Link>
@@ -301,45 +422,32 @@ export default async function TaskPage({
               '—'
             )}
           </MetaItem>
-          <MetaItem label="posting">
+          <MetaItem label="Posting">
             {job?.url ? (
               <a
                 href={job.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                style={linkStyle}
+                className="truncate"
+                style={{ display: 'inline-block', maxWidth: '100%' }}
+                title={job.url}
               >
-                <span
-                  style={{
-                    display: 'inline-block',
-                    maxWidth: '100%',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                    verticalAlign: 'bottom',
-                  }}
-                  title={job.url}
-                >
-                  {job.url}
-                </span>
+                {job.url.replace(/^https?:\/\//, '')} ↗
               </a>
             ) : (
               '—'
             )}
           </MetaItem>
-          <MetaItem label="source">{job?.source ?? '—'}</MetaItem>
-          <MetaItem label="created">{formatDate(task.createdAt)}</MetaItem>
-          <MetaItem label="updated">
+          <MetaItem label="Source">{job?.source ?? '—'}</MetaItem>
+          <MetaItem label="Created">{formatDate(task.createdAt)}</MetaItem>
+          <MetaItem label="Updated">
             {formatDate(task.updatedAt)}
             {task.updatedAt ? (
-              <span style={{ color: FAINT }}>
-                {' '}
-                · {relativeTime(task.updatedAt)}
-              </span>
+              <span className="faint"> · {relativeTime(task.updatedAt)}</span>
             ) : null}
           </MetaItem>
-          <MetaItem label="terms">
-            {job?.terms && job.terms.length > 0 ? (
+          {job?.terms && job.terms.length > 0 ? (
+            <MetaItem label="Terms">
               <span
                 style={{
                   display: 'inline-flex',
@@ -348,19 +456,22 @@ export default async function TaskPage({
                 }}
               >
                 {job.terms.map((term) => (
-                  <Badge key={term} bg="#26262b" fg="#9ca3af">
+                  <Badge key={term} tone="neutral">
                     {term}
                   </Badge>
                 ))}
               </span>
-            ) : (
-              '—'
-            )}
-          </MetaItem>
-          {task.lastError ? (
+            </MetaItem>
+          ) : null}
+          {task.lastError && task.state !== 'FAILED' ? (
             <div style={{ gridColumn: '1 / -1', minWidth: 0 }}>
-              <div style={metaTermStyle}>last error</div>
-              <div style={{ ...metaValueStyle, color: '#f87171' }}>
+              <div
+                className="hint faint"
+                style={{ fontSize: '0.72rem', fontWeight: 800 }}
+              >
+                Last error
+              </div>
+              <div className="status-err" style={{ fontWeight: 600 }}>
                 <ExpandableText text={task.lastError} max={160} />
               </div>
             </div>
@@ -368,8 +479,60 @@ export default async function TaskPage({
         </div>
       </header>
 
-      {/* ---- job description ---- */}
-      <SectionHeading>job description</SectionHeading>
+      {/* ---- what's next ---- */}
+      <NextStep
+        task={task}
+        requiredMissing={requiredMissing}
+        optionalMissing={optionalMissing}
+      />
+
+      {/* ---- form & answers ---- */}
+      <section id="answers">
+        <SectionHeading>Questions &amp; answers</SectionHeading>
+        {spec && views.length > 0 ? (
+          <div className="row" style={{ margin: '0 0 0.75rem' }}>
+            <div className="meter" style={{ maxWidth: '16rem' }}>
+              <div
+                style={{
+                  width: `${Math.round((resolvedCount / views.length) * 100)}%`,
+                }}
+              />
+            </div>
+            <span className="hint num">
+              {resolvedCount} of {views.length} answered
+              {requiredMissing > 0
+                ? ` · ${requiredMissing} required remaining`
+                : ''}
+            </span>
+            <span className="hint faint">
+              Saved answers come from your profile, documents, and the{' '}
+              <Link href="/answers">answer library</Link>.
+            </span>
+          </div>
+        ) : null}
+        {!spec ? (
+          <Empty>
+            No job spec captured yet — the task has not been processed.
+          </Empty>
+        ) : (
+          <div className="card">
+            {task.state === 'NEEDS_INPUT' ? (
+              <NeedsInputForm
+                taskId={task.id}
+                views={views}
+                documents={documentOptions}
+                company={job?.company ?? spec.company ?? ''}
+              />
+            ) : (
+              <QuestionsPanel views={views} />
+            )}
+          </div>
+        )}
+      </section>
+
+      {/* ---- secondary: description, history, network ---- */}
+      <SectionHeading>Details</SectionHeading>
+
       {latestDescription ? (
         <JobDescriptionPanel
           content={latestDescription.content}
@@ -378,262 +541,204 @@ export default async function TaskPage({
           versionCount={descriptionRows.length}
         />
       ) : (
-        <Empty>no job description captured for this posting yet.</Empty>
+        <Empty>No job description captured for this posting yet.</Empty>
       )}
 
-      {/* ---- state timeline ---- */}
-      <SectionHeading>state timeline</SectionHeading>
-      {eventRows.length === 0 ? (
-        <Empty>no events recorded for this task yet.</Empty>
-      ) : (
-        <ol style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-          {eventRows.map((event) => (
-            <li
-              key={event.id}
-              style={{
-                padding: '0.625rem 0',
-                borderBottom: `1px solid ${BORDER}`,
-              }}
-            >
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'baseline',
-                  gap: '0.625rem',
-                  flexWrap: 'wrap',
-                }}
-              >
-                <span
+      <details className="panel">
+        <summary>
+          Activity{' '}
+          <span className="hint">
+            {eventRows.length} event{eventRows.length === 1 ? '' : 's'}
+          </span>
+        </summary>
+        <div className="panel-body">
+          {eventRows.length === 0 ? (
+            <Empty>No events recorded for this task yet.</Empty>
+          ) : (
+            <ol className="timeline">
+              {eventRows.map((event) => (
+                <li key={event.id}>
+                  <div className="row" style={{ alignItems: 'baseline' }}>
+                    <span
+                      className="mono"
+                      style={{ fontSize: '0.8125rem', fontWeight: 700 }}
+                    >
+                      {event.type}
+                    </span>
+                    {event.fromState || event.toState ? (
+                      <span
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '0.375rem',
+                        }}
+                      >
+                        {event.fromState ? (
+                          <StateBadge state={event.fromState} />
+                        ) : null}
+                        {event.fromState && event.toState ? (
+                          <span className="faint">→</span>
+                        ) : null}
+                        {event.toState ? (
+                          <StateBadge state={event.toState} />
+                        ) : null}
+                      </span>
+                    ) : null}
+                    <span
+                      className="hint faint spread"
+                      style={{ whiteSpace: 'nowrap' }}
+                      title={formatDate(event.createdAt)}
+                    >
+                      {relativeTime(event.createdAt)}
+                    </span>
+                  </div>
+                  <EventData data={event.data} />
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      </details>
+
+      <details className="panel">
+        <summary>
+          Network log{' '}
+          <span className="hint">
+            {callRows.length} recorded call{callRows.length === 1 ? '' : 's'} ·
+            for debugging
+          </span>
+        </summary>
+        <div className="panel-body">
+          {callRows.length === 0 ? (
+            <Empty>No api calls recorded for this task yet.</Empty>
+          ) : (
+            <div style={{ overflowX: 'auto' }}>
+              <div style={{ minWidth: '42rem' }}>
+                <div
+                  className="mono faint"
                   style={{
-                    fontFamily: MONO,
-                    fontSize: '0.8rem',
+                    display: 'grid',
+                    gridTemplateColumns: CALL_GRID_COLUMNS,
+                    gap: '0.5rem',
+                    padding: '0.375rem 0.5rem',
+                    fontSize: '0.72rem',
                     fontWeight: 700,
                   }}
                 >
-                  {event.type}
-                </span>
-                {event.fromState || event.toState ? (
-                  <span
+                  <span>seq</span>
+                  <span>phase</span>
+                  <span>method</span>
+                  <span>url</span>
+                  <span>status</span>
+                  <span>duration</span>
+                  <span>mode</span>
+                </div>
+                {callRows.map((call) => (
+                  <details
+                    key={call.id}
                     style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '0.375rem',
+                      borderTop: '1px solid rgba(80, 92, 150, 0.1)',
                     }}
                   >
-                    {event.fromState ? (
-                      <StateBadge state={event.fromState} />
-                    ) : null}
-                    {event.fromState && event.toState ? (
-                      <span style={{ color: FAINT }}>→</span>
-                    ) : null}
-                    {event.toState ? (
-                      <StateBadge state={event.toState} />
-                    ) : null}
-                  </span>
-                ) : null}
-                <span
-                  style={{
-                    marginLeft: 'auto',
-                    fontSize: '0.75rem',
-                    color: MUTED,
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {formatDate(event.createdAt)}
-                  {event.createdAt ? (
-                    <span style={{ color: FAINT }}>
-                      {' '}
-                      · {relativeTime(event.createdAt)}
-                    </span>
-                  ) : null}
-                </span>
-              </div>
-              <EventData data={event.data} />
-            </li>
-          ))}
-        </ol>
-      )}
-
-      {/* ---- form & answers ---- */}
-      <SectionHeading>form &amp; answers</SectionHeading>
-      {spec ? (
-        <p
-          style={{ margin: '0 0 0.5rem 0', fontSize: '0.75rem', color: FAINT }}
-        >
-          {resolvedCount} resolved · {missingCount} unanswered
-          {task.state === 'NEEDS_INPUT'
-            ? ' — fill in the fields below; saved answers go to the '
-            : ' — saved answers come from your profile, documents, and the '}
-          <Link href="/answers" style={linkStyle}>
-            answer library
-          </Link>
-          {task.state === 'NEEDS_INPUT' ? ' and apply on requeue.' : '.'}
-        </p>
-      ) : null}
-      {!spec ? (
-        <Empty>
-          no job spec captured yet — the task has not been processed.
-        </Empty>
-      ) : task.state === 'NEEDS_INPUT' ? (
-        <NeedsInputForm
-          taskId={task.id}
-          views={views}
-          documents={documentOptions}
-          company={job?.company ?? spec.company ?? ''}
-        />
-      ) : (
-        <QuestionsPanel views={views} />
-      )}
-
-      {/* ---- api calls ---- */}
-      <SectionHeading>api calls</SectionHeading>
-      {callRows.length === 0 ? (
-        <Empty>no api calls recorded for this task yet.</Empty>
-      ) : (
-        <div style={{ overflowX: 'auto' }}>
-          <div style={{ minWidth: '42rem' }}>
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: CALL_GRID_COLUMNS,
-                gap: '0.5rem',
-                padding: '0.375rem 0.5rem',
-                fontSize: '0.7rem',
-                color: MUTED,
-                textTransform: 'uppercase',
-                letterSpacing: '0.05em',
-                fontFamily: MONO,
-              }}
-            >
-              <span>seq</span>
-              <span>phase</span>
-              <span>method</span>
-              <span>url</span>
-              <span>status</span>
-              <span>duration</span>
-              <span>mode</span>
-            </div>
-            {callRows.map((call) => {
-              const statusColor = httpStatusColor(call.responseStatus);
-              return (
-                <details
-                  key={call.id}
-                  style={{ borderTop: `1px solid ${BORDER}` }}
-                >
-                  <summary
-                    style={{
-                      display: 'grid',
-                      gridTemplateColumns: CALL_GRID_COLUMNS,
-                      gap: '0.5rem',
-                      alignItems: 'baseline',
-                      padding: '0.5rem',
-                      cursor: 'pointer',
-                      fontSize: '0.8rem',
-                    }}
-                  >
-                    <span style={{ fontFamily: MONO, color: MUTED }}>
-                      {call.seq}
-                    </span>
-                    <span style={{ fontFamily: MONO }}>{call.phase}</span>
-                    <span style={{ fontFamily: MONO }}>{call.method}</span>
-                    <span
-                      title={call.url}
+                    <summary
                       style={{
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        fontFamily: MONO,
-                        color: '#7aa2f7',
+                        display: 'grid',
+                        gridTemplateColumns: CALL_GRID_COLUMNS,
+                        gap: '0.5rem',
+                        alignItems: 'baseline',
+                        padding: '0.5rem',
+                        cursor: 'pointer',
+                        fontSize: '0.8125rem',
+                        listStyle: 'none',
                       }}
                     >
-                      {call.url}
-                    </span>
-                    <span>
-                      {call.responseStatus !== null ? (
-                        <Badge bg={statusColor.bg} fg={statusColor.fg}>
-                          {call.responseStatus}
-                        </Badge>
-                      ) : (
-                        <span style={{ color: FAINT }}>—</span>
-                      )}
-                    </span>
-                    <span style={{ color: MUTED, fontFamily: MONO }}>
-                      {call.durationMs !== null ? `${call.durationMs} ms` : '—'}
-                    </span>
-                    <span>
-                      {call.dryRun ? (
-                        <Badge
-                          bg="#2a2140"
-                          fg="#c4b5fd"
-                          title="payload constructed and recorded only — never sent"
-                        >
-                          dry-run
-                        </Badge>
-                      ) : (
-                        <Badge bg="#26262b" fg="#9ca3af">
-                          live
-                        </Badge>
-                      )}
-                    </span>
-                  </summary>
-                  <div style={{ padding: '0 0.5rem 0.75rem 0.5rem' }}>
-                    <div
-                      style={{
-                        fontSize: '0.75rem',
-                        color: MUTED,
-                        fontFamily: MONO,
-                        overflowWrap: 'anywhere',
-                        marginBottom: '0.25rem',
-                      }}
-                    >
-                      {call.method} {call.url}
-                      {call.createdAt ? ` · ${formatDate(call.createdAt)}` : ''}
+                      <span className="mono faint">{call.seq}</span>
+                      <span className="mono">{call.phase}</span>
+                      <span className="mono">{call.method}</span>
+                      <span
+                        title={call.url}
+                        className="mono truncate"
+                        style={{ color: 'var(--accent-deep)' }}
+                      >
+                        {call.url}
+                      </span>
+                      <span>
+                        {call.responseStatus !== null ? (
+                          <Badge tone={httpStatusTone(call.responseStatus)}>
+                            {call.responseStatus}
+                          </Badge>
+                        ) : (
+                          <span className="faint">—</span>
+                        )}
+                      </span>
+                      <span className="mono faint">
+                        {call.durationMs !== null
+                          ? `${call.durationMs} ms`
+                          : '—'}
+                      </span>
+                      <span>
+                        {call.dryRun ? (
+                          <Badge
+                            tone="accent"
+                            title="payload constructed and recorded only — never sent"
+                          >
+                            dry-run
+                          </Badge>
+                        ) : (
+                          <Badge tone="neutral">live</Badge>
+                        )}
+                      </span>
+                    </summary>
+                    <div style={{ padding: '0 0.5rem 0.75rem 0.5rem' }}>
+                      <div
+                        className="mono faint"
+                        style={{
+                          fontSize: '0.78rem',
+                          overflowWrap: 'anywhere',
+                          marginBottom: '0.25rem',
+                        }}
+                      >
+                        {call.method} {call.url}
+                        {call.createdAt
+                          ? ` · ${formatDate(call.createdAt)}`
+                          : ''}
+                      </div>
+                      <JsonDetails
+                        label="request headers"
+                        value={call.requestHeaders}
+                      />
+                      <JsonDetails
+                        label="request body"
+                        value={call.requestBody}
+                      />
+                      <JsonDetails
+                        label="response headers"
+                        value={call.responseHeaders}
+                      />
+                      <JsonDetails
+                        label="response body"
+                        value={call.responseBody}
+                      />
+                      {call.requestHeaders == null &&
+                      call.requestBody == null &&
+                      call.responseHeaders == null &&
+                      call.responseBody == null ? (
+                        <Empty>
+                          No headers or bodies recorded for this call.
+                        </Empty>
+                      ) : null}
                     </div>
-                    <JsonDetails
-                      label="request headers"
-                      value={call.requestHeaders}
-                    />
-                    <JsonDetails
-                      label="request body"
-                      value={call.requestBody}
-                    />
-                    <JsonDetails
-                      label="response headers"
-                      value={call.responseHeaders}
-                    />
-                    <JsonDetails
-                      label="response body"
-                      value={call.responseBody}
-                    />
-                    {call.requestHeaders == null &&
-                    call.requestBody == null &&
-                    call.responseHeaders == null &&
-                    call.responseBody == null ? (
-                      <Empty>
-                        no headers or bodies recorded for this call.
-                      </Empty>
-                    ) : null}
-                  </div>
-                </details>
-              );
-            })}
-          </div>
+                  </details>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
-      )}
+      </details>
 
-      {/* ---- actions ---- */}
-      <SectionHeading>actions</SectionHeading>
-      {task.state === 'REVIEW' ? (
-        <TaskActions taskId={task.id} mode="approve" />
-      ) : task.state === 'FAILED' ? (
-        <TaskActions taskId={task.id} mode="requeue" />
-      ) : task.state === 'NEEDS_INPUT' ? (
-        <Empty>
-          use “Save answers” / “Save &amp; requeue” in the form above.
-        </Empty>
-      ) : (
-        <Empty>no actions available while the task is in {task.state}.</Empty>
-      )}
+      <p className="hint faint mono" style={{ marginTop: '1.5rem' }}>
+        task {task.id}
+      </p>
     </div>
   );
 }

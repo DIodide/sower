@@ -2,9 +2,13 @@
 // interactive NEEDS_INPUT client form. No directive: pure presentation +
 // plain HTML form controls (names are read by the saveAnswers server
 // action), so it composes in either environment.
-import type { CSSProperties } from 'react';
-import { BORDER, Empty, ExpandableText, MONO, MUTED } from '../../../lib/ui';
-import { Badge, FAINT, INPUT_BG, INPUT_BORDER } from './ui';
+//
+// Layout: questions waiting on the user come first (required before
+// optional), auto-filled answers are grouped behind them so the eye lands on
+// what still needs doing.
+import type { Tone } from '../../../lib/format';
+import { Empty, ExpandableText } from '../../../lib/ui';
+import { Badge } from './ui';
 
 export interface QuestionOptionView {
   label: string;
@@ -37,47 +41,23 @@ export interface DocumentOption {
   createdLabel: string;
 }
 
-const SOURCE_COLORS: Record<string, { bg: string; fg: string }> = {
-  profile: { bg: '#16283f', fg: '#93c5fd' },
-  bank: { bg: '#2a2140', fg: '#c4b5fd' },
-  default: { bg: '#26262b', fg: '#9ca3af' },
-  user: { bg: '#3a2f14', fg: '#fbbf24' },
-  document: { bg: '#143322', fg: '#4ade80' },
-};
-
-const FALLBACK_SOURCE_COLOR = { bg: '#26262b', fg: '#9ca3af' };
-
-const rowStyle: CSSProperties = {
-  padding: '0.75rem 0',
-  borderBottom: `1px solid ${BORDER}`,
-};
-
-const labelRowStyle: CSSProperties = {
-  display: 'flex',
-  alignItems: 'baseline',
-  gap: '0.5rem',
-  flexWrap: 'wrap',
-  marginBottom: '0.375rem',
-};
-
-const inputStyle: CSSProperties = {
-  backgroundColor: INPUT_BG,
-  border: `1px solid ${INPUT_BORDER}`,
-  borderRadius: '0.375rem',
-  color: '#d7dae0',
-  fontSize: '0.875rem',
-  padding: '0.375rem 0.5rem',
-  width: '100%',
-  maxWidth: '32rem',
-  boxSizing: 'border-box',
-  fontFamily: 'inherit',
+/** Human name + tone for each answer source. */
+const SOURCE_META: Record<string, { label: string; tone: Tone | 'accent' }> = {
+  profile: { label: 'from profile', tone: 'progress' },
+  bank: { label: 'from answer bank', tone: 'accent' },
+  user: { label: 'from you', tone: 'attention' },
+  document: { label: 'document', tone: 'success' },
+  default: { label: 'default', tone: 'neutral' },
 };
 
 function SourceChip({ source }: { source: string }) {
-  const color = SOURCE_COLORS[source] ?? FALLBACK_SOURCE_COLOR;
+  const meta = SOURCE_META[source] ?? {
+    label: source,
+    tone: 'neutral' as const,
+  };
   return (
-    <Badge bg={color.bg} fg={color.fg} title={`answer source: ${source}`}>
-      {source}
+    <Badge tone={meta.tone} title={`answer source: ${source}`}>
+      {meta.label}
     </Badge>
   );
 }
@@ -85,17 +65,10 @@ function SourceChip({ source }: { source: string }) {
 function ResolvedValue({ view }: { view: QuestionView }) {
   const values = view.resolvedValues ?? [];
   return (
-    <div
-      style={{
-        display: 'flex',
-        alignItems: 'baseline',
-        gap: '0.5rem',
-        flexWrap: 'wrap',
-      }}
-    >
-      <div style={{ fontSize: '0.875rem', minWidth: 0, flex: '1 1 16rem' }}>
+    <div className="row" style={{ alignItems: 'baseline' }}>
+      <div className="q-value" style={{ minWidth: 0, flex: '1 1 16rem' }}>
         {values.length === 0 ? (
-          <span style={{ color: FAINT }}>—</span>
+          <span className="faint">—</span>
         ) : values.length === 1 && values[0] !== undefined ? (
           <ExpandableText text={values[0]} max={200} />
         ) : (
@@ -127,21 +100,20 @@ function EssayScopeChoice({
 }) {
   return (
     <label
+      className="hint"
       style={{
         display: 'flex',
         alignItems: 'baseline',
         gap: '0.5rem',
-        marginTop: '0.375rem',
-        maxWidth: '32rem',
-        fontSize: '0.75rem',
-        color: MUTED,
+        marginTop: '0.4rem',
+        maxWidth: '34rem',
         cursor: 'pointer',
       }}
     >
       <input type="checkbox" name={`global:${questionId}`} value="1" />
       <span>
-        reuse for all companies — otherwise this answer is saved for{' '}
-        <strong style={{ color: '#c4b5fd' }}>{company}</strong> only
+        Reuse this answer for all companies — otherwise it is saved for{' '}
+        <strong>{company}</strong> only.
       </span>
     </label>
   );
@@ -162,20 +134,17 @@ function MissingInput({
     const kindLabel = view.docKind.replace('_', ' ');
     const matching = documents.filter((d) => d.kind === view.docKind);
     return (
-      <div style={{ display: 'grid', gap: '0.375rem', maxWidth: '32rem' }}>
+      <div style={{ display: 'grid', gap: '0.4rem', maxWidth: '34rem' }}>
         {matching.length > 0 ? (
           <>
-            <label
-              htmlFor={`doc-${view.id}`}
-              style={{ fontSize: '0.75rem', color: MUTED }}
-            >
-              use an existing {kindLabel} document
+            <label htmlFor={`doc-${view.id}`} className="field-label">
+              Use a stored {kindLabel}
             </label>
             <select
               id={`doc-${view.id}`}
               name={`doc:${view.id}`}
               defaultValue=""
-              style={inputStyle}
+              className="field"
             >
               <option value="">— none —</option>
               {matching.map((d) => (
@@ -186,26 +155,18 @@ function MissingInput({
             </select>
           </>
         ) : (
-          <p style={{ margin: 0, fontSize: '0.75rem', color: FAINT }}>
-            no stored {kindLabel} documents yet — upload one below.
+          <p className="hint" style={{ margin: 0 }}>
+            No stored {kindLabel} yet — upload one below.
           </p>
         )}
-        <label
-          htmlFor={`file-${view.id}`}
-          style={{ fontSize: '0.75rem', color: MUTED }}
-        >
-          or upload a new file
+        <label htmlFor={`file-${view.id}`} className="field-label">
+          {matching.length > 0 ? 'Or upload a new file' : 'Upload a file'}
         </label>
-        <input
-          id={`file-${view.id}`}
-          name={`file:${view.id}`}
-          type="file"
-          style={{ fontSize: '0.8rem' }}
-        />
+        <input id={`file-${view.id}`} name={`file:${view.id}`} type="file" />
         {view.docKind === 'other' ? (
-          <p style={{ margin: 0, fontSize: '0.7rem', color: FAINT }}>
-            uploads are stored in the vault, but only resume / cover letter
-            questions are auto-attached on requeue.
+          <p className="hint faint" style={{ margin: 0, fontSize: '0.75rem' }}>
+            Uploads are stored in the vault, but only resume / cover letter
+            questions are auto-attached on re-run.
           </p>
         ) : null}
       </div>
@@ -219,7 +180,8 @@ function MissingInput({
         name={`q:${view.id}`}
         defaultValue=""
         aria-required={view.required}
-        style={inputStyle}
+        className="field"
+        style={{ maxWidth: '34rem' }}
       >
         <option value="">— select —</option>
         {view.options.map((o) => (
@@ -234,25 +196,21 @@ function MissingInput({
   if (view.type === 'multiselect') {
     return (
       <fieldset
+        className="well"
         style={{
-          border: `1px solid ${INPUT_BORDER}`,
-          borderRadius: '0.375rem',
-          padding: '0.5rem 0.75rem',
+          border: 'none',
           margin: 0,
-          maxWidth: '32rem',
+          maxWidth: '34rem',
           display: 'grid',
-          gap: '0.25rem',
+          gap: '0.375rem',
+          padding: '0.75rem 1rem',
         }}
       >
-        <legend
-          style={{ fontSize: '0.7rem', color: MUTED, padding: '0 0.25rem' }}
-        >
-          select all that apply
+        <legend className="field-label" style={{ padding: 0 }}>
+          Select all that apply
         </legend>
         {view.options.length === 0 ? (
-          <span style={{ fontSize: '0.75rem', color: FAINT }}>
-            no options provided by the platform.
-          </span>
+          <span className="hint">No options provided by the platform.</span>
         ) : (
           view.options.map((o) => (
             <label
@@ -261,7 +219,8 @@ function MissingInput({
                 display: 'flex',
                 alignItems: 'center',
                 gap: '0.5rem',
-                fontSize: '0.875rem',
+                fontSize: '0.9rem',
+                cursor: 'pointer',
               }}
             >
               <input type="checkbox" name={`q:${view.id}`} value={o.value} />
@@ -282,7 +241,8 @@ function MissingInput({
           rows={4}
           maxLength={20000}
           aria-required={view.required}
-          style={{ ...inputStyle, resize: 'vertical' }}
+          className="field"
+          style={{ maxWidth: '34rem' }}
         />
         {scopeCompany ? (
           <EssayScopeChoice questionId={view.id} company={scopeCompany} />
@@ -299,11 +259,71 @@ function MissingInput({
         type="text"
         maxLength={20000}
         aria-required={view.required}
-        style={inputStyle}
+        className="field"
+        style={{ maxWidth: '34rem' }}
       />
       {scopeCompany ? (
         <EssayScopeChoice questionId={view.id} company={scopeCompany} />
       ) : null}
+    </div>
+  );
+}
+
+function QuestionRow({
+  view,
+  interactive,
+  documents,
+  scopeCompany,
+}: {
+  view: QuestionView;
+  interactive: boolean;
+  documents: DocumentOption[];
+  scopeCompany?: string;
+}) {
+  return (
+    <div className="q-row">
+      <div className="q-label-row">
+        <label
+          className="q-label"
+          htmlFor={
+            interactive &&
+            view.status === 'missing' &&
+            view.type !== 'file' &&
+            view.type !== 'multiselect'
+              ? `q-${view.id}`
+              : undefined
+          }
+        >
+          {view.label}
+        </label>
+        {view.status === 'missing' ? (
+          view.required ? (
+            <Badge tone="danger">required</Badge>
+          ) : (
+            <Badge tone="neutral">optional</Badge>
+          )
+        ) : null}
+        <span className="q-meta">
+          {view.id} · {view.type}
+        </span>
+      </div>
+      {view.status === 'resolved' ? (
+        <ResolvedValue view={view} />
+      ) : view.status === 'missing' ? (
+        interactive ? (
+          <MissingInput
+            view={view}
+            documents={documents}
+            scopeCompany={scopeCompany}
+          />
+        ) : (
+          <span className="hint faint">No answer yet.</span>
+        )
+      ) : (
+        <span className="hint faint">
+          Not resolved yet — the task has not been processed.
+        </span>
+      )}
     </div>
   );
 }
@@ -325,62 +345,112 @@ export function QuestionsPanel({
   scopeCompany?: string;
 }) {
   if (views.length === 0) {
-    return <Empty>the job spec contains no questions.</Empty>;
+    return <Empty>The job spec contains no questions.</Empty>;
   }
+
+  // Stable partition: required-missing first, then optional-missing.
+  const missing = [...views.filter((v) => v.status === 'missing')].sort(
+    (a, b) => Number(b.required) - Number(a.required),
+  );
+  const resolved = views.filter((v) => v.status === 'resolved');
+  const unknown = views.filter((v) => v.status === 'unknown');
+
+  const rowProps = { interactive, documents, scopeCompany };
+
+  const missingSection =
+    missing.length > 0 ? (
+      <section aria-label="unanswered questions">
+        <h3
+          className="section-title"
+          style={{ margin: '0.5rem 0 0.25rem', fontSize: '0.95rem' }}
+        >
+          {interactive ? 'Waiting on you' : 'Unanswered'}{' '}
+          <span className="count">{missing.length}</span>
+          {!interactive && missing.every((v) => !v.required) ? (
+            <span className="hint" style={{ fontWeight: 600 }}>
+              all optional — left blank on purpose
+            </span>
+          ) : null}
+        </h3>
+        {missing.map((view) => (
+          <QuestionRow key={view.id} view={view} {...rowProps} />
+        ))}
+      </section>
+    ) : null;
+
+  const resolvedSection =
+    resolved.length > 0 ? (
+      interactive ? (
+        // While answering, auto-filled answers stay collapsed so the eye
+        // lands on what still needs doing.
+        <details style={{ marginTop: missing.length > 0 ? '1.25rem' : 0 }}>
+          <summary
+            className="section-title"
+            style={{
+              margin: '0.5rem 0 0.25rem',
+              fontSize: '0.95rem',
+              cursor: 'pointer',
+              userSelect: 'none',
+            }}
+          >
+            Auto-filled <span className="count">{resolved.length}</span>
+            <span className="hint" style={{ fontWeight: 600 }}>
+              worth a skim before you approve
+            </span>
+          </summary>
+          {resolved.map((view) => (
+            <QuestionRow key={view.id} view={view} {...rowProps} />
+          ))}
+        </details>
+      ) : (
+        <section aria-label="answered questions">
+          <h3
+            className="section-title"
+            style={{ margin: '0.5rem 0 0.25rem', fontSize: '0.95rem' }}
+          >
+            Answers <span className="count">{resolved.length}</span>
+          </h3>
+          {resolved.map((view) => (
+            <QuestionRow key={view.id} view={view} {...rowProps} />
+          ))}
+        </section>
+      )
+    ) : null;
+
   return (
     <div>
-      {views.map((view) => (
-        <div key={view.id} style={rowStyle}>
-          <div style={labelRowStyle}>
-            <label
-              htmlFor={
-                interactive &&
-                view.status === 'missing' &&
-                view.type !== 'file' &&
-                view.type !== 'multiselect'
-                  ? `q-${view.id}`
-                  : undefined
-              }
-              style={{ fontSize: '0.875rem', fontWeight: 600 }}
+      {/* Answering: gaps first. Reviewing: what you're approving first. */}
+      {interactive ? (
+        <>
+          {missingSection}
+          {resolvedSection}
+        </>
+      ) : (
+        <>
+          {resolvedSection}
+          {missingSection ? (
+            <div style={{ marginTop: resolved.length > 0 ? '1.25rem' : 0 }}>
+              {missingSection}
+            </div>
+          ) : null}
+        </>
+      )}
+
+      {unknown.length > 0 ? (
+        <section aria-label="questions not yet resolved">
+          {missing.length > 0 || resolved.length > 0 ? (
+            <h3
+              className="section-title"
+              style={{ margin: '1.25rem 0 0.25rem', fontSize: '0.95rem' }}
             >
-              {view.label}
-            </label>
-            <span
-              style={{ fontSize: '0.7rem', color: FAINT, fontFamily: MONO }}
-            >
-              {view.id} · {view.type}
-            </span>
-            {view.required ? (
-              <Badge bg="#3a1a1a" fg="#f87171">
-                required
-              </Badge>
-            ) : (
-              <Badge bg="#26262b" fg="#9ca3af">
-                optional
-              </Badge>
-            )}
-          </div>
-          {view.status === 'resolved' ? (
-            <ResolvedValue view={view} />
-          ) : view.status === 'missing' ? (
-            interactive ? (
-              <MissingInput
-                view={view}
-                documents={documents}
-                scopeCompany={scopeCompany}
-              />
-            ) : (
-              <span style={{ fontSize: '0.8rem', color: '#fbbf24' }}>
-                unanswered
-              </span>
-            )
-          ) : (
-            <span style={{ fontSize: '0.8rem', color: FAINT }}>
-              not yet resolved — the task has not been processed.
-            </span>
-          )}
-        </div>
-      ))}
+              Not yet processed <span className="count">{unknown.length}</span>
+            </h3>
+          ) : null}
+          {unknown.map((view) => (
+            <QuestionRow key={view.id} view={view} {...rowProps} />
+          ))}
+        </section>
+      ) : null}
     </div>
   );
 }

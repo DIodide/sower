@@ -8,40 +8,19 @@ export default function TaskError({
   reset: () => void;
 }) {
   return (
-    <div
-      style={{
-        backgroundColor: '#0f1420',
-        border: '1px solid #3a1a1a',
-        borderRadius: '0.5rem',
-        padding: '1.25rem',
-      }}
-    >
+    <div className="card" style={{ maxWidth: '36rem' }}>
       <h2
-        style={{ margin: '0 0 0.5rem 0', fontSize: '1rem', color: '#f87171' }}
+        className="section-title"
+        style={{ margin: '0 0 0.5rem', color: 'var(--danger-fg)' }}
       >
-        something went wrong loading this task
+        Something went wrong loading this task
       </h2>
-      <p
-        style={{ margin: '0 0 1rem 0', fontSize: '0.875rem', color: '#8b93a7' }}
-      >
+      <p className="hint" style={{ margin: '0 0 1rem' }}>
         {error.digest
           ? `error digest: ${error.digest}`
           : (error.message ?? 'unknown error')}
       </p>
-      <button
-        type="button"
-        onClick={reset}
-        style={{
-          backgroundColor: '#16283f',
-          color: '#93c5fd',
-          border: '1px solid #2a3145',
-          borderRadius: '0.375rem',
-          padding: '0.375rem 0.875rem',
-          fontSize: '0.8rem',
-          fontWeight: 600,
-          cursor: 'pointer',
-        }}
-      >
+      <button type="button" onClick={reset} className="btn btn--primary">
         Try again
       </button>
     </div>

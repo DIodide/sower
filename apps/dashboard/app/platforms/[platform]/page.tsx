@@ -6,13 +6,8 @@ import { notFound } from 'next/navigation';
 import { getDb } from '../../../lib/db';
 import { formatDate, relativeTime } from '../../../lib/format';
 import {
-  cellStyle,
   Empty,
   ExpandableText,
-  headStyle,
-  linkStyle,
-  MONO,
-  MUTED,
   SectionHeading,
   StateBadge,
   TableWrap,
@@ -170,34 +165,23 @@ export default async function PlatformPage({
 
   return (
     <div>
-      <h1
-        style={{
-          fontSize: '1.125rem',
-          fontWeight: 600,
-          fontFamily: MONO,
-          margin: '0 0 0.25rem',
-        }}
-      >
-        {platform}
-      </h1>
-      <p style={{ color: MUTED, fontSize: '0.875rem', margin: 0 }}>
+      <p style={{ margin: '0 0 1rem' }}>
+        <Link href="/platforms" className="hint">
+          ← All platforms
+        </Link>
+      </p>
+      <h1 className="page-title mono">{platform}</h1>
+      <p className="page-sub">
         {jobTotal} job{jobTotal === 1 ? '' : 's'} · {taskTotal} task
         {taskTotal === 1 ? '' : 's'} · {tenantList.length} tenant
         {tenantList.length === 1 ? '' : 's'}
       </p>
 
-      <SectionHeading>state totals</SectionHeading>
+      <SectionHeading>State totals</SectionHeading>
       {stateList.length === 0 ? (
-        <Empty>no tasks on this platform yet.</Empty>
+        <Empty>No tasks on this platform yet.</Empty>
       ) : (
-        <div
-          style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: '0.5rem',
-            alignItems: 'center',
-          }}
-        >
+        <div className="row" style={{ gap: '0.5rem' }}>
           {stateList.map(([state, n]) => (
             <span
               key={state}
@@ -208,44 +192,44 @@ export default async function PlatformPage({
               }}
             >
               <StateBadge state={state} />
-              <span style={{ color: MUTED, fontSize: '0.8125rem' }}>{n}</span>
+              <span className="hint num">{n}</span>
             </span>
           ))}
         </div>
       )}
 
-      <SectionHeading>tenants</SectionHeading>
+      <SectionHeading count={tenantList.length}>Tenants</SectionHeading>
       {tenantList.length === 0 ? (
-        <Empty>no tenants recorded for this platform.</Empty>
+        <Empty>No tenants recorded for this platform.</Empty>
       ) : (
         <TableWrap>
           <thead>
             <tr>
-              <th style={headStyle}>tenant</th>
-              <th style={headStyle}>jobs</th>
-              <th style={headStyle}>tasks</th>
-              <th style={headStyle}>latest activity</th>
+              <th>Tenant</th>
+              <th>Jobs</th>
+              <th>Tasks</th>
+              <th>Latest activity</th>
             </tr>
           </thead>
           <tbody>
             {tenantList.map((summary) => (
               <tr key={summary.tenant ?? NO_TENANT}>
-                <td style={{ ...cellStyle, fontFamily: MONO }}>
+                <td className="mono">
                   {summary.tenant ? (
                     <Link
                       href={`/tenants/${encodeURIComponent(platform)}/${encodeURIComponent(summary.tenant)}`}
-                      style={linkStyle}
                     >
                       {summary.tenant}
                     </Link>
                   ) : (
-                    <span style={{ color: MUTED }}>{NO_TENANT}</span>
+                    <span className="faint">{NO_TENANT}</span>
                   )}
                 </td>
-                <td style={cellStyle}>{summary.jobIds.size}</td>
-                <td style={cellStyle}>{summary.tasks}</td>
+                <td className="num">{summary.jobIds.size}</td>
+                <td className="num">{summary.tasks}</td>
                 <td
-                  style={{ ...cellStyle, color: MUTED, whiteSpace: 'nowrap' }}
+                  className="faint"
+                  style={{ whiteSpace: 'nowrap' }}
                   title={formatDate(summary.latest)}
                 >
                   {relativeTime(summary.latest)}
@@ -257,48 +241,46 @@ export default async function PlatformPage({
       )}
 
       <SectionHeading>
-        common fields{' '}
-        <span style={{ textTransform: 'none', letterSpacing: 0 }}>
-          (census over {specTotal} stored job spec{specTotal === 1 ? '' : 's'})
+        Common fields{' '}
+        <span className="hint" style={{ fontWeight: 600 }}>
+          census over {specTotal} stored job spec{specTotal === 1 ? '' : 's'}
         </span>
       </SectionHeading>
       {fieldList.length === 0 ? (
         <Empty>
-          no job specs stored yet — fields appear once tasks are processed.
+          No job specs stored yet — fields appear once tasks are processed.
         </Empty>
       ) : (
         <TableWrap>
           <thead>
             <tr>
-              <th style={headStyle}>field id</th>
-              <th style={headStyle}>sample label</th>
-              <th style={headStyle}>type</th>
-              <th style={headStyle}>present</th>
-              <th style={headStyle}>required</th>
+              <th>Field id</th>
+              <th>Sample label</th>
+              <th>Type</th>
+              <th>Present</th>
+              <th>Required</th>
             </tr>
           </thead>
           <tbody>
             {fieldList.map((field) => (
               <tr key={field.id}>
-                <td style={{ ...cellStyle, fontFamily: MONO }}>{field.id}</td>
-                <td style={cellStyle}>
+                <td className="mono">{field.id}</td>
+                <td>
                   <ExpandableText text={field.sampleLabel} max={80} />
                 </td>
-                <td style={{ ...cellStyle, fontFamily: MONO, color: MUTED }}>
-                  {field.type}
-                </td>
+                <td className="mono faint">{field.type}</td>
                 <td
-                  style={cellStyle}
+                  className="num"
                   title={`${field.present}/${specTotal} jobs`}
                 >
                   {pct(field.present, specTotal)}
-                  <span style={{ color: MUTED, fontSize: '0.75rem' }}>
+                  <span className="faint" style={{ fontSize: '0.78rem' }}>
                     {' '}
                     ({field.present}/{specTotal})
                   </span>
                 </td>
                 <td
-                  style={cellStyle}
+                  className="num"
                   title={`${field.required}/${specTotal} jobs`}
                 >
                   {pct(field.required, specTotal)}
@@ -309,27 +291,28 @@ export default async function PlatformPage({
         </TableWrap>
       )}
 
-      <SectionHeading>recent failures</SectionHeading>
+      <SectionHeading>Recent failures</SectionHeading>
       {failureList.length === 0 ? (
-        <Empty>no failures recorded. good sign.</Empty>
+        <Empty>No failures recorded. Good sign.</Empty>
       ) : (
         <TableWrap>
           <thead>
             <tr>
-              <th style={headStyle}>error</th>
-              <th style={headStyle}>tasks</th>
-              <th style={headStyle}>last seen</th>
+              <th>Error</th>
+              <th>Tasks</th>
+              <th>Last seen</th>
             </tr>
           </thead>
           <tbody>
             {failureList.map((failure) => (
               <tr key={failure.error}>
-                <td style={{ ...cellStyle, color: '#f87171' }}>
+                <td style={{ color: 'var(--danger-fg)' }}>
                   <ExpandableText text={failure.error} max={140} />
                 </td>
-                <td style={cellStyle}>{failure.count}</td>
+                <td className="num">{failure.count}</td>
                 <td
-                  style={{ ...cellStyle, color: MUTED, whiteSpace: 'nowrap' }}
+                  className="faint"
+                  style={{ whiteSpace: 'nowrap' }}
                   title={formatDate(failure.latest)}
                 >
                   {relativeTime(failure.latest)}

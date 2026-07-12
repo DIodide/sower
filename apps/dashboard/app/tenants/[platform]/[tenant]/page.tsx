@@ -6,13 +6,8 @@ import { notFound } from 'next/navigation';
 import { getDb } from '../../../../lib/db';
 import { formatDate, relativeTime } from '../../../../lib/format';
 import {
-  cellStyle,
   Empty,
   ExpandableText,
-  headStyle,
-  linkStyle,
-  MONO,
-  MUTED,
   SectionHeading,
   StateBadge,
   TableWrap,
@@ -118,70 +113,63 @@ export default async function TenantPage({
 
   return (
     <div>
-      <h1
-        style={{
-          fontSize: '1.125rem',
-          fontWeight: 600,
-          margin: '0 0 0.25rem',
-        }}
-      >
-        {company ?? tenant}
-      </h1>
-      <p style={{ color: MUTED, fontSize: '0.875rem', margin: 0 }}>
+      <p style={{ margin: '0 0 1rem' }}>
         <Link
           href={`/platforms/${encodeURIComponent(platform)}`}
-          style={linkStyle}
+          className="hint"
         >
+          ← {platform}
+        </Link>
+      </p>
+      <h1 className="page-title">{company ?? tenant}</h1>
+      <p className="page-sub">
+        <Link href={`/platforms/${encodeURIComponent(platform)}`}>
           {platform}
         </Link>
-        <span style={{ fontFamily: MONO }}> / {tenant}</span> · {jobCount} job
+        <span className="mono"> / {tenant}</span> · {jobCount} job
         {jobCount === 1 ? '' : 's'} · {taskCount} task
         {taskCount === 1 ? '' : 's'}
       </p>
 
-      <SectionHeading>jobs &amp; tasks</SectionHeading>
+      <SectionHeading>Jobs &amp; tasks</SectionHeading>
       <TableWrap>
         <thead>
           <tr>
-            <th style={headStyle}>job</th>
-            <th style={headStyle}>posting</th>
-            <th style={headStyle}>task</th>
-            <th style={headStyle}>state</th>
-            <th style={headStyle}>updated</th>
+            <th>Job</th>
+            <th>Posting</th>
+            <th>Task</th>
+            <th>State</th>
+            <th>Updated</th>
           </tr>
         </thead>
         <tbody>
           {rows.map((row) => (
             <tr key={`${row.jobId}:${row.taskId ?? 'none'}`}>
-              <td style={cellStyle}>{row.title ?? row.jobId}</td>
-              <td style={cellStyle}>
-                <a
-                  href={row.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  style={linkStyle}
-                >
+              <td className="cell-main">{row.title ?? row.jobId}</td>
+              <td>
+                <a href={row.url} target="_blank" rel="noreferrer">
                   open ↗
                 </a>
               </td>
-              <td style={{ ...cellStyle, fontFamily: MONO }}>
+              <td className="mono">
                 {row.taskId ? (
-                  <Link href={`/tasks/${row.taskId}`} style={linkStyle}>
+                  <Link href={`/tasks/${row.taskId}`}>
                     {row.taskId.slice(0, 8)}
                   </Link>
                 ) : (
-                  <span style={{ color: MUTED }}>no task</span>
+                  <span className="faint">no task</span>
                 )}
               </td>
-              <td style={cellStyle}>
+              <td>
                 {row.state ? (
                   <StateBadge state={row.state} />
                 ) : (
-                  <span style={{ color: MUTED }}>—</span>
+                  <span className="faint">—</span>
                 )}
               </td>
               <td
-                style={{ ...cellStyle, color: MUTED, whiteSpace: 'nowrap' }}
+                className="faint"
+                style={{ whiteSpace: 'nowrap' }}
                 title={formatDate(row.taskUpdatedAt ?? row.jobCreatedAt)}
               >
                 {relativeTime(row.taskUpdatedAt ?? row.jobCreatedAt)}
@@ -192,59 +180,55 @@ export default async function TenantPage({
       </TableWrap>
 
       <SectionHeading>
-        question schema{' '}
-        <span style={{ textTransform: 'none', letterSpacing: 0 }}>
-          (union across {specTotal} job spec{specTotal === 1 ? '' : 's'})
+        Question schema{' '}
+        <span className="hint" style={{ fontWeight: 600 }}>
+          union across {specTotal} job spec{specTotal === 1 ? '' : 's'}
         </span>
       </SectionHeading>
       {questionList.length === 0 ? (
         <Empty>
-          no job specs stored yet — questions appear once tasks are processed.
+          No job specs stored yet — questions appear once tasks are processed.
         </Empty>
       ) : (
         <TableWrap>
           <thead>
             <tr>
-              <th style={headStyle}>field id</th>
-              <th style={headStyle}>label</th>
-              <th style={headStyle}>type</th>
-              <th style={headStyle}>required</th>
-              <th style={headStyle}>in specs</th>
-              <th style={headStyle}>options</th>
+              <th>Field id</th>
+              <th>Label</th>
+              <th>Type</th>
+              <th>Required</th>
+              <th>In specs</th>
+              <th>Options</th>
             </tr>
           </thead>
           <tbody>
             {questionList.map(({ question, present, required }) => (
               <tr key={question.id}>
-                <td style={{ ...cellStyle, fontFamily: MONO }}>
-                  {question.id}
-                </td>
-                <td style={cellStyle}>
+                <td className="mono">{question.id}</td>
+                <td>
                   <ExpandableText text={question.label} max={90} />
                 </td>
-                <td style={{ ...cellStyle, fontFamily: MONO, color: MUTED }}>
-                  {question.type}
-                </td>
-                <td style={cellStyle}>
+                <td className="mono faint">{question.type}</td>
+                <td>
                   {required === 0 ? (
-                    <span style={{ color: MUTED }}>no</span>
+                    <span className="faint">no</span>
                   ) : required === present ? (
                     'yes'
                   ) : (
                     `${required}/${present}`
                   )}
                 </td>
-                <td style={{ ...cellStyle, color: MUTED }}>
+                <td className="num faint">
                   {present}/{specTotal}
                 </td>
-                <td style={cellStyle}>
+                <td>
                   {question.options && question.options.length > 0 ? (
                     <ExpandableText
                       text={question.options.map((o) => o.label).join(', ')}
                       max={60}
                     />
                   ) : (
-                    <span style={{ color: MUTED }}>—</span>
+                    <span className="faint">—</span>
                   )}
                 </td>
               </tr>
@@ -253,51 +237,52 @@ export default async function TenantPage({
         </TableWrap>
       )}
 
-      <SectionHeading>recent events</SectionHeading>
+      <SectionHeading>Recent events</SectionHeading>
       {eventRows.length === 0 ? (
-        <Empty>no events yet for this tenant.</Empty>
+        <Empty>No events yet for this tenant.</Empty>
       ) : (
         <TableWrap>
           <thead>
             <tr>
-              <th style={headStyle}>when</th>
-              <th style={headStyle}>event</th>
-              <th style={headStyle}>transition</th>
-              <th style={headStyle}>task</th>
-              <th style={headStyle}>data</th>
+              <th>When</th>
+              <th>Event</th>
+              <th>Transition</th>
+              <th>Task</th>
+              <th>Data</th>
             </tr>
           </thead>
           <tbody>
             {eventRows.map((event) => (
               <tr key={event.id}>
                 <td
-                  style={{ ...cellStyle, color: MUTED, whiteSpace: 'nowrap' }}
+                  className="faint"
+                  style={{ whiteSpace: 'nowrap' }}
                   title={formatDate(event.createdAt)}
                 >
                   {relativeTime(event.createdAt)}
                 </td>
-                <td style={{ ...cellStyle, fontFamily: MONO }}>{event.type}</td>
-                <td style={{ ...cellStyle, whiteSpace: 'nowrap' }}>
+                <td className="mono">{event.type}</td>
+                <td style={{ whiteSpace: 'nowrap' }}>
                   {event.fromState ? (
                     <StateBadge state={event.fromState} />
                   ) : (
-                    <span style={{ color: MUTED }}>—</span>
+                    <span className="faint">—</span>
                   )}
-                  <span style={{ color: MUTED }}> → </span>
+                  <span className="faint"> → </span>
                   {event.toState ? (
                     <StateBadge state={event.toState} />
                   ) : (
-                    <span style={{ color: MUTED }}>—</span>
+                    <span className="faint">—</span>
                   )}
                 </td>
-                <td style={{ ...cellStyle, fontFamily: MONO }}>
-                  <Link href={`/tasks/${event.taskId}`} style={linkStyle}>
+                <td className="mono">
+                  <Link href={`/tasks/${event.taskId}`}>
                     {event.taskId.slice(0, 8)}
                   </Link>
                 </td>
-                <td style={cellStyle}>
+                <td>
                   {event.data == null ? (
-                    <span style={{ color: MUTED }}>—</span>
+                    <span className="faint">—</span>
                   ) : (
                     <ExpandableText
                       text={JSON.stringify(event.data, null, 2)}

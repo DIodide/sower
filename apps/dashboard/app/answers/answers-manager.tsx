@@ -5,11 +5,11 @@
 // through the server actions in ./actions.ts, which call the sower api's
 // /answer-library routes with x-api-key.
 
-import type { CSSProperties, ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { useMemo, useState, useTransition } from 'react';
 import { formatDate, relativeTime, truncate } from '../../lib/format';
-import { BORDER, Empty, MONO, MUTED, PANEL_BG } from '../../lib/ui';
-import { Badge, FAINT, INPUT_BG, INPUT_BORDER } from '../tasks/[id]/ui';
+import { Empty } from '../../lib/ui';
+import { Badge } from '../tasks/[id]/ui';
 import type { ActionResult } from './actions';
 import {
   createLibraryAnswer,
@@ -19,71 +19,12 @@ import {
 import type { LibraryEntry } from './library';
 
 const MAX_VALUE_LENGTH = 20_000;
-const GLOBAL_SCOPE_COLOR = { bg: '#26262b', fg: '#9ca3af' };
-const COMPANY_SCOPE_COLOR = { bg: '#2a2140', fg: '#c4b5fd' };
-
-const inputStyle: CSSProperties = {
-  backgroundColor: INPUT_BG,
-  border: `1px solid ${INPUT_BORDER}`,
-  borderRadius: '0.375rem',
-  color: '#d7dae0',
-  fontSize: '0.875rem',
-  padding: '0.375rem 0.5rem',
-  width: '100%',
-  boxSizing: 'border-box',
-  fontFamily: 'inherit',
-};
-
-const smallLabelStyle: CSSProperties = {
-  fontSize: '0.7rem',
-  color: MUTED,
-  textTransform: 'uppercase',
-  letterSpacing: '0.05em',
-  fontFamily: MONO,
-  display: 'block',
-  marginBottom: '0.25rem',
-};
-
-const primaryButtonStyle: CSSProperties = {
-  backgroundColor: '#16283f',
-  color: '#93c5fd',
-  border: '1px solid #2a3145',
-  borderRadius: '0.375rem',
-  padding: '0.375rem 0.875rem',
-  fontSize: '0.8rem',
-  fontWeight: 600,
-  cursor: 'pointer',
-};
-
-const saveButtonStyle: CSSProperties = {
-  ...primaryButtonStyle,
-  backgroundColor: '#143322',
-  color: '#4ade80',
-};
-
-const quietButtonStyle: CSSProperties = {
-  ...primaryButtonStyle,
-  backgroundColor: 'transparent',
-  color: MUTED,
-  fontWeight: 500,
-};
-
-const smallButtonStyle: CSSProperties = {
-  backgroundColor: 'transparent',
-  border: `1px solid ${INPUT_BORDER}`,
-  borderRadius: '0.375rem',
-  padding: '0.125rem 0.625rem',
-  fontSize: '0.75rem',
-  cursor: 'pointer',
-  color: MUTED,
-};
 
 function ScopeBadge({ company }: { company: string }) {
   if (company === '') {
     return (
       <Badge
-        bg={GLOBAL_SCOPE_COLOR.bg}
-        fg={GLOBAL_SCOPE_COLOR.fg}
+        tone="neutral"
         title="global — used for any company when no company-specific answer exists"
       >
         global
@@ -91,11 +32,7 @@ function ScopeBadge({ company }: { company: string }) {
     );
   }
   return (
-    <Badge
-      bg={COMPANY_SCOPE_COLOR.bg}
-      fg={COMPANY_SCOPE_COLOR.fg}
-      title={`only used for applications at “${company}”`}
-    >
+    <Badge tone="accent" title={`only used for applications at “${company}”`}>
       {company}
     </Badge>
   );
@@ -105,11 +42,8 @@ function CharCount({ length }: { length: number }) {
   const over = length > MAX_VALUE_LENGTH;
   return (
     <span
-      style={{
-        fontSize: '0.7rem',
-        fontFamily: MONO,
-        color: over ? '#f87171' : FAINT,
-      }}
+      className={over ? 'status-err mono' : 'hint faint mono'}
+      style={{ fontSize: '0.72rem' }}
     >
       {length.toLocaleString()} / {MAX_VALUE_LENGTH.toLocaleString()}
     </span>
@@ -121,12 +55,8 @@ function StatusMessage({ result }: { result: ActionResult | null }) {
   return (
     <p
       role="status"
-      style={{
-        margin: '0.5rem 0 0',
-        fontSize: '0.8rem',
-        color: result.ok ? '#4ade80' : '#f87171',
-        wordBreak: 'break-word',
-      }}
+      className={result.ok ? 'status-ok' : 'status-err'}
+      style={{ margin: '0.5rem 0 0', wordBreak: 'break-word' }}
     >
       {result.message}
     </p>
@@ -157,23 +87,17 @@ function AnswerFields({
 }) {
   const datalistId = `${idPrefix}-companies`;
   return (
-    <div style={{ display: 'grid', gap: '0.75rem' }}>
+    <div style={{ display: 'grid', gap: '0.875rem' }}>
       <div>
-        <span style={smallLabelStyle}>scope</span>
-        <div
-          style={{
-            display: 'flex',
-            gap: '1rem',
-            flexWrap: 'wrap',
-            alignItems: 'center',
-          }}
-        >
+        <span className="field-label">Scope</span>
+        <div className="row">
           <label
             style={{
               display: 'flex',
               alignItems: 'center',
               gap: '0.375rem',
-              fontSize: '0.8rem',
+              fontSize: '0.875rem',
+              cursor: 'pointer',
             }}
           >
             <input
@@ -182,14 +106,15 @@ function AnswerFields({
               checked={draft.scope === 'global'}
               onChange={() => onChange({ ...draft, scope: 'global' })}
             />
-            global — reused for any company
+            Global — reused for any company
           </label>
           <label
             style={{
               display: 'flex',
               alignItems: 'center',
               gap: '0.375rem',
-              fontSize: '0.8rem',
+              fontSize: '0.875rem',
+              cursor: 'pointer',
             }}
           >
             <input
@@ -198,7 +123,7 @@ function AnswerFields({
               checked={draft.scope === 'company'}
               onChange={() => onChange({ ...draft, scope: 'company' })}
             />
-            company-specific
+            Company-specific
           </label>
           {draft.scope === 'company' ? (
             <>
@@ -211,7 +136,8 @@ function AnswerFields({
                   onChange({ ...draft, company: e.target.value })
                 }
                 list={datalistId}
-                style={{ ...inputStyle, maxWidth: '16rem', width: 'auto' }}
+                className="field"
+                style={{ maxWidth: '16rem', width: 'auto' }}
               />
               <datalist id={datalistId}>
                 {companies.map((c) => (
@@ -221,25 +147,15 @@ function AnswerFields({
             </>
           ) : null}
         </div>
-        {draft.scope === 'company' ? (
-          <p
-            style={{ margin: '0.25rem 0 0', fontSize: '0.7rem', color: FAINT }}
-          >
-            company names are matched case-insensitively; this answer will only
-            auto-fill applications at this company.
-          </p>
-        ) : (
-          <p
-            style={{ margin: '0.25rem 0 0', fontSize: '0.7rem', color: FAINT }}
-          >
-            global answers are the fallback — a company-specific answer for the
-            same question always wins for its company.
-          </p>
-        )}
+        <p className="hint faint" style={{ margin: '0.25rem 0 0' }}>
+          {draft.scope === 'company'
+            ? 'Matched case-insensitively; this answer will only auto-fill applications at this company.'
+            : 'Global answers are the fallback — a company-specific answer for the same question always wins for its company.'}
+        </p>
       </div>
       <div>
-        <label htmlFor={`${idPrefix}-label`} style={smallLabelStyle}>
-          question label
+        <label htmlFor={`${idPrefix}-label`} className="field-label">
+          Question label
         </label>
         <input
           id={`${idPrefix}-label`}
@@ -250,16 +166,16 @@ function AnswerFields({
             onChange({ ...draft, questionLabel: e.target.value })
           }
           maxLength={1000}
-          style={inputStyle}
+          className="field"
         />
-        <p style={{ margin: '0.25rem 0 0', fontSize: '0.7rem', color: FAINT }}>
-          matching is fuzzy on punctuation/case but otherwise exact — use the
-          question text as it appears on application forms.
+        <p className="hint faint" style={{ margin: '0.25rem 0 0' }}>
+          Use the question text as it appears on application forms — matching is
+          fuzzy on punctuation and case but otherwise exact.
         </p>
       </div>
       <div>
-        <label htmlFor={`${idPrefix}-value`} style={smallLabelStyle}>
-          answer
+        <label htmlFor={`${idPrefix}-value`} className="field-label">
+          Answer
         </label>
         <textarea
           id={`${idPrefix}-value`}
@@ -268,7 +184,7 @@ function AnswerFields({
           onChange={(e) => onChange({ ...draft, value: e.target.value })}
           maxLength={MAX_VALUE_LENGTH}
           placeholder="the answer, exactly as it should be submitted"
-          style={{ ...inputStyle, resize: 'vertical', fontFamily: 'inherit' }}
+          className="field"
         />
         <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
           <CharCount length={draft.value.length} />
@@ -292,10 +208,10 @@ function draftToInput(draft: DraftState): {
 
 function validateDraft(draft: DraftState): string | null {
   if (draft.scope === 'company' && draft.company.trim() === '') {
-    return 'enter a company name, or choose the global scope.';
+    return 'Enter a company name, or choose the global scope.';
   }
-  if (draft.questionLabel.trim() === '') return 'question label is required.';
-  if (draft.value.trim() === '') return 'answer text is required.';
+  if (draft.questionLabel.trim() === '') return 'Question label is required.';
+  if (draft.value.trim() === '') return 'Answer text is required.';
   return null;
 }
 
@@ -322,7 +238,7 @@ function AddPanel({
     return (
       <button
         type="button"
-        style={primaryButtonStyle}
+        className="btn btn--primary"
         onClick={() => {
           setOpen(true);
           setError(null);
@@ -355,26 +271,11 @@ function AddPanel({
   return (
     <section
       aria-label="add answer"
-      style={{
-        backgroundColor: PANEL_BG,
-        border: `1px solid ${BORDER}`,
-        borderRadius: '0.5rem',
-        padding: '1rem 1.25rem',
-        flexBasis: '100%',
-      }}
+      className="card"
+      style={{ flexBasis: '100%' }}
     >
-      <h3
-        style={{
-          margin: '0 0 0.75rem',
-          fontSize: '0.8125rem',
-          fontWeight: 600,
-          color: MUTED,
-          textTransform: 'uppercase',
-          letterSpacing: '0.08em',
-          fontFamily: MONO,
-        }}
-      >
-        new answer
+      <h3 className="section-title" style={{ margin: '0 0 0.875rem' }}>
+        New answer
       </h3>
       <AnswerFields
         draft={draft}
@@ -383,31 +284,22 @@ function AddPanel({
         idPrefix="add"
       />
       {error ? (
-        <p
-          style={{ margin: '0.5rem 0 0', fontSize: '0.8rem', color: '#f87171' }}
-        >
+        <p className="status-err" style={{ margin: '0.5rem 0 0' }}>
           {error}
         </p>
       ) : null}
-      <div
-        style={{
-          display: 'flex',
-          gap: '0.75rem',
-          marginTop: '0.75rem',
-          alignItems: 'center',
-        }}
-      >
+      <div className="row" style={{ marginTop: '1rem' }}>
         <button
           type="button"
-          style={{ ...saveButtonStyle, opacity: pending ? 0.6 : 1 }}
+          className="btn btn--success"
           disabled={pending}
           onClick={submit}
         >
-          Save answer
+          {pending ? 'Saving…' : 'Save answer'}
         </button>
         <button
           type="button"
-          style={quietButtonStyle}
+          className="btn btn--quiet"
           disabled={pending}
           onClick={() => {
             setOpen(false);
@@ -416,9 +308,6 @@ function AddPanel({
         >
           Cancel
         </button>
-        {pending ? (
-          <span style={{ fontSize: '0.8rem', color: MUTED }}>saving…</span>
-        ) : null}
       </div>
     </section>
   );
@@ -459,7 +348,7 @@ function EditForm({
   };
 
   return (
-    <div style={{ padding: '0.25rem 0 0.5rem' }}>
+    <div style={{ padding: '0.5rem 0 0.5rem' }}>
       <AnswerFields
         draft={draft}
         onChange={setDraft}
@@ -467,39 +356,27 @@ function EditForm({
         idPrefix={`edit-${entry.id}`}
       />
       {error ? (
-        <p
-          style={{ margin: '0.5rem 0 0', fontSize: '0.8rem', color: '#f87171' }}
-        >
+        <p className="status-err" style={{ margin: '0.5rem 0 0' }}>
           {error}
         </p>
       ) : null}
-      <div
-        style={{
-          display: 'flex',
-          gap: '0.75rem',
-          marginTop: '0.75rem',
-          alignItems: 'center',
-        }}
-      >
+      <div className="row" style={{ marginTop: '1rem' }}>
         <button
           type="button"
-          style={{ ...saveButtonStyle, opacity: pending ? 0.6 : 1 }}
+          className="btn btn--success"
           disabled={pending}
           onClick={submit}
         >
-          Save changes
+          {pending ? 'Saving…' : 'Save changes'}
         </button>
         <button
           type="button"
-          style={quietButtonStyle}
+          className="btn btn--quiet"
           disabled={pending}
           onClick={onCancel}
         >
           Cancel
         </button>
-        {pending ? (
-          <span style={{ fontSize: '0.8rem', color: MUTED }}>saving…</span>
-        ) : null}
       </div>
     </div>
   );
@@ -532,60 +409,39 @@ function EntryRow({
   };
 
   return (
-    <li
-      style={{
-        padding: '0.625rem 0',
-        borderBottom: `1px solid ${BORDER}`,
-        listStyle: 'none',
-      }}
-    >
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'baseline',
-          gap: '0.625rem',
-          flexWrap: 'wrap',
-        }}
-      >
-        <span style={{ fontSize: '0.875rem', fontWeight: 600 }}>
-          {entry.questionLabel}
-        </span>
-        <ScopeBadge company={entry.company} />
+    <li className="q-row" style={{ listStyle: 'none' }}>
+      <div className="row" style={{ alignItems: 'baseline' }}>
+        <div style={{ flex: '1 1 22rem', minWidth: 0 }}>
+          <span className="q-label" style={{ marginRight: '0.5rem' }}>
+            {entry.questionLabel}
+          </span>
+          <ScopeBadge company={entry.company} />
+        </div>
         <span
-          style={{
-            marginLeft: 'auto',
-            fontSize: '0.75rem',
-            color: FAINT,
-            whiteSpace: 'nowrap',
-          }}
+          className="hint faint"
+          style={{ whiteSpace: 'nowrap' }}
           title={formatDate(entry.updatedAt)}
         >
           {entry.updatedAt ? `updated ${relativeTime(entry.updatedAt)}` : ''}
         </span>
         {!editing ? (
           <span style={{ display: 'inline-flex', gap: '0.375rem' }}>
-            <button type="button" style={smallButtonStyle} onClick={onEdit}>
+            <button type="button" className="btn btn--sm" onClick={onEdit}>
               Edit
             </button>
             {confirmingDelete ? (
               <>
                 <button
                   type="button"
-                  style={{
-                    ...smallButtonStyle,
-                    color: '#f87171',
-                    borderColor: '#4a2222',
-                    backgroundColor: '#3a1a1a',
-                    opacity: pending ? 0.6 : 1,
-                  }}
+                  className="btn btn--sm btn--danger"
                   disabled={pending}
                   onClick={remove}
                 >
-                  {pending ? 'deleting…' : 'Confirm delete'}
+                  {pending ? 'Deleting…' : 'Confirm delete'}
                 </button>
                 <button
                   type="button"
-                  style={smallButtonStyle}
+                  className="btn btn--sm btn--quiet"
                   disabled={pending}
                   onClick={() => setConfirmingDelete(false)}
                 >
@@ -595,7 +451,8 @@ function EntryRow({
             ) : (
               <button
                 type="button"
-                style={{ ...smallButtonStyle, color: '#f87171' }}
+                className="btn btn--sm"
+                style={{ color: 'var(--danger-fg)' }}
                 onClick={() => setConfirmingDelete(true)}
               >
                 Delete
@@ -616,12 +473,12 @@ function EntryRow({
         />
       ) : (
         <p
+          className="hint"
           style={{
             margin: '0.25rem 0 0',
-            fontSize: '0.8rem',
-            color: MUTED,
             overflowWrap: 'anywhere',
             whiteSpace: 'pre-wrap',
+            maxWidth: '60rem',
           }}
         >
           {truncate(entry.value, 220)}
@@ -715,81 +572,47 @@ export function AnswersManager({
 
   return (
     <div>
-      <div
-        style={{
-          display: 'flex',
-          gap: '0.75rem',
-          alignItems: 'center',
-          flexWrap: 'wrap',
-          marginBottom: '0.5rem',
-        }}
-      >
+      <div className="row" style={{ marginBottom: '0.5rem' }}>
         <input
           type="search"
           aria-label="search answers"
-          placeholder="search by question, answer, or company…"
+          placeholder="Search by question, answer, or company…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          style={{ ...inputStyle, maxWidth: '24rem', flex: '1 1 16rem' }}
+          className="field"
+          style={{ maxWidth: '24rem', flex: '1 1 16rem' }}
         />
         <AddPanel companies={pickerCompanies} onDone={onResult} />
       </div>
       <StatusMessage result={lastResult} />
 
       {entries.length === 0 ? (
-        <div
-          style={{
-            backgroundColor: PANEL_BG,
-            border: `1px solid ${BORDER}`,
-            borderRadius: '0.5rem',
-            padding: '1.5rem',
-            marginTop: '1rem',
-            fontSize: '0.875rem',
-            color: MUTED,
-            lineHeight: 1.6,
-          }}
-        >
-          <p style={{ margin: 0 }}>
-            no saved answers yet. Add one above, or answer a{' '}
-            <span style={{ color: '#fbbf24' }}>Needs Input</span> task — essay
-            answers you save there are stored per company and auto-fill future
-            applications at that company; everything else is saved globally.
+        <div className="card" style={{ marginTop: '1rem' }}>
+          <p className="hint" style={{ margin: 0 }}>
+            No saved answers yet. Add one above, or answer a{' '}
+            <strong>Needs input</strong> task — essay answers you save there are
+            stored per company and auto-fill future applications at that
+            company; everything else is saved globally.
           </p>
         </div>
       ) : filtered.length === 0 ? (
-        <Empty>no answers match “{query}”.</Empty>
+        <Empty>No answers match “{query}”.</Empty>
       ) : (
         groups.map((group) => (
-          <section key={group.company || '__global__'}>
+          <section
+            key={group.company || '__global__'}
+            className="card"
+            style={{ marginTop: '1.25rem' }}
+          >
             <h3
-              style={{
-                display: 'flex',
-                alignItems: 'baseline',
-                gap: '0.5rem',
-                fontSize: '0.8125rem',
-                fontWeight: 600,
-                color: MUTED,
-                textTransform: group.company === '' ? 'uppercase' : 'none',
-                letterSpacing: '0.08em',
-                margin: '1.75rem 0 0.25rem',
-                fontFamily: MONO,
-              }}
+              className="section-title"
+              style={{ margin: '0 0 0.25rem', fontSize: '1rem' }}
             >
               {group.title}
-              <span style={{ color: FAINT, fontWeight: 400 }}>
-                {group.entries.length}
-              </span>
+              <span className="count">{group.entries.length}</span>
               {group.company === '' ? (
-                <span
-                  style={{
-                    color: FAINT,
-                    fontWeight: 400,
-                    fontFamily: 'inherit',
-                    textTransform: 'none',
-                    letterSpacing: 'normal',
-                  }}
-                >
-                  — fallback for any company
+                <span className="hint" style={{ fontWeight: 600 }}>
+                  fallback for any company
                 </span>
               ) : null}
             </h3>

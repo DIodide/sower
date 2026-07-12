@@ -1,76 +1,40 @@
 import type { Metadata } from 'next';
+import { Nunito } from 'next/font/google';
 import Link from 'next/link';
-import type { CSSProperties, ReactNode } from 'react';
+import type { ReactNode } from 'react';
+import { NavLinks } from './nav-links';
+import './globals.css';
+
+const nunito = Nunito({
+  subsets: ['latin'],
+  weight: ['400', '600', '700', '800'],
+  variable: '--font-sans',
+});
 
 export const metadata: Metadata = {
   title: 'sower',
   description: 'sower application task dashboard',
-};
-
-const navLinkStyle: CSSProperties = {
-  color: '#8b93a7',
-  textDecoration: 'none',
-  fontSize: '0.875rem',
-  letterSpacing: '0.02em',
+  icons: {
+    icon: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🌱</text></svg>',
+  },
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en">
-      <body
-        style={{
-          margin: 0,
-          backgroundColor: '#0b0e14',
-          color: '#d7dae0',
-          fontFamily:
-            'ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
-          minHeight: '100vh',
-        }}
-      >
-        <main
-          style={{
-            maxWidth: '72rem',
-            margin: '0 auto',
-            padding: '2rem 1.5rem',
-          }}
-        >
-          <header
-            style={{
-              display: 'flex',
-              alignItems: 'baseline',
-              gap: '1.5rem',
-              borderBottom: '1px solid #1c2130',
-              paddingBottom: '1rem',
-              marginBottom: '1.5rem',
-            }}
-          >
-            <Link
-              href="/"
-              style={{
-                fontSize: '1.25rem',
-                fontWeight: 600,
-                letterSpacing: '0.02em',
-                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-                color: '#d7dae0',
-                textDecoration: 'none',
-              }}
-            >
+    <html lang="en" className={nunito.variable}>
+      <body>
+        <div className="shell">
+          <header className="site-header">
+            <Link href="/" className="brand">
+              <span className="brand-mark" aria-hidden>
+                🌱
+              </span>
               sower
             </Link>
-            <nav style={{ display: 'flex', gap: '1.25rem' }}>
-              <Link href="/" style={navLinkStyle}>
-                Tasks
-              </Link>
-              <Link href="/answers" style={navLinkStyle}>
-                Answers
-              </Link>
-              <Link href="/platforms" style={navLinkStyle}>
-                Platforms
-              </Link>
-            </nav>
+            <NavLinks />
           </header>
-          {children}
-        </main>
+          <main>{children}</main>
+        </div>
       </body>
     </html>
   );

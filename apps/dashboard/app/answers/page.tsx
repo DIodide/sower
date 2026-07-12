@@ -4,7 +4,6 @@
 // used to power the scope picker's suggestions.
 import { jobs } from '@sower/db';
 import { getDb } from '../../lib/db';
-import { BORDER, MUTED, PANEL_BG } from '../../lib/ui';
 import { AnswersManager } from './answers-manager';
 import { fetchAnswerLibrary } from './library';
 
@@ -32,50 +31,38 @@ export default async function AnswersPage() {
 
   return (
     <div>
-      <h2
-        style={{
-          margin: '0 0 0.375rem',
-          fontSize: '1.125rem',
-          fontWeight: 600,
-        }}
-      >
-        Answer library
-      </h2>
-      <p
-        style={{
-          margin: '0 0 1.25rem',
-          fontSize: '0.8rem',
-          color: MUTED,
-          lineHeight: 1.6,
-          maxWidth: '48rem',
-        }}
-      >
-        Saved answers auto-fill matching application questions.{' '}
-        <strong style={{ color: '#c4b5fd' }}>Company-specific</strong> answers
-        (e.g. “Why do you want to work here?”) are only used for that company;{' '}
-        <strong style={{ color: '#9ca3af' }}>global</strong> answers apply to
-        any company, but a company-specific answer always wins for its company.
+      <h1 className="page-title">Answer library</h1>
+      <p className="page-sub">
+        Saved answers auto-fill matching questions on future applications.
         Nothing is ever invented — questions without a saved or profile answer
-        stay in Needs&nbsp;Input.
+        stay in <strong>Needs input</strong>.
       </p>
+      <details className="expand" style={{ margin: '-0.75rem 0 1.5rem' }}>
+        <summary>How matching and company scopes work</summary>
+        <div
+          className="well"
+          style={{ marginTop: '0.5rem', maxWidth: '46rem' }}
+        >
+          <p className="hint" style={{ margin: 0 }}>
+            Matching is fuzzy on punctuation and case but otherwise exact, so
+            save answers under the question text as it appears on application
+            forms. A <strong>company-specific</strong> answer (e.g. “Why do you
+            want to work here?”) is only used for that company. A{' '}
+            <strong>global</strong> answer applies to any company — but a
+            company-specific answer for the same question always wins for its
+            company.
+          </p>
+        </div>
+      </details>
       {library.ok ? (
         <AnswersManager entries={library.entries} jobCompanies={jobCompanies} />
       ) : (
-        <div
-          style={{
-            backgroundColor: PANEL_BG,
-            border: `1px solid ${BORDER}`,
-            borderRadius: '0.5rem',
-            padding: '1.25rem 1.5rem',
-            fontSize: '0.875rem',
-            lineHeight: 1.6,
-          }}
-        >
-          <p style={{ margin: 0, color: '#f87171' }}>
-            could not load the answer library: {library.message}
+        <div className="card">
+          <p className="status-err" style={{ margin: 0 }}>
+            Could not load the answer library: {library.message}
           </p>
-          <p style={{ margin: '0.5rem 0 0', color: MUTED, fontSize: '0.8rem' }}>
-            the answer library is served by the sower api — check that the api
+          <p className="hint" style={{ margin: '0.5rem 0 0' }}>
+            The answer library is served by the sower api — check that the api
             service is running and that API_BASE_URL and INGEST_API_KEY are set
             for the dashboard.
           </p>

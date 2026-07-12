@@ -1,24 +1,22 @@
-import { ALLOWED, type TaskState } from '@sower/core';
+import type { TaskState } from '@sower/core';
 import { applicationTasks, jobs } from '@sower/db';
-import { and, desc, eq, type SQL } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, type SQL } from 'drizzle-orm';
 import Link from 'next/link';
-import type { CSSProperties } from 'react';
 import { getDb } from '../lib/db';
-import { formatDate, relativeTime } from '../lib/format';
 import {
-  cellStyle,
-  Empty,
-  headStyle,
-  linkStyle,
-  MONO,
-  MUTED,
-  StateBadge,
-  TableWrap,
-} from '../lib/ui';
+  BUCKETS,
+  type Bucket,
+  formatDate,
+  isBucket,
+  relativeTime,
+  STATE_META,
+  stateMeta,
+} from '../lib/format';
+import { Empty, StateBadge } from '../lib/ui';
 
 export const dynamic = 'force-dynamic';
 
-const TASK_STATES = Object.keys(ALLOWED) as TaskState[];
+const TASK_STATES = Object.keys(STATE_META) as TaskState[];
 
 function isTaskState(value: string): value is TaskState {
   return (TASK_STATES as string[]).includes(value);
@@ -29,73 +27,17 @@ function firstParam(value: string | string[] | undefined): string | null {
   return value ?? null;
 }
 
-function filterHref(state: string | null, platform: string | null): string {
+function filterHref(filters: {
+  view?: Bucket | null;
+  state?: TaskState | null;
+  platform?: string | null;
+}): string {
   const qs = new URLSearchParams();
-  if (state) qs.set('state', state);
-  if (platform) qs.set('platform', platform);
+  if (filters.view) qs.set('view', filters.view);
+  if (filters.state) qs.set('state', filters.state);
+  if (filters.platform) qs.set('platform', filters.platform);
   const s = qs.toString();
   return s ? `/?${s}` : '/';
-}
-
-function FilterChip({
-  href,
-  active,
-  label,
-}: {
-  href: string;
-  active: boolean;
-  label: string;
-}) {
-  const style: CSSProperties = {
-    color: active ? '#d7dae0' : MUTED,
-    backgroundColor: active ? '#1c2130' : 'transparent',
-    border: `1px solid ${active ? '#2a3147' : '#1c2130'}`,
-    borderRadius: '9999px',
-    padding: '0.125rem 0.625rem',
-    fontSize: '0.75rem',
-    fontFamily: MONO,
-    textDecoration: 'none',
-    whiteSpace: 'nowrap',
-  };
-  return (
-    <Link href={href} style={style}>
-      {label}
-    </Link>
-  );
-}
-
-function FilterRow({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div
-      style={{
-        display: 'flex',
-        flexWrap: 'wrap',
-        alignItems: 'center',
-        gap: '0.375rem',
-        marginBottom: '0.5rem',
-      }}
-    >
-      <span
-        style={{
-          color: MUTED,
-          fontSize: '0.75rem',
-          textTransform: 'uppercase',
-          letterSpacing: '0.05em',
-          marginRight: '0.25rem',
-          minWidth: '4.5rem',
-        }}
-      >
-        {title}
-      </span>
-      {children}
-    </div>
-  );
 }
 
 export default async function Page({
@@ -104,20 +46,50 @@ export default async function Page({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const params = await searchParams;
+
   const rawState = firstParam(params.state);
   const stateFilter = rawState && isTaskState(rawState) ? rawState : null;
+  // An exact state implies its bucket, so the matching stat card stays lit.
+  const rawView = firstParam(params.view);
+  const viewFilter: Bucket | null = stateFilter
+    ? stateMeta(stateFilter).bucket
+    : rawView && isBucket(rawView)
+      ? rawView
+      : null;
   const platformFilter = firstParam(params.platform);
 
   const db = getDb();
 
-  const platformRows = await db
-    .selectDistinct({ platform: jobs.platform })
-    .from(jobs)
-    .orderBy(jobs.platform);
+  const [platformRows, stateCounts] = await Promise.all([
+    db
+      .selectDistinct({ platform: jobs.platform })
+      .from(jobs)
+      .orderBy(jobs.platform),
+    db
+      .select({ state: applicationTasks.state, n: count() })
+      .from(applicationTasks)
+      .groupBy(applicationTasks.state),
+  ]);
   const platforms = platformRows.map((r) => r.platform);
 
+  const countByState = new Map(
+    stateCounts.map((r) => [r.state as string, r.n]),
+  );
+  const bucketCount = (bucket: Bucket) =>
+    BUCKETS[bucket].states.reduce(
+      (sum, s) => sum + (countByState.get(s) ?? 0),
+      0,
+    );
+  const totalTasks = stateCounts.reduce((sum, r) => sum + r.n, 0);
+
   const conditions: SQL[] = [];
-  if (stateFilter) conditions.push(eq(applicationTasks.state, stateFilter));
+  if (stateFilter) {
+    conditions.push(eq(applicationTasks.state, stateFilter));
+  } else if (viewFilter) {
+    conditions.push(
+      inArray(applicationTasks.state, BUCKETS[viewFilter].states),
+    );
+  }
   if (platformFilter) conditions.push(eq(jobs.platform, platformFilter));
 
   const rows = await db
@@ -136,92 +108,173 @@ export default async function Page({
     .orderBy(desc(applicationTasks.updatedAt))
     .limit(200);
 
-  const hasFilters = stateFilter !== null || platformFilter !== null;
+  const hasFilters =
+    stateFilter !== null || viewFilter !== null || platformFilter !== null;
 
   return (
     <div>
-      <FilterRow title="state">
-        <FilterChip
-          href={filterHref(null, platformFilter)}
-          active={stateFilter === null}
-          label="all"
-        />
-        {TASK_STATES.map((s) => (
-          <FilterChip
-            key={s}
-            href={filterHref(s, platformFilter)}
-            active={stateFilter === s}
-            label={s}
-          />
-        ))}
-      </FilterRow>
-      <FilterRow title="platform">
-        <FilterChip
-          href={filterHref(stateFilter, null)}
-          active={platformFilter === null}
-          label="all"
-        />
-        {platforms.map((p) => (
-          <FilterChip
-            key={p}
-            href={filterHref(stateFilter, p)}
-            active={platformFilter === p}
-            label={p}
-          />
-        ))}
-      </FilterRow>
+      <h1 className="page-title">Applications</h1>
+      <p className="page-sub">
+        Every ingested job becomes a task here. Start with{' '}
+        <strong>Needs you</strong> — those are waiting on your answers or
+        approval.
+      </p>
 
-      {rows.length === 0 ? (
-        hasFilters ? (
-          <Empty>
-            no tasks match these filters.{' '}
-            <Link href="/" style={linkStyle}>
-              clear filters
+      {/* ---- bucket overview (also the primary filter) ---- */}
+      <div className="stat-grid">
+        <Link
+          href={filterHref({ platform: platformFilter })}
+          className="stat stat--neutral"
+          aria-current={!viewFilter && !stateFilter ? 'true' : undefined}
+        >
+          <div className="stat-n">{totalTasks}</div>
+          <div className="stat-label">All tasks</div>
+          <div className="stat-sub">everything, newest first</div>
+        </Link>
+        {(Object.keys(BUCKETS) as Bucket[]).map((bucket) => {
+          const def = BUCKETS[bucket];
+          const active = viewFilter === bucket && !stateFilter;
+          const parts = def.states
+            .map((s) => ({ s, n: countByState.get(s) ?? 0 }))
+            .filter((p) => p.n > 0)
+            .map((p) => `${p.n} ${stateMeta(p.s).label.toLowerCase()}`);
+          return (
+            <Link
+              key={bucket}
+              href={filterHref({ view: bucket, platform: platformFilter })}
+              className={`stat stat--${def.tone}`}
+              aria-current={active ? 'true' : undefined}
+            >
+              <div className="stat-n">{bucketCount(bucket)}</div>
+              <div className="stat-label">{def.label}</div>
+              <div className="stat-sub">
+                {parts.length > 0 ? parts.join(' · ') : ' '}
+              </div>
             </Link>
-          </Empty>
-        ) : (
-          <Empty>no application tasks yet.</Empty>
-        )
+          );
+        })}
+      </div>
+
+      {/* ---- exact state, only within the chosen bucket ---- */}
+      {viewFilter ? (
+        <div className="chip-row">
+          <span className="chip-row-label">State</span>
+          <Link
+            href={filterHref({ view: viewFilter, platform: platformFilter })}
+            className="chip"
+            aria-current={stateFilter === null ? 'true' : undefined}
+          >
+            All {BUCKETS[viewFilter].label.toLowerCase()}
+          </Link>
+          {BUCKETS[viewFilter].states.map((s) => (
+            <Link
+              key={s}
+              href={filterHref({ state: s, platform: platformFilter })}
+              className="chip"
+              aria-current={stateFilter === s ? 'true' : undefined}
+            >
+              {stateMeta(s).label}
+              <span className="n">{countByState.get(s) ?? 0}</span>
+            </Link>
+          ))}
+        </div>
+      ) : null}
+
+      {/* ---- platform filter ---- */}
+      {platforms.length > 1 ? (
+        <div className="chip-row">
+          <span className="chip-row-label">Platform</span>
+          <Link
+            href={filterHref({ view: viewFilter, state: stateFilter })}
+            className="chip"
+            aria-current={platformFilter === null ? 'true' : undefined}
+          >
+            All platforms
+          </Link>
+          {platforms.map((p) => (
+            <Link
+              key={p}
+              href={filterHref({
+                view: viewFilter,
+                state: stateFilter,
+                platform: p,
+              })}
+              className="chip"
+              aria-current={platformFilter === p ? 'true' : undefined}
+            >
+              {p}
+            </Link>
+          ))}
+        </div>
+      ) : null}
+
+      {/* ---- task list ---- */}
+      {rows.length === 0 ? (
+        <div className="card" style={{ marginTop: '1rem' }}>
+          {hasFilters ? (
+            <p className="hint" style={{ margin: 0 }}>
+              No tasks match these filters. <Link href="/">Clear filters</Link>
+            </p>
+          ) : (
+            <p className="hint" style={{ margin: 0 }}>
+              No application tasks yet. Ingest a job link (or wait for the next
+              source poll) and it will show up here.
+            </p>
+          )}
+        </div>
       ) : (
-        <TableWrap>
-          <thead>
-            <tr>
-              <th style={headStyle}>company</th>
-              <th style={headStyle}>title</th>
-              <th style={headStyle}>platform</th>
-              <th style={headStyle}>state</th>
-              <th style={headStyle}>updated</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.id}>
-                <td style={cellStyle}>{row.company ?? '—'}</td>
-                <td style={cellStyle}>
-                  <Link href={`/tasks/${row.id}`} style={linkStyle}>
-                    {row.title ?? row.id}
-                  </Link>
-                </td>
-                <td style={{ ...cellStyle, fontFamily: MONO }}>
-                  {row.platform}
-                  {row.tenant ? (
-                    <span style={{ color: MUTED }}> / {row.tenant}</span>
-                  ) : null}
-                </td>
-                <td style={cellStyle}>
-                  <StateBadge state={row.state} />
-                </td>
-                <td
-                  style={{ ...cellStyle, color: MUTED, whiteSpace: 'nowrap' }}
-                  title={formatDate(row.updatedAt)}
-                >
-                  {relativeTime(row.updatedAt)}
-                </td>
+        <div className="table-card" style={{ marginTop: '0.5rem' }}>
+          <table>
+            <thead>
+              <tr>
+                <th>Role</th>
+                <th>Platform</th>
+                <th>State</th>
+                <th>Updated</th>
               </tr>
-            ))}
-          </tbody>
-        </TableWrap>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.id}>
+                  <td>
+                    <div className="cell-main">
+                      <Link href={`/tasks/${row.id}`}>
+                        {row.company ?? row.title ?? row.id.slice(0, 8)}
+                      </Link>
+                    </div>
+                    <div className="cell-sub">
+                      {row.company
+                        ? (row.title ?? 'untitled role')
+                        : row.title
+                          ? '(company unknown)'
+                          : 'untitled role'}
+                    </div>
+                  </td>
+                  <td className="mono" style={{ fontSize: '0.8125rem' }}>
+                    {row.platform}
+                    {row.tenant ? (
+                      <span className="faint"> / {row.tenant}</span>
+                    ) : null}
+                  </td>
+                  <td>
+                    <StateBadge state={row.state} />
+                  </td>
+                  <td
+                    className="faint"
+                    style={{ whiteSpace: 'nowrap', fontSize: '0.8125rem' }}
+                    title={formatDate(row.updatedAt)}
+                  >
+                    {relativeTime(row.updatedAt)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
+      {rows.length === 200 ? (
+        <Empty>Showing the 200 most recently updated tasks.</Empty>
+      ) : null}
     </div>
   );
 }
