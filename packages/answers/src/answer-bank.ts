@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Question, QuestionOption, ResolvedAnswer } from '@sower/core';
 import YAML from 'yaml';
@@ -143,9 +144,22 @@ export type AnswerBank = z.infer<typeof AnswerBankSchema>;
  * DEFAULT_PROFILE_PATH): pnpm runs apps with their own cwd while config/
  * lives at the repo root.
  */
-export const DEFAULT_ANSWER_BANK_PATH = fileURLToPath(
-  new URL('../../../config/answer-bank.sample.yaml', import.meta.url),
-);
+// Computed from the module's own directory rather than
+// `new URL(relative, import.meta.url)`: webpack (used by the Next dashboard,
+// which transpiles this package for `normalizeLabel`) intercepts that pattern
+// as an asset reference and fails on the non-bundlable YAML. The dashboard
+// never reads this path; only the API does, in a plain Node context. Guarded so
+// a bundler context that lacks a real import.meta.url can't throw at import.
+export const DEFAULT_ANSWER_BANK_PATH = ((): string => {
+  try {
+    return join(
+      dirname(fileURLToPath(import.meta.url)),
+      '../../../config/answer-bank.sample.yaml',
+    );
+  } catch {
+    return 'config/answer-bank.sample.yaml';
+  }
+})();
 
 /**
  * Load an answer bank from a YAML file and validate it against
