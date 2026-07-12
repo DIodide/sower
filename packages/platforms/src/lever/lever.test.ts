@@ -3,12 +3,16 @@ import type { JobSpec, PlatformRef, ResolvedAnswer } from '@sower/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SubmitFile } from '../contract.js';
 import type { ApiCallRecord } from '../recorder.js';
-import { LeverAdapter } from './index.js';
+import {
+  fetchLeverApplicationForm,
+  LeverAdapter,
+  parseLeverApplicationForm,
+} from './index.js';
 
 // Raw response from GET api.lever.co/v0/postings/leverdemo/33538a2f-…?mode=json
-// (fetched live 2026-07). Note: `lists` are description content blocks
-// ("Qualifications", "Duties"), NOT application questions — the public API
-// exposes no application form.
+// (fetched live 2026-07). `lists` are description content blocks, NOT questions;
+// the postings API has no form, so discover parses it from the hosted apply
+// page's server-rendered HTML instead (see parseLeverApplicationForm tests).
 const fixture = JSON.parse(
   readFileSync(new URL('./fixture-leverdemo.json', import.meta.url), 'utf8'),
 ) as Record<string, unknown>;
@@ -36,10 +40,13 @@ describe('LeverAdapter.discover', () => {
   let infoSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
+    // The postings fetch reads .json(); the apply-page fetch reads .text().
+    // Default: postings JSON + an empty apply page (no form -> 0 questions).
     fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
       json: async () => fixture,
+      text: async () => '',
     });
     vi.stubGlobal('fetch', fetchMock);
     infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
@@ -50,13 +57,15 @@ describe('LeverAdapter.discover', () => {
     vi.restoreAllMocks();
   });
 
-  it('requests the public postings API with mode=json', async () => {
+  it('requests the public postings API with mode=json, then the apply page', async () => {
     await adapter.discover(ref, url);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock).toHaveBeenCalledWith(
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
       'https://api.lever.co/v0/postings/leverdemo/33538a2f-d27d-4a96-8f05-fa4b0e4d940e?mode=json',
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
+    // Second call fetches the hosted apply page for the form HTML.
+    expect(fetchMock.mock.calls[1]?.[0]).toContain('/apply');
   });
 
   it('maps the fixture to a JobSpec', async () => {
@@ -80,7 +89,7 @@ describe('LeverAdapter.discover', () => {
     const spec = await adapter.discover(ref, url);
     expect(spec.questions).toEqual([]);
     expect(infoSpy).toHaveBeenCalledWith(
-      expect.stringContaining('does not expose the application form'),
+      expect.stringContaining('could not read the application form'),
     );
   });
 
@@ -93,6 +102,7 @@ describe('LeverAdapter.discover', () => {
       ok: true,
       status: 200,
       json: async () => withoutApplyUrl,
+      text: async () => '',
     });
     const spec = await adapter.discover(ref, url);
     expect(spec.applyUrl).toBe(
@@ -140,19 +150,27 @@ describe('LeverAdapter.discover', () => {
     );
   });
 
-  it('passes the recorder through recordedFetch and records exactly one discover call', async () => {
-    fetchMock.mockResolvedValue(
-      new Response(JSON.stringify(fixture), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      }),
-    );
+  it('records the postings discover call and the apply-page form fetch', async () => {
+    // Fresh Response per call: postings JSON first, then apply-page HTML.
+    let n = 0;
+    fetchMock.mockImplementation(async () => {
+      n += 1;
+      return n === 1
+        ? new Response(JSON.stringify(fixture), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          })
+        : new Response('<html>no form</html>', {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          });
+    });
     const recorder = vi.fn();
 
     const spec = await adapter.discover(ref, url, { recorder });
 
     expect(spec.title).toBe('AbelsonTaylor Writer');
-    expect(recorder).toHaveBeenCalledTimes(1);
+    expect(recorder).toHaveBeenCalledTimes(2);
     const call = recorder.mock.calls[0]?.[0] as ApiCallRecord;
     expect(call).toMatchObject({
       phase: 'discover',
@@ -161,6 +179,9 @@ describe('LeverAdapter.discover', () => {
       responseStatus: 200,
     });
     expect(call.dryRun).toBeUndefined();
+    expect(recorder.mock.calls[1]?.[0]).toMatchObject({
+      phase: 'discover_form',
+    });
   });
 });
 
@@ -301,5 +322,89 @@ describe('LeverAdapter.submit guardrail', () => {
     // Redaction: the log is a field-key summary, never applicant values.
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('fields=['));
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('parseLeverApplicationForm', () => {
+  // Compact but faithful to Lever's server-rendered structure: a required
+  // resume, a required text field (✱ marker), a radio select with options, a
+  // URL text field followed by an EEO gender select (to prove no option bleed),
+  // and a custom survey checkbox multiselect.
+  const html = `
+    <ul class="application-fields">
+    <li class="application-question required"><div class="application-label full-width">Resume/CV ✱</div><div class="application-field"><input type="file" name="resume" required /></div></li>
+    <li class="application-question required"><div class="application-label full-width">Full name ✱</div><div class="application-field"><input name="name" required /></div></li>
+    <li class="application-question"><div class="application-label full-width multiple-choice"><div class="text">Pronouns</div></div><div class="application-field"><ul data-qa="multiple-choice"><li><label><input type="radio" name="pronouns" value="He/him" /><span class="application-answer-alternative">He/him</span></label></li><li><label><input type="radio" name="pronouns" value="She/her" /><span class="application-answer-alternative">She/her</span></label></li></ul></div></li>
+    <li class="application-question"><div class="application-label full-width">Video Link URL</div><div class="application-field"><input name="urls[Video Link ]" /></div></li>
+    <li class="application-question"><div class="application-label full-width multiple-choice"><div class="text">What is your ethnicity?</div></div><div class="application-field"><ul data-qa="multiple-choice"><li><label><input type="checkbox" name="surveysResponses[abc][responses][field0]" value="White" /><span class="application-answer-alternative">White</span></label></li><li><label><input type="checkbox" name="surveysResponses[abc][responses][field0]" value="Black" /><span class="application-answer-alternative">Black</span></label></li></ul></div></li>
+    </ul></form>
+    <select name="eeo[gender]"><option value="M">Male</option><option value="F">Female</option></select>`;
+
+  it('parses fields with correct types, labels, required flags, and options', () => {
+    const qs = parseLeverApplicationForm(html);
+    const byId = Object.fromEntries(qs.map((q) => [q.id, q]));
+    expect(byId.resume).toMatchObject({
+      type: 'file',
+      required: true,
+      label: 'Resume/CV',
+    });
+    expect(byId.name).toMatchObject({
+      type: 'text',
+      required: true,
+      label: 'Full name',
+    });
+    expect(byId.pronouns).toMatchObject({ type: 'select', required: false });
+    expect(byId.pronouns?.options).toEqual([
+      { label: 'He/him', value: 'He/him' },
+      { label: 'She/her', value: 'She/her' },
+    ]);
+    expect(byId['surveysResponses[abc][responses][field0]']).toMatchObject({
+      type: 'multiselect',
+    });
+  });
+
+  it('does NOT bleed a following EEO select into a plain URL text field', () => {
+    const byId = Object.fromEntries(
+      parseLeverApplicationForm(html).map((q) => [q.id, q]),
+    );
+    // The Video Link URL field must stay a plain text field even though an
+    // eeo[gender] <select> follows it in the document.
+    expect(byId['urls[Video Link ]']).toMatchObject({ type: 'text' });
+    expect(byId['urls[Video Link ]']?.options).toBeUndefined();
+  });
+
+  it('returns [] for markup with no application-question blocks', () => {
+    expect(parseLeverApplicationForm('<html><body>nope</body></html>')).toEqual(
+      [],
+    );
+  });
+
+  it('fetchLeverApplicationForm returns [] on a non-200 (never fabricates)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('blocked', { status: 403 })),
+    );
+    expect(
+      await fetchLeverApplicationForm('https://jobs.lever.co/x/y/apply'),
+    ).toEqual([]);
+    vi.unstubAllGlobals();
+  });
+
+  it('fetchLeverApplicationForm parses a 200 HTML response', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(html, {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          }),
+      ),
+    );
+    const qs = await fetchLeverApplicationForm(
+      'https://jobs.lever.co/x/y/apply',
+    );
+    expect(qs.length).toBeGreaterThanOrEqual(5);
+    vi.unstubAllGlobals();
   });
 });
