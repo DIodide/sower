@@ -24,6 +24,7 @@ describe('schema', () => {
       'canonical_url',
       'company',
       'created_at',
+      'dedupe_key',
       'external_id',
       'id',
       'platform',
@@ -35,11 +36,17 @@ describe('schema', () => {
     ]);
     expect(jobs.canonicalUrl.notNull).toBe(true);
     expect(jobs.canonicalUrl.isUnique).toBe(true);
+    // Nullable (pre-migration rows await backfill) but unique, so ingest can
+    // rely on ON CONFLICT (dedupe_key) DO NOTHING.
+    expect(jobs.dedupeKey.notNull).toBe(false);
+    expect(jobs.dedupeKey.isUnique).toBe(true);
   });
 
   it('defines the application_tasks table', () => {
     expect(getTableName(applicationTasks)).toBe('application_tasks');
     expect(sqlColumnNames(applicationTasks)).toEqual([
+      'approval_channel_id',
+      'approval_message_id',
       'attempt',
       'created_at',
       'id',
@@ -52,6 +59,9 @@ describe('schema', () => {
     ]);
     expect(applicationTasks.state.notNull).toBe(true);
     expect(applicationTasks.attempt.notNull).toBe(true);
+    // Both nullable: Discord may be disabled or the card post may fail.
+    expect(applicationTasks.approvalChannelId.notNull).toBe(false);
+    expect(applicationTasks.approvalMessageId.notNull).toBe(false);
   });
 
   it('defines the events table', () => {

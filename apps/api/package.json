@@ -16,6 +16,7 @@
     "@sower/answers": "workspace:*",
     "@sower/core": "workspace:*",
     "@sower/db": "workspace:*",
+    "@sower/notify": "workspace:*",
     "@sower/platforms": "workspace:*",
     "@sower/queue": "workspace:*",
     "@sower/sources": "workspace:*",

@@ -17,11 +17,13 @@ const platformState = vi.hoisted(() => ({
 }));
 
 const sourcesState = vi.hoisted(() => ({
+  /** Raw listings (either schema); the mocked fetchListings normalizes them. */
   listings: [] as Array<{
     url: string;
     company_name: string;
     title: string;
-    terms: string[];
+    terms?: string[];
+    season?: string;
   }>,
 }));
 
@@ -34,7 +36,8 @@ vi.mock('@sower/platforms', () => ({
   detectPlatform: (url: string) =>
     platformState.byUrl[url] ?? platformState.ref,
   resolveUrl: async (url: string) => url,
-  // Only greenhouse has an adapter, mirroring the real registry.
+  // Only greenhouse has an adapter in this mock (the real registry also
+  // registers ashby/lever — covered by @sower/platforms registry.test.ts).
   getAdapter: (platform: string) =>
     platform === 'greenhouse'
       ? {
@@ -58,10 +61,16 @@ vi.mock('@sower/answers', () => ({
   resolveAnswers: () => ({ resolved: [], missing: [] }),
 }));
 
-vi.mock('@sower/sources', () => ({
-  fetchSimplifyListings: async () => sourcesState.listings,
-  filterListings: (listings: unknown[]) => listings,
-}));
+// Only the network fetch is mocked: normalizeListing, filterListings, and
+// computeDedupeKey are the real implementations.
+vi.mock('@sower/sources', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@sower/sources')>();
+  return {
+    ...actual,
+    fetchListings: async () =>
+      sourcesState.listings.map((raw) => actual.normalizeListing(raw, 'test')),
+  };
+});
 
 interface Chain {
   from: () => Chain;
@@ -73,6 +82,7 @@ interface Chain {
   values: () => Chain;
   returning: () => Chain;
   set: () => Chain;
+  onConflictDoNothing: () => Chain;
   then: (onFulfilled: (value: unknown) => unknown) => Promise<unknown>;
 }
 
@@ -87,6 +97,7 @@ function chain(result: unknown): Chain {
     values: () => self,
     returning: () => self,
     set: () => self,
+    onConflictDoNothing: () => self,
     // biome-ignore lint/suspicious/noThenProperty: intentionally thenable to mimic drizzle's awaitable query builder
     then: (onFulfilled) => Promise.resolve(result).then(onFulfilled),
   };
@@ -120,6 +131,11 @@ const config: Config = {
   SIMPLIFY_MAX_PER_RUN: 10,
   SOWER_SUBMIT_ENABLED: 'false',
   SOWER_ENV: 'test',
+  DISCORD_BOT_TOKEN: undefined,
+  DISCORD_PUBLIC_KEY: 'test-public-key',
+  DISCORD_APP_ID: 'test-app-id',
+  DISCORD_CHANNEL_MAP: undefined,
+  DISCORD_ENABLED: false,
 };
 
 function createDeps(db: Deps['db']) {
@@ -153,6 +169,20 @@ describe('buildServer', () => {
     const res = await app.inject({ method: 'GET', url: '/tasks' });
     expect(res.statusCode).toBe(401);
     expect(res.json()).toEqual({ error: 'unauthorized' });
+  });
+
+  it('POST /discord/interactions is exempt from the x-api-key guard', async () => {
+    const { deps } = createDeps(createFakeDb()); // no notifier wired
+    const app = buildServer(deps);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/discord/interactions',
+      payload: JSON.stringify({ type: 1 }),
+      headers: { 'content-type': 'application/json' },
+    });
+    // 503 (notifier not configured), NOT 401: the api-key guard skipped it.
+    // Signature-verified handling is covered in discord.test.ts.
+    expect(res.statusCode).toBe(503);
   });
 
   it('GET /tasks responds with rows when the api key is provided', async () => {
@@ -208,6 +238,30 @@ describe('buildServer', () => {
       url: '/ingest',
       headers: { 'x-api-key': 'test-key' },
       payload: { url: 'https://boards.greenhouse.io/acme/jobs/123' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ duplicate: true, jobId: 'job-1' });
+    expect(enqueueProcess).not.toHaveBeenCalled();
+  });
+
+  it('POST /ingest responds 200 duplicate when the dedupe_key conflicts (same job, different URL)', async () => {
+    // boards.greenhouse.io vs job-boards.greenhouse.io: different canonical
+    // URL (fast-path select misses), identical dedupe_key -> ON CONFLICT
+    // DO NOTHING inserts no row and the existing job is looked up by key.
+    const db = createFakeDb({
+      selectResults: [
+        [], // no canonical-url duplicate
+        [{ id: 'job-1' }], // existing row found by dedupe_key
+      ],
+      insertResults: [[]], // ON CONFLICT (dedupe_key) DO NOTHING: no row
+    });
+    const { deps, enqueueProcess } = createDeps(db);
+    const app = buildServer(deps);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/ingest',
+      headers: { 'x-api-key': 'test-key' },
+      payload: { url: 'https://job-boards.greenhouse.io/acme/jobs/123' },
     });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ duplicate: true, jobId: 'job-1' });
@@ -280,7 +334,7 @@ describe('buildServer', () => {
 
   it('POST /ingest parks platforms without a registered adapter', async () => {
     platformState.ref = {
-      platform: 'lever',
+      platform: 'workday',
       tenant: 'acme',
       externalId: 'abc-123',
     };
@@ -294,7 +348,9 @@ describe('buildServer', () => {
       method: 'POST',
       url: '/ingest',
       headers: { 'x-api-key': 'test-key' },
-      payload: { url: 'https://jobs.lever.co/acme/abc-123' },
+      payload: {
+        url: 'https://acme.wd1.myworkdayjobs.com/en-US/acme/job/abc-123',
+      },
     });
     expect(res.statusCode).toBe(201);
     expect(res.json()).toEqual({
@@ -354,21 +410,39 @@ describe('buildServer', () => {
     expect(res.json()).toEqual({ skipped: true, state: 'REVIEW' });
   });
 
-  it('POST /sources/simplify/poll only ingests greenhouse listings with a known tenant', async () => {
+  it('POST /sources/simplify/poll normalizes both raw schemas and only ingests greenhouse listings with a known tenant', async () => {
     sourcesState.listings = [
       {
+        // SimplifyJobs schema (terms[]) — greenhouse with tenant: ingested.
         url: 'https://boards.greenhouse.io/acme/jobs/123',
         company_name: 'Acme',
         title: 'SWE Intern',
         terms: ['Summer 2027'],
       },
       {
+        // vanshb03 schema (season word) matches the requested 'Summer 2027';
+        // greenhouse with tenant: ingested.
+        url: 'https://boards.greenhouse.io/globex/jobs/456',
+        company_name: 'Globex',
+        title: 'SWE Intern',
+        season: 'Summer',
+      },
+      {
+        // Wrong term entirely: filtered out before platform matching.
+        url: 'https://boards.greenhouse.io/other/jobs/789',
+        company_name: 'Other',
+        title: 'SWE Intern',
+        terms: ['Fall 2028'],
+      },
+      {
+        // greenhouse without tenant (gh_jid custom domain): skipped.
         url: 'https://jobs.example.com/opening?gh_jid=42',
         company_name: 'Example',
         title: 'SWE Intern',
         terms: ['Summer 2027'],
       },
       {
+        // Non-greenhouse: counted per-platform, not auto-ingested.
         url: 'https://jobs.lever.co/other/xyz',
         company_name: 'Other',
         title: 'SWE Intern',
@@ -380,6 +454,11 @@ describe('buildServer', () => {
         platform: 'greenhouse',
         tenant: 'acme',
         externalId: '123',
+      },
+      'https://boards.greenhouse.io/globex/jobs/456': {
+        platform: 'greenhouse',
+        tenant: 'globex',
+        externalId: '456',
       },
       'https://jobs.example.com/opening?gh_jid=42': {
         platform: 'greenhouse',
@@ -393,8 +472,19 @@ describe('buildServer', () => {
       },
     };
     const db = createFakeDb({
-      selectResults: [[]],
-      insertResults: [[{ id: 'job-1' }], [{ id: 'task-1' }]],
+      // Two ingests: each does a dup-check select, then 4 inserts
+      // (job, task, PARSE_OK event, ENQUEUE event).
+      selectResults: [[], []],
+      insertResults: [
+        [{ id: 'job-1' }],
+        [{ id: 'task-1' }],
+        [], // PARSE_OK event
+        [], // ENQUEUE event
+        [{ id: 'job-2' }],
+        [{ id: 'task-2' }],
+        [], // PARSE_OK event
+        [], // ENQUEUE event
+      ],
     });
     const { deps, enqueueProcess } = createDeps(db);
     const app = buildServer(deps);
@@ -405,12 +495,15 @@ describe('buildServer', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
-      scanned: 3,
-      matchedGreenhouse: 1,
-      ingested: 1,
+      scanned: 4,
+      byPlatform: { greenhouse: 3, lever: 1 },
+      matchedGreenhouse: 2,
+      ingested: 2,
       duplicates: 0,
+      skippedNoAdapter: 2,
     });
-    expect(enqueueProcess).toHaveBeenCalledTimes(1);
-    expect(enqueueProcess).toHaveBeenCalledWith('task-1');
+    expect(enqueueProcess).toHaveBeenCalledTimes(2);
+    expect(enqueueProcess).toHaveBeenNthCalledWith(1, 'task-1');
+    expect(enqueueProcess).toHaveBeenNthCalledWith(2, 'task-2');
   });
 });

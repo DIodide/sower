@@ -32,6 +32,9 @@ importers:
       '@sower/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@sower/notify':
+        specifier: workspace:*
+        version: link:../../packages/notify
       '@sower/platforms':
         specifier: workspace:*
         version: link:../../packages/platforms
@@ -115,6 +118,15 @@ importers:
       '@sower/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@sower/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@sower/platforms':
+        specifier: workspace:*
+        version: link:../../packages/platforms
+      playwright:
+        specifier: ^1.49.0
+        version: 1.61.1
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
@@ -122,6 +134,12 @@ importers:
       tsx:
         specifier: ^4.20.3
         version: 4.23.0
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@22.20.1)(tsx@4.23.0)(yaml@2.9.0)
 
   packages/answers:
     dependencies:
@@ -177,6 +195,15 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^3.2.0
+        version: 3.2.7(@types/node@22.20.1)(tsx@4.23.0)(yaml@2.9.0)
+
+  packages/notify:
+    devDependencies:
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
         version: 3.2.7(@types/node@22.20.1)(tsx@4.23.0)(yaml@2.9.0)
 
   packages/platforms:
@@ -1615,6 +1642,11 @@ packages:
     resolution: {integrity: sha512-buewHzMvYL29jdeQTVILecSaZKnt/RJWjoZCF5OW60Z67/GmSLBkOFM7qh1PI3zFNtJbaZL5eQu1vLfazOwj4g==}
     engines: {node: '>=12.20.0'}
 
+  fsevents@2.3.2:
+    resolution: {integrity: sha512-xiqMQR4xAeHTuB9uWm+fFRcIOgKBMiOBP+eXiyT7jsgVCq1bkVygt00oASowB7EdtpOHaaPgKt812P9ab+DDKA==}
+    engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
+    os: [darwin]
+
   fsevents@2.3.3:
     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
@@ -1910,6 +1942,16 @@ packages:
 
   pino@10.3.1:
     resolution: {integrity: sha512-r34yH/GlQpKZbU1BvFFqOjhISRo1MNx1tWYsYvmj6KIRHSPMT2+yHOEb1SG6NMvRoHRF0a07kCOox/9yakl1vg==}
+    hasBin: true
+
+  playwright-core@1.61.1:
+    resolution: {integrity: sha512-h7Qlt6m4REp25qvIdvbDtVmD4LqVXfpRxhORv9L0jzETM05p4fuPJ3dKyuSXQxDSbXnmS79HAgi9589lGSpLkg==}
+    engines: {node: '>=18'}
+    hasBin: true
+
+  playwright@1.61.1:
+    resolution: {integrity: sha512-DWnY5o3YbLWK4GovuAVwpqL+1VwGNdUGrRr++8j8PtQQzvAVZUIMjKQ90fY689sEJZJBbZVw1rXaOKSTitkzPQ==}
+    engines: {node: '>=18'}
     hasBin: true
 
   postcss@8.4.31:
@@ -3348,6 +3390,9 @@ snapshots:
     dependencies:
       fetch-blob: 3.2.0
 
+  fsevents@2.3.2:
+    optional: true
+
   fsevents@2.3.3:
     optional: true
 
@@ -3697,6 +3742,14 @@ snapshots:
       safe-stable-stringify: 2.5.0
       sonic-boom: 4.2.1
       thread-stream: 4.2.0
+
+  playwright-core@1.61.1: {}
+
+  playwright@1.61.1:
+    dependencies:
+      playwright-core: 1.61.1
+    optionalDependencies:
+      fsevents: 2.3.2
 
   postcss@8.4.31:
     dependencies:

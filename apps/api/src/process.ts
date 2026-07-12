@@ -4,6 +4,7 @@ import { transition } from '@sower/core';
 import { answers, applicationTasks, documents, events, jobs } from '@sower/db';
 import { getAdapter } from '@sower/platforms';
 import { and, eq, inArray, lt, sql } from 'drizzle-orm';
+import { postReviewApprovalCard } from './discord.js';
 import { createTaskRecorder } from './recorder.js';
 import { transitionTask } from './transitions.js';
 import type { Deps } from './types.js';
@@ -150,6 +151,19 @@ export async function processTask(
       missing: missing.length,
       requiredMissing: requiredMissing.length,
     });
+    if (currentState === 'REVIEW') {
+      // Task entered REVIEW (initial process or requeue -> process): post the
+      // Discord approval card and store its ids on the task. Best-effort —
+      // skipped silently when Discord is disabled, never fails processing.
+      await postReviewApprovalCard(deps, {
+        taskId,
+        platform: jobSpec.platform,
+        company: job.company ?? jobSpec.company ?? null,
+        title: job.title ?? jobSpec.title,
+        applyUrl: jobSpec.applyUrl,
+        resolution,
+      });
+    }
     return {
       kind: 'processed',
       state: currentState,

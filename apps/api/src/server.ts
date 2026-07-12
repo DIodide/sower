@@ -1,10 +1,15 @@
 import { timingSafeEqual } from 'node:crypto';
 import { apiCalls, applicationTasks, events, jobs } from '@sower/db';
 import { detectPlatform } from '@sower/platforms';
-import { fetchSimplifyListings, filterListings } from '@sower/sources';
+import {
+  fetchListings,
+  filterListings,
+  type NormalizedListing,
+} from '@sower/sources';
 import { asc, desc, eq } from 'drizzle-orm';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { markApprovalCardSubmitted, registerDiscordRoutes } from './discord.js';
 import { ingestJob } from './ingest.js';
 import { processTask } from './process.js';
 import { approveTask, requeueTask } from './task-actions.js';
@@ -50,6 +55,11 @@ export function buildServer(deps: Deps): FastifyInstance {
   app.addHook('preHandler', async (request, reply) => {
     const path = request.url.split('?')[0] ?? request.url;
     if (request.method === 'GET' && path === '/health') {
+      return;
+    }
+    // POST /discord/interactions is authenticated by Ed25519 signature
+    // verification inside its handler (Discord cannot send an x-api-key).
+    if (request.method === 'POST' && path === '/discord/interactions') {
       return;
     }
     const apiKey = request.headers['x-api-key'];
@@ -157,6 +167,13 @@ export function buildServer(deps: Deps): FastifyInstance {
     if (outcome.kind === 'failed') {
       return reply.code(500).send({ error: outcome.error });
     }
+    // Best-effort: reflect the dry-run approval on the task's Discord card
+    // (no-op when Discord is disabled or the task has no stored card).
+    await markApprovalCardSubmitted(
+      deps,
+      outcome.approval,
+      outcome.payloadSummary,
+    );
     return reply.code(200).send({
       state: outcome.state,
       dryRun: outcome.dryRun,
@@ -221,25 +238,31 @@ export function buildServer(deps: Deps): FastifyInstance {
     });
   });
 
+  // Poll every configured listing source (SimplifyJobs repos + vanshb03),
+  // normalize both raw schemas, filter by term/season, and auto-ingest.
   app.post('/sources/simplify/poll', async () => {
     const { config } = deps;
     const terms = config.SIMPLIFY_TERMS.split(',')
       .map((term) => term.trim())
       .filter((term) => term.length > 0);
 
-    const listings = await fetchSimplifyListings();
-    const filtered = await filterListings(listings, {
-      terms,
-      activeOnly: true,
-      max: config.SIMPLIFY_MAX_PER_RUN * 5,
-    });
+    const listings = await fetchListings();
+    const filtered = filterListings(listings, { terms, activeOnly: true });
 
-    // Only greenhouse is supported end-to-end for now, and only when the
-    // tenant is known (gh_jid on custom domains cannot be discovered).
-    const greenhouse = filtered.filter((listing) => {
+    // Auto-ingest is restricted to greenhouse with a known tenant (gh_jid on
+    // custom domains cannot be discovered); ashby/lever arrive via /ingest.
+    const byPlatform: Record<string, number> = {};
+    const greenhouse: NormalizedListing[] = [];
+    let skippedNoAdapter = 0;
+    for (const listing of filtered) {
       const ref = detectPlatform(listing.url);
-      return ref.platform === 'greenhouse' && ref.tenant !== null;
-    });
+      byPlatform[ref.platform] = (byPlatform[ref.platform] ?? 0) + 1;
+      if (ref.platform === 'greenhouse' && ref.tenant !== null) {
+        greenhouse.push(listing);
+      } else {
+        skippedNoAdapter += 1;
+      }
+    }
     const batch = greenhouse.slice(0, config.SIMPLIFY_MAX_PER_RUN);
 
     let ingested = 0;
@@ -247,10 +270,10 @@ export function buildServer(deps: Deps): FastifyInstance {
     for (const listing of batch) {
       const result = await ingestJob(deps, {
         url: listing.url,
-        source: 'simplify',
-        company: listing.company_name,
+        source: listing.source,
+        company: listing.company ?? undefined,
         title: listing.title,
-        terms: listing.terms,
+        terms: listing.term ? [listing.term] : undefined,
       });
       if (result.duplicate) {
         duplicates += 1;
@@ -261,11 +284,16 @@ export function buildServer(deps: Deps): FastifyInstance {
 
     return {
       scanned: filtered.length,
+      byPlatform,
       matchedGreenhouse: greenhouse.length,
       ingested,
       duplicates,
+      skippedNoAdapter,
     };
   });
+
+  // POST /discord/interactions (signature-authenticated, raw-body parsed).
+  registerDiscordRoutes(app, deps);
 
   return app;
 }

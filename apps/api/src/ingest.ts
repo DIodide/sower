@@ -2,6 +2,7 @@ import type { PlatformRef, TaskState } from '@sower/core';
 import { canonicalizeUrl } from '@sower/core';
 import { applicationTasks, jobs } from '@sower/db';
 import { detectPlatform, getAdapter, resolveUrl } from '@sower/platforms';
+import { computeDedupeKey } from '@sower/sources';
 import { eq } from 'drizzle-orm';
 import { transitionTask } from './transitions.js';
 import type { Deps } from './types.js';
@@ -52,7 +53,11 @@ export async function ingestJob(
   const resolvedUrl = await resolveUrl(input.url);
   const canonicalUrl = canonicalizeUrl(resolvedUrl);
   const ref = detectPlatform(canonicalUrl);
+  const dedupeKey = computeDedupeKey(ref, canonicalUrl);
 
+  // Fast path: exact same canonical URL already ingested. Also covers legacy
+  // rows whose dedupe_key is still NULL (pre-backfill), which the ON CONFLICT
+  // arbiter below cannot see.
   const existing = await db
     .select({ id: jobs.id })
     .from(jobs)
@@ -63,6 +68,9 @@ export async function ingestJob(
     return { duplicate: true, jobId: duplicateRow.id };
   }
 
+  // Same posting reached via a different URL (e.g. boards.greenhouse.io vs
+  // job-boards.greenhouse.io) collides on dedupe_key: DO NOTHING and report
+  // the existing job as a duplicate. The unique constraint arbitrates races.
   const insertedJobs = await db
     .insert(jobs)
     .values({
@@ -75,10 +83,21 @@ export async function ingestJob(
       externalId: ref.externalId,
       terms: input.terms ?? null,
       source: input.source ?? 'manual',
+      dedupeKey,
     })
+    .onConflictDoNothing({ target: jobs.dedupeKey })
     .returning({ id: jobs.id });
   const job = insertedJobs[0];
   if (!job) {
+    const conflicted = await db
+      .select({ id: jobs.id })
+      .from(jobs)
+      .where(eq(jobs.dedupeKey, dedupeKey))
+      .limit(1);
+    const conflictedRow = conflicted[0];
+    if (conflictedRow) {
+      return { duplicate: true, jobId: conflictedRow.id };
+    }
     throw new Error('failed to insert job');
   }
 

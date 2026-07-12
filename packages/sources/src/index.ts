@@ -1,6 +1,16 @@
-export type { FilterListingsOptions, SimplifyListing } from './simplify.js';
+export { computeDedupeKey } from './dedupe.js';
+export type {
+  FilterableListing,
+  FilterListingsOptions,
+  NormalizedListing,
+  RawListing,
+  Source,
+} from './listings.js';
 export {
-  fetchSimplifyListings,
+  fetchListings,
   filterListings,
-  SIMPLIFY_LISTING_URLS,
-} from './simplify.js';
+  normalizeListing,
+  SOURCES,
+} from './listings.js';
+export type { SimplifyListing } from './simplify.js';
+export { fetchSimplifyListings, SIMPLIFY_LISTING_URLS } from './simplify.js';

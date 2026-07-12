@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Full-permutation local e2e:
-#   poll simplify -> NEEDS_INPUT -> discover api_calls recorded ->
+#   poll listing sources (multi-repo) -> re-poll dedupes (0 new ingests) ->
+#   NEEDS_INPUT -> discover api_calls recorded ->
 #   seed resume document (@sower/storage local vault) + answers bank ->
 #   requeue -> REVIEW -> approve (DRY RUN — nothing is ever submitted) ->
-#   submit_dryrun api_call row referencing the resume storage path.
+#   submit_dryrun api_call row referencing the resume storage path and
+#   carrying every required form field ->
+#   Discord disabled permutation (DISCORD_BOT_TOKEN unset): the whole flow
+#   must succeed with approval cards skipped silently.
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,6 +21,9 @@ export VAULT_LOCAL_DIR="$ROOT_DIR/.vault"
 # SAFETY: dry-run only, local vault only.
 export SOWER_SUBMIT_ENABLED="false"
 unset VAULT_BUCKET || true
+# Discord permutation under test: with the bot token UNSET the whole flow must
+# still work — approval cards are skipped silently (asserted in step 9).
+unset DISCORD_BOT_TOKEN || true
 
 # Point at the fake sample profile wherever it lives.
 if [ -f "$ROOT_DIR/config/profile.sample.yaml" ]; then
@@ -93,17 +100,31 @@ for attempt in $(seq 1 60); do
   sleep 1
 done
 
-echo "==> [1/7] Poll the Simplify source"
+echo "==> [1/9] Poll the listing sources (multi-repo)"
 POLL_JSON="$(curl -fsS -X POST -H "x-api-key: $INGEST_API_KEY" \
-  "$API_URL/sources/simplify/poll")" || fail "poll simplify (request failed)"
+  "$API_URL/sources/simplify/poll")" || fail "poll sources (request failed)"
 echo "$POLL_JSON"
 INGESTED="$(echo "$POLL_JSON" | json_query 'data.ingested ?? 0')"
 if [ "${INGESTED:-0}" -lt 1 ]; then
-  fail "poll simplify (no greenhouse listings ingested)"
+  fail "poll sources (no greenhouse listings ingested)"
 fi
-pass "poll simplify (${INGESTED} listing(s) ingested)"
+pass "poll sources (${INGESTED} listing(s) ingested)"
 
-echo "==> [2/7] Wait for tasks to reach NEEDS_INPUT"
+echo "==> [2/9] Re-poll: dedupe reports duplicates and ingests 0 new"
+REPOLL_JSON="$(curl -fsS -X POST -H "x-api-key: $INGEST_API_KEY" \
+  "$API_URL/sources/simplify/poll")" || fail "re-poll sources (request failed)"
+echo "$REPOLL_JSON"
+REPOLL_INGESTED="$(echo "$REPOLL_JSON" | json_query 'data.ingested ?? -1')"
+REPOLL_DUPLICATES="$(echo "$REPOLL_JSON" | json_query 'data.duplicates ?? 0')"
+if [ "${REPOLL_INGESTED}" != "0" ]; then
+  fail "re-poll dedupe (expected ingested=0, got ${REPOLL_INGESTED})"
+fi
+if [ "${REPOLL_DUPLICATES:-0}" -lt 1 ]; then
+  fail "re-poll dedupe (expected duplicates>0, got ${REPOLL_DUPLICATES})"
+fi
+pass "re-poll dedupe (ingested=0, duplicates=${REPOLL_DUPLICATES})"
+
+echo "==> [3/9] Wait for tasks to reach NEEDS_INPUT"
 NEEDS_INPUT=0
 for attempt in $(seq 1 45); do
   TASKS_JSON="$(curl -fsS -H "x-api-key: $INGEST_API_KEY" "$API_URL/tasks")" || TASKS_JSON='{"tasks":[]}'
@@ -119,14 +140,14 @@ if [ "${NEEDS_INPUT:-0}" -lt 1 ]; then
 fi
 pass "tasks reach NEEDS_INPUT (${NEEDS_INPUT} task(s))"
 
-echo "==> [3/7] Verify api_calls rows were recorded for discover"
+echo "==> [4/9] Verify api_calls rows were recorded for discover"
 DISCOVER_CALLS="$(psql_exec "SELECT count(*) FROM api_calls WHERE phase = 'discover';")" || fail "query api_calls"
 if [ "${DISCOVER_CALLS:-0}" -lt 1 ]; then
   fail "api_calls recorded for discover (0 rows)"
 fi
 pass "api_calls recorded for discover (${DISCOVER_CALLS} row(s))"
 
-echo "==> [4/7] Seed resume document (@sower/storage) + answers bank for one task"
+echo "==> [5/9] Seed resume document (@sower/storage) + answers bank for one task"
 SEED_JSON="$(pnpm --filter @sower/api exec tsx scripts/e2e-seed.ts | tail -n 1)" ||
   fail "seed document + bank answers (seed script failed)"
 echo "$SEED_JSON"
@@ -140,7 +161,7 @@ if [ ! -f "$VAULT_LOCAL_DIR/$RESUME_PATH" ]; then
 fi
 pass "seeded resume at ${RESUME_PATH} + bank answers for task ${TASK_ID}"
 
-echo "==> [5/7] Requeue the task"
+echo "==> [6/9] Requeue the task"
 REQUEUE_JSON="$(curl -fsS -X POST -H "x-api-key: $INGEST_API_KEY" \
   "$API_URL/tasks/$TASK_ID/requeue")" || fail "requeue (request failed)"
 REQUEUE_STATE="$(echo "$REQUEUE_JSON" | json_query 'data.state ?? ""')"
@@ -167,7 +188,7 @@ if [ "$TASK_STATE" != "REVIEW" ]; then
 fi
 pass "task reached REVIEW after requeue"
 
-echo "==> [6/7] Approve (DRY-RUN submit — no request is ever sent)"
+echo "==> [7/9] Approve (DRY-RUN submit — no request is ever sent)"
 APPROVE_JSON="$(curl -fsS -X POST -H "x-api-key: $INGEST_API_KEY" \
   "$API_URL/tasks/$TASK_ID/approve")" || fail "approve dry-run (request failed)"
 echo "$APPROVE_JSON"
@@ -177,7 +198,7 @@ if [ "$APPROVE_OK" != "true" ]; then
 fi
 pass "approve -> dry-run recorded, task back in REVIEW"
 
-echo "==> [7/7] Verify the submit_dryrun api_call row"
+echo "==> [8/9] Verify the submit_dryrun api_call row"
 DETAIL_JSON="$(curl -fsS -H "x-api-key: $INGEST_API_KEY" "$API_URL/tasks/$TASK_ID")" ||
   fail "fetch task detail"
 FOUND="$(echo "$DETAIL_JSON" | RESUME_PATH="$RESUME_PATH" json_query \
@@ -187,6 +208,34 @@ if [ "$FOUND" != "true" ]; then
   fail "submit_dryrun api_call with dryRun=true containing the resume storage path"
 fi
 pass "submit_dryrun api_call recorded with dryRun=true and resume storage path"
+
+# Every required form field from the task's own job_spec must appear as a
+# key in the recorded dry-run payload (nothing silently dropped).
+MISSING_FIELDS="$(echo "$DETAIL_JSON" | json_query \
+  '(() => {
+    const call = (data.apiCalls ?? []).find((c) => c.phase === "submit_dryrun" && c.dryRun === true);
+    const body = call?.requestBody ?? {};
+    const questions = (data.task?.jobSpec?.questions ?? []).filter((q) => q.required);
+    return questions.filter((q) => !(q.id in body)).map((q) => q.id);
+  })()')"
+if [ "$MISSING_FIELDS" != "[]" ]; then
+  fail "submit_dryrun payload is missing required form fields: $MISSING_FIELDS"
+fi
+pass "submit_dryrun payload carries every required form field"
+
+echo "==> [9/9] Discord disabled: whole flow succeeded with cards skipped silently"
+# DISCORD_BOT_TOKEN was unset for this entire run (see env setup above), so
+# reaching this point proves ingest -> REVIEW -> approve works without
+# Discord. Additionally: no approval card ids may have been stored.
+if [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
+  fail "discord disabled permutation (DISCORD_BOT_TOKEN unexpectedly set)"
+fi
+APPROVAL_ROWS="$(psql_exec "SELECT count(*) FROM application_tasks WHERE approval_channel_id IS NOT NULL OR approval_message_id IS NOT NULL;")" ||
+  fail "discord disabled permutation (query approval card columns)"
+if [ "${APPROVAL_ROWS:-1}" != "0" ]; then
+  fail "discord disabled permutation (expected 0 stored approval card ids, found ${APPROVAL_ROWS})"
+fi
+pass "discord disabled: flow completed, 0 approval card ids stored"
 
 echo "E2E PASS (full permutation)"
 exit 0

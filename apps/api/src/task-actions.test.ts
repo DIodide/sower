@@ -2,7 +2,7 @@ import { apiCalls, applicationTasks, documents, events, jobs } from '@sower/db';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
 import { buildServer } from './server.js';
-import type { Deps } from './types.js';
+import type { Deps, Notifier } from './types.js';
 
 /**
  * These tests exercise the requeue/approve/detail routes end-to-end through
@@ -163,6 +163,11 @@ const config: Config = {
   SIMPLIFY_MAX_PER_RUN: 10,
   SOWER_SUBMIT_ENABLED: 'false',
   SOWER_ENV: 'test',
+  DISCORD_BOT_TOKEN: undefined,
+  DISCORD_PUBLIC_KEY: 'test-public-key',
+  DISCORD_APP_ID: 'test-app-id',
+  DISCORD_CHANNEL_MAP: undefined,
+  DISCORD_ENABLED: false,
 };
 
 const jobSpec = {
@@ -237,15 +242,29 @@ function createState(
   };
 }
 
-function createDeps(state: FakeState) {
+function createDeps(state: FakeState, overrides: Partial<Deps> = {}) {
   const enqueueProcess = vi.fn(async (_taskId: string) => {});
   const deps: Deps = {
     db: createFakeDb(state),
     queue: { enqueueProcess },
     config,
     logger: false,
+    ...overrides,
   };
   return { deps, enqueueProcess };
+}
+
+/** Fake Discord notifier (no fetch anywhere; token never read in tests). */
+function createNotify(): Notifier {
+  return {
+    postApprovalCard: vi.fn(async () => ({
+      channelId: 'chan-1',
+      messageId: 'msg-1',
+    })),
+    updateApprovalCard: vi.fn(async () => {}),
+    verifyInteraction: vi.fn(() => true),
+    applyVerdict: vi.fn(() => ({ embeds: [], components: [] })),
+  };
 }
 
 afterEach(() => {
@@ -410,6 +429,73 @@ describe('POST /tasks/:id/approve', () => {
         storagePath: 'documents/doc-1/resume.pdf',
       },
     });
+  });
+
+  it('edits the stored Discord card to submitted-dryrun after a dashboard approve', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() => {
+      throw new Error('SAFETY VIOLATION: fetch called during approve dry-run');
+    });
+    const state = createState({
+      state: 'REVIEW',
+      approvalChannelId: 'chan-1',
+      approvalMessageId: 'msg-1',
+    });
+    const notify = createNotify();
+    const { deps } = createDeps(state, {
+      notify,
+      config: {
+        ...config,
+        DISCORD_BOT_TOKEN: 'test-not-a-real-token',
+        DISCORD_ENABLED: true,
+      },
+    });
+    const app = buildServer(deps);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/tasks/${TASK_ID}/approve`,
+      headers: { 'x-api-key': 'test-key' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    // Response shape is unchanged: the card ref never leaks to clients.
+    expect(res.json()).toEqual({
+      state: 'REVIEW',
+      dryRun: true,
+      payloadSummary: { fieldCount: 2, fileCount: 1 },
+    });
+    expect(notify.updateApprovalCard).toHaveBeenCalledTimes(1);
+    expect(notify.updateApprovalCard).toHaveBeenCalledWith(
+      'chan-1',
+      'msg-1',
+      'submitted-dryrun',
+      'dry-run submit recorded (2 field(s), 1 file(s))',
+    );
+    // The notifier is the only Discord surface; no direct fetch happened.
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('leaves Discord untouched on approve when the task has no stored card', async () => {
+    const state = createState({ state: 'REVIEW' });
+    const notify = createNotify();
+    const { deps } = createDeps(state, {
+      notify,
+      config: {
+        ...config,
+        DISCORD_BOT_TOKEN: 'test-not-a-real-token',
+        DISCORD_ENABLED: true,
+      },
+    });
+    const app = buildServer(deps);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/tasks/${TASK_ID}/approve`,
+      headers: { 'x-api-key': 'test-key' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(notify.updateApprovalCard).not.toHaveBeenCalled();
   });
 
   it('skips a task that is not in REVIEW (no events, no api calls, no fetch)', async () => {

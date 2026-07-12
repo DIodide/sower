@@ -21,6 +21,14 @@ export const jobs = pgTable('jobs', {
   externalId: text('external_id'),
   terms: jsonb('terms').$type<string[]>(),
   source: text('source').notNull().default('manual'),
+  /**
+   * Stable identity for ingest dedupe, computed by
+   * `computeDedupeKey` (@sower/sources): `platform:tenant:externalId`,
+   * `platform:jid:externalId`, or the canonical URL as a fallback.
+   * Nullable so pre-existing rows can be backfilled lazily; unique so a
+   * concurrent double-ingest cannot create two rows for the same posting.
+   */
+  dedupeKey: text('dedupe_key').unique(),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
 
@@ -34,6 +42,13 @@ export const applicationTasks = pgTable('application_tasks', {
   jobSpec: jsonb('job_spec').$type<JobSpec>(),
   resolution: jsonb('resolution').$type<ResolutionResult>(),
   lastError: text('last_error'),
+  /**
+   * Discord approval-card location (set when the task enters REVIEW and a
+   * card is posted), so the card can be edited after approve/reject. Null
+   * when Discord notification is disabled or the post failed.
+   */
+  approvalChannelId: text('approval_channel_id'),
+  approvalMessageId: text('approval_message_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });

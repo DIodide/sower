@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { filterListings } from './listings.js';
 import {
   fetchSimplifyListings,
-  filterListings,
   SIMPLIFY_LISTING_URLS,
   type SimplifyListing,
 } from './simplify.js';

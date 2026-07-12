@@ -26,7 +26,7 @@ export function parseSocketUrl(connectionString: string): {
     return null;
   }
   const socketHost = url.searchParams.get('host');
-  if (!socketHost || !socketHost.startsWith('/')) return null;
+  if (!socketHost?.startsWith('/')) return null;
   return {
     host: socketHost,
     database: url.pathname.replace(/^\//, ''),

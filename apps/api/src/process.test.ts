@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
 import { MAX_ATTEMPTS, processTask } from './process.js';
-import type { Deps } from './types.js';
+import type { Deps, Notifier } from './types.js';
 
 const adapterState = vi.hoisted(() => ({
   discoverError: null as string | null,
@@ -63,6 +63,8 @@ interface FakeTaskRow {
   resolution: unknown;
   lastError: string | null;
   updatedAt: Date;
+  approvalChannelId?: string;
+  approvalMessageId?: string;
 }
 
 interface FakeEventRow {
@@ -197,16 +199,42 @@ const config: Config = {
   SIMPLIFY_MAX_PER_RUN: 10,
   SOWER_SUBMIT_ENABLED: 'false',
   SOWER_ENV: 'test',
+  DISCORD_BOT_TOKEN: undefined,
+  DISCORD_PUBLIC_KEY: 'test-public-key',
+  DISCORD_APP_ID: 'test-app-id',
+  DISCORD_CHANNEL_MAP: undefined,
+  DISCORD_ENABLED: false,
 };
 
-function createDeps(db: Deps['db']): Deps {
+function createDeps(db: Deps['db'], overrides: Partial<Deps> = {}): Deps {
   return {
     db,
     queue: { enqueueProcess: vi.fn(async () => {}) },
     config,
     logger: false,
+    ...overrides,
   };
 }
+
+/** Fake Discord notifier; the token is never read here (env-only in prod). */
+function createNotify() {
+  return {
+    postApprovalCard: vi.fn(async () => ({
+      channelId: 'chan-1',
+      messageId: 'msg-1',
+    })),
+    updateApprovalCard: vi.fn(async () => {}),
+    verifyInteraction: vi.fn(() => true),
+    applyVerdict: vi.fn(() => ({ embeds: [], components: [] })),
+  } satisfies Notifier;
+}
+
+/** Config permutation with Discord enabled (fake token, obviously not real). */
+const discordConfig: Config = {
+  ...config,
+  DISCORD_BOT_TOKEN: 'test-not-a-real-token',
+  DISCORD_ENABLED: true,
+};
 
 beforeEach(() => {
   adapterState.discoverError = null;
@@ -427,5 +455,93 @@ describe('processTask', () => {
       toState: 'FAILED',
       data: { error: 'boom', attempt: 1 },
     });
+  });
+});
+
+describe('processTask Discord approval card (REVIEW hook)', () => {
+  it('posts a card and stores {channelId,messageId} when the task lands in REVIEW', async () => {
+    const { db, task } = createFakeTaskDb({ state: 'QUEUED' });
+    answersState.result = {
+      resolved: [
+        { questionId: 'email', source: 'profile', value: 'x' },
+        {
+          questionId: 'resume',
+          source: 'document',
+          value: 'documents/doc-1/resume.pdf',
+        },
+      ],
+      missing: [],
+    };
+    const notify = createNotify();
+    const deps = createDeps(db, { notify, config: discordConfig });
+
+    const outcome = await processTask(deps, 'task-1');
+
+    expect(outcome.kind).toBe('processed');
+    expect(task.state).toBe('REVIEW');
+    expect(notify.postApprovalCard).toHaveBeenCalledTimes(1);
+    expect(notify.postApprovalCard).toHaveBeenCalledWith({
+      taskId: 'task-1',
+      platform: 'greenhouse',
+      company: '(unknown company)', // fake job/spec carry no company
+      title: 'Software Engineer Intern',
+      applyUrl: 'https://boards.greenhouse.io/acme/jobs/123',
+      fieldCount: 2,
+      fileCount: 1,
+      missingRequired: 0,
+    });
+    // The card's location is stored for later edits (migration 0002 columns).
+    expect(task.approvalChannelId).toBe('chan-1');
+    expect(task.approvalMessageId).toBe('msg-1');
+  });
+
+  it('skips the card silently when Discord is disabled (no DISCORD_BOT_TOKEN)', async () => {
+    const { db, task } = createFakeTaskDb({ state: 'QUEUED' });
+    const notify = createNotify();
+    // config (not discordConfig): DISCORD_ENABLED false.
+    const deps = createDeps(db, { notify });
+
+    const outcome = await processTask(deps, 'task-1');
+
+    expect(outcome.kind).toBe('processed');
+    expect(task.state).toBe('REVIEW');
+    expect(notify.postApprovalCard).not.toHaveBeenCalled();
+    expect(task.approvalChannelId).toBeUndefined();
+  });
+
+  it('does not post a card when the task lands in NEEDS_INPUT', async () => {
+    const { db, task } = createFakeTaskDb({ state: 'QUEUED' });
+    answersState.result = {
+      resolved: [],
+      missing: [
+        { id: 'resume', label: 'Resume', type: 'file', required: true },
+      ],
+    };
+    const notify = createNotify();
+    const deps = createDeps(db, { notify, config: discordConfig });
+
+    const outcome = await processTask(deps, 'task-1');
+
+    expect(outcome.kind).toBe('processed');
+    expect(task.state).toBe('NEEDS_INPUT');
+    expect(notify.postApprovalCard).not.toHaveBeenCalled();
+  });
+
+  it('never fails processing when posting the card throws (best-effort)', async () => {
+    const { db, task } = createFakeTaskDb({ state: 'QUEUED' });
+    const notify = createNotify();
+    notify.postApprovalCard.mockRejectedValueOnce(
+      new Error('discord unreachable'),
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const deps = createDeps(db, { notify, config: discordConfig });
+
+    const outcome = await processTask(deps, 'task-1');
+
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'REVIEW' });
+    expect(task.state).toBe('REVIEW');
+    expect(task.lastError).toBeNull();
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

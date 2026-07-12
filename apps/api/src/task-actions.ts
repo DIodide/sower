@@ -76,6 +76,12 @@ export type ApproveOutcome =
       state: TaskState;
       dryRun: true;
       payloadSummary: { fieldCount: number; fileCount: number };
+      /**
+       * Discord approval-card ref stored on the task when the card was
+       * posted (null when Discord was disabled / no card exists). Internal —
+       * used to edit the card after a dashboard approve; not sent to clients.
+       */
+      approval: { channelId: string; messageId: string } | null;
     }
   | { kind: 'failed'; error: string };
 
@@ -168,6 +174,13 @@ export async function approveTask(
         fieldCount: Object.keys(payload).length,
         fileCount: files.length,
       },
+      approval:
+        claimed.approvalChannelId != null && claimed.approvalMessageId != null
+          ? {
+              channelId: claimed.approvalChannelId,
+              messageId: claimed.approvalMessageId,
+            }
+          : null,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
