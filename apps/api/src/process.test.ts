@@ -195,6 +195,7 @@ const config: Config = {
   TASKS_QUEUE: 'apply-queue',
   TASKS_TARGET_BASE_URL: undefined,
   PROFILE_PATH: './config/profile.sample.yaml',
+  ANSWER_BANK_PATH: './config/answer-bank.sample.yaml',
   SIMPLIFY_TERMS: 'Summer 2027',
   SIMPLIFY_MAX_PER_RUN: 10,
   SOWER_SUBMIT_ENABLED: 'false',
@@ -281,6 +282,20 @@ describe('processTask', () => {
     // documents (empty here) are passed through to resolveAnswers.
     expect(adapterState.lastDiscoverOpts?.recorder).toBeTypeOf('function');
     expect(answersState.lastOpts).toEqual({ bank: [], documents: [] });
+  });
+
+  it('passes the startup-loaded curated answer bank through to resolveAnswers', async () => {
+    const { db } = createFakeTaskDb({ state: 'QUEUED' });
+    const answerBank = { version: 1 as const, entries: [] };
+    answersState.result = { resolved: [], missing: [] };
+
+    await processTask(createDeps(db, { answerBank }), 'task-1');
+
+    expect(answersState.lastOpts).toEqual({
+      bank: [],
+      documents: [],
+      answerBank,
+    });
   });
 
   it('moves to REVIEW when only OPTIONAL answers are missing', async () => {

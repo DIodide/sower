@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_ANSWER_BANK_PATH } from '@sower/answers';
 import { z } from 'zod';
 
 // Resolved from this file's location, not process.cwd(): pnpm runs the api with
@@ -29,6 +30,14 @@ const envSchema = z
     TASKS_QUEUE: z.string().default('apply-queue'),
     TASKS_TARGET_BASE_URL: z.string().optional(),
     PROFILE_PATH: z.string().default(DEFAULT_PROFILE_PATH),
+    /**
+     * Curated answer bank (alias dedup + range strategies). Defaults to the
+     * committed PII-free sample; point at a gitignored
+     * config/answer-bank.yaml to customize. Loaded once at startup; if the
+     * file is missing or invalid the API runs without a bank (existing
+     * behavior preserved).
+     */
+    ANSWER_BANK_PATH: z.string().default(DEFAULT_ANSWER_BANK_PATH),
     SIMPLIFY_TERMS: z.string().default('Summer 2027'),
     SIMPLIFY_MAX_PER_RUN: z.coerce.number().int().positive().default(10),
     SOWER_SUBMIT_ENABLED: z.string().default('false'),

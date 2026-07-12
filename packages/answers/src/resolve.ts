@@ -4,6 +4,10 @@ import type {
   ResolutionResult,
   ResolvedAnswer,
 } from '@sower/core';
+// Circular at module level (answer-bank.ts imports normalizeLabel from this
+// file) but benign: both modules only call across the cycle inside functions,
+// never during evaluation.
+import { type AnswerBank, resolveFromAnswerBank } from './answer-bank.js';
 import type { Profile } from './profile.js';
 
 /**
@@ -34,6 +38,13 @@ export interface DocumentEntry {
 export interface ResolveOptions {
   bank?: BankEntry[];
   documents?: DocumentEntry[];
+  /**
+   * Curated answer bank (see answer-bank.ts): dedupes near-identical
+   * question wordings via aliases and answers them from the profile,
+   * including range/bucket selects. Runs after the direct profile stages
+   * and before the user bank.
+   */
+  answerBank?: AnswerBank;
 }
 
 type ProfileValueGetter = (profile: Profile) => string | null;
@@ -169,6 +180,19 @@ const NEGATION_RE = /\b(?:not|without|never)\b/;
 // sponsorship boolean. Any relocation phrasing punts the whole question to a
 // human so we never answer the wrong question (verified overtrigger: Scale AI).
 const RELOCATION_RE = /\brelocat/;
+// Country guard: the profile's authorization booleans are US-scoped. A
+// sponsorship/right-to-work question naming any OTHER country ("will you
+// require sponsorship to work in the UK?" — live Marshall Wace question)
+// must never be answered from them; it punts to a human. Word-boundary
+// matches on the normalized label ("u k" is how "U.K." normalizes).
+const NON_US_COUNTRY_RE =
+  /\b(?:uk|u k|united kingdom|great britain|britain|england|scotland|wales|ireland|canada|germany|france|netherlands|spain|italy|portugal|switzerland|austria|belgium|sweden|norway|denmark|finland|poland|czech|romania|greece|europe|eu|emea|australia|new zealand|singapore|japan|china|hong kong|taiwan|korea|india|israel|uae|dubai|qatar|saudi|apac|mexico|brazil|argentina|colombia|chile)\b/;
+// Detail guard: an authorization question asking WHEN it expires, WHAT TYPE it
+// is, or HOW LONG it lasts is not a yes/no eligibility question — the profile
+// booleans cannot answer it, so it punts to a human ("When does your work
+// authorization expire?" must never resolve to "Yes").
+const AUTH_DETAIL_RE =
+  /\b(?:expire|expires|expiry|expiration|expiring|what type|which type|what kind|how long|valid until|valid through|valid thru)\b/;
 
 /**
  * Compute the raw string value for a question from the profile (resolution
@@ -230,6 +254,10 @@ function computeProfileValue(
     if (NEGATION_RE.test(label)) return null;
     // Relocation questions can mention sponsorship but ask something else.
     if (RELOCATION_RE.test(label)) return null;
+    // Non-US-country questions must not be answered from US-scoped booleans.
+    if (NON_US_COUNTRY_RE.test(label)) return null;
+    // Detail questions (expiry/type/duration) are not yes/no eligibility.
+    if (AUTH_DETAIL_RE.test(label)) return null;
     if (mentionsAuthorization) {
       return profile.authorization.usWorkAuthorized ? 'Yes' : 'No';
     }
@@ -357,9 +385,11 @@ function documentKindForFileQuestion(
  *  1) standard greenhouse field ids -> profile
  *  2) exact LABEL_DICTIONARY match -> profile
  *  3) guarded yes/no regexes (authorization/sponsorship) -> profile
- *  4) answers bank, exact normalized-label match -> source 'bank'
- *  5) file questions: matching stored document -> source 'document'
- *  6) profile.custom, exact normalized-label match -> profile
+ *  4) curated answer bank (opts.answerBank): alias match + strategy
+ *     (range/bucket selects, consents, EEO decline, ...) -> profile
+ *  5) answers bank, exact normalized-label match -> source 'bank'
+ *  6) file questions: matching stored document -> source 'document'
+ *  7) profile.custom, exact normalized-label match -> profile
  * A stage only wins when it yields a final valid answer (selects require an
  * exact option match); otherwise the next stage gets a chance.
  *
@@ -392,6 +422,7 @@ export function resolveAnswers(
   }
 
   const documents = opts?.documents ?? [];
+  const answerBank = opts?.answerBank;
 
   for (const question of questions) {
     // File questions resolve ONLY from stored documents of the matching
@@ -428,6 +459,9 @@ export function resolveAnswers(
         computeProfileValue(question, label, profile),
         'profile',
       ) ??
+      (answerBank === undefined
+        ? null
+        : resolveFromAnswerBank(question, profile, answerBank)) ??
       finalize(question, bankByNormalizedLabel.get(label), 'bank') ??
       finalize(question, customByNormalizedLabel.get(label), 'profile');
 

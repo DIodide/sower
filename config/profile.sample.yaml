@@ -28,4 +28,18 @@ work:
 authorization:
   usWorkAuthorized: true
   requiresSponsorship: false
+graduation:
+  date: '2028-05' # anticipated graduation month, YYYY-MM
+  year: 2028
+academics:
+  satTotal: 1520
+  actComposite: 34
+  gpaBandLow: 3.7 # lower bound of GPA band; lets range selects resolve without an exact GPA
+preferences:
+  openToRelocation: true
+  howDidYouHear: Job board
+  preferredLocations:
+    - New York, NY
+    - Remote
+  pronouns: she/her
 custom: {}

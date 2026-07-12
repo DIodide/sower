@@ -35,13 +35,30 @@ export function NeedsInputForm({
   return (
     <form action={formAction}>
       <QuestionsPanel views={views} interactive documents={documents} />
+      <p
+        style={{
+          margin: '1rem 0 0.5rem',
+          fontSize: '0.78rem',
+          color: MUTED,
+          lineHeight: 1.5,
+        }}
+      >
+        <strong style={{ color: '#93c5fd' }}>Save answers</strong> stores your
+        answers on this task but leaves it here in Needs&nbsp;Input — nothing
+        re-runs, so you can fill things in over several visits.{' '}
+        <strong style={{ color: '#4ade80' }}>Save &amp; re-run</strong> also
+        re-processes the task: it re-checks every required question, and if
+        they&rsquo;re all answered it advances to <em>Review</em> (where you
+        approve the dry-run submission). Use it when you&rsquo;ve finished
+        answering.
+      </p>
       <div
         style={{
           display: 'flex',
           alignItems: 'center',
           gap: '0.75rem',
           flexWrap: 'wrap',
-          marginTop: '1rem',
+          marginTop: '0.25rem',
         }}
       >
         <button
@@ -49,6 +66,7 @@ export function NeedsInputForm({
           name="intent"
           value="save"
           disabled={pending}
+          title="Store your answers and stay on this task (no re-processing)"
           style={{ ...buttonStyle, opacity: pending ? 0.6 : 1 }}
         >
           Save answers
@@ -58,6 +76,7 @@ export function NeedsInputForm({
           name="intent"
           value="save_requeue"
           disabled={pending}
+          title="Store your answers and re-process the task — advances to Review if all required questions are answered"
           style={{
             ...buttonStyle,
             backgroundColor: '#143322',
@@ -65,7 +84,7 @@ export function NeedsInputForm({
             opacity: pending ? 0.6 : 1,
           }}
         >
-          Save &amp; requeue
+          Save &amp; re-run
         </button>
         {pending ? (
           <span style={{ fontSize: '0.8rem', color: MUTED }}>saving…</span>

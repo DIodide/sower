@@ -104,9 +104,10 @@ export async function processTask(
       .where(eq(applicationTasks.id, taskId));
 
     const profile = await loadProfile(config.PROFILE_PATH);
-    // The answers bank (user-entered values keyed by normalized label) and
-    // stored documents (resume/cover letter files) extend the profile as
-    // answer sources. Truthfulness is preserved: nothing is ever guessed.
+    // The curated answer bank (loaded once at startup, on deps), the answers
+    // bank (user-entered values keyed by normalized label), and stored
+    // documents (resume/cover letter files) extend the profile as answer
+    // sources. Truthfulness is preserved: nothing is ever guessed.
     const bankRows = await db
       .select({
         normalizedLabel: answers.normalizedLabel,
@@ -129,6 +130,7 @@ export async function processTask(
           value: row.value as string | string[],
         })),
         documents: documentRows,
+        answerBank: deps.answerBank,
       },
     );
     // REVIEW gates on REQUIRED answers only; optional gaps never block.

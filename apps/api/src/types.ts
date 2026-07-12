@@ -1,3 +1,4 @@
+import type { AnswerBank } from '@sower/answers';
 import type { createDb } from '@sower/db';
 import type {
   ApprovalCard,
@@ -49,6 +50,12 @@ export interface Deps {
   config: Config;
   /** Discord notifier; omit to disable all Discord features. */
   notify?: Notifier;
+  /**
+   * Curated answer bank, loaded once at startup from
+   * config.ANSWER_BANK_PATH. Omit (bank file missing/invalid) to resolve
+   * answers without it — existing behavior is preserved.
+   */
+  answerBank?: AnswerBank;
   /** Set to false in tests to silence the pino logger. Defaults to true. */
   logger?: boolean;
 }

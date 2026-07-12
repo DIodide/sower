@@ -127,6 +127,7 @@ const config: Config = {
   TASKS_QUEUE: 'apply-queue',
   TASKS_TARGET_BASE_URL: undefined,
   PROFILE_PATH: './config/profile.sample.yaml',
+  ANSWER_BANK_PATH: './config/answer-bank.sample.yaml',
   SIMPLIFY_TERMS: 'Summer 2027',
   SIMPLIFY_MAX_PER_RUN: 10,
   SOWER_SUBMIT_ENABLED: 'false',

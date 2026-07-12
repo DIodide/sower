@@ -1,0 +1,375 @@
+# ============================================================================
+# Sower answer bank (SAMPLE — committed; contains NO personal data).
+#
+# WHAT THIS IS
+#   One entry per CANONICAL application question. Each entry dedupes the many
+#   near-identical wordings seen on live job forms ("aliases") down to a single
+#   answering strategy. Strategies never contain personal facts: they either
+#   hold a universally-safe literal (consent "I Agree", EEO decline) or a
+#   dot-path REFERENCE into the runtime profile (gitignored config/profile.yaml
+#   — copy config/profile.sample.yaml to create yours). This file is loaded by
+#   default (DEFAULT_ANSWER_BANK_PATH); copy it to config/answer-bank.yaml
+#   (gitignored) to customize without committing changes.
+#
+# MATCHING
+#   Aliases are pre-normalized question labels: normalizeLabel() output
+#   (lowercase, punctuation stripped, whitespace collapsed). A question matches
+#   an entry only when its normalized label EXACTLY equals one of the aliases —
+#   never by substring. The resolver additionally routes the raw Greenhouse
+#   compliance field ids gender / race / veteran_status / disability_status to
+#   the eeo_gender / eeo_race / eeo_veteran / eeo_disability entries by key.
+#
+# STRATEGY TYPES
+#   literal       { value } OR { source }  — a fixed string (value), or the
+#                 profile value at a dot-path used verbatim (source). Exactly
+#                 one of the two. For selects the string must exactly match an
+#                 option label/value or nothing resolves.
+#   choice        { prefer: [labels] }     — first listed label that exists
+#                 among the question's options wins; none present => no answer.
+#   booleanYesNo  { source }               — profile boolean: true -> the exact
+#                 "Yes" option, false -> the exact "No" option. Never "Maybe".
+#   numericRange  { source }               — parse each option label as a
+#                 numeric interval ("Below 3.2", "3.41 - 3.5", "Over 3.9",
+#                 "<1200", "3.6-4.0") and pick the single option whose interval
+#                 contains the profile number. None/ambiguous => no answer.
+#   dateRange     { source }               — like numericRange for dates: the
+#                 profile 'YYYY-MM' must fall inside the option's month range
+#                 ("January 2028 - June 2028", "May 2028", "2028",
+#                 "2029 or later").
+#   decline       {}                       — EEO/demographic questions: pick
+#                 the option that declines to answer ("Decline To Self
+#                 Identify", "I don't wish to answer", "Prefer not to say",
+#                 ...). No decline option => no answer. Demographics are NEVER
+#                 guessed.
+#
+# TRUTHFULNESS RULES (apply to every entry)
+#   - 'source' is a dot-path into the Profile; array indices allowed
+#     (education.0.gpa). work[] / education[] are ordered most-recent-first,
+#     as in config/profile.sample.yaml.
+#   - A missing, null, or TODO-marked profile value resolves NOTHING — the
+#     question goes to NEEDS_INPUT for a human.
+#   - If a range select's buckets don't clearly contain the profile value,
+#     nothing resolves.
+#   - Personal history (offers in hand, prior applications, skill
+#     proficiency claims, availability confirmations) is deliberately NOT in
+#     this bank — see the "deliberately not auto-answered" list at the bottom.
+# ============================================================================
+
+version: 1
+entries:
+  # ────────────────────────── Education & academics ──────────────────────────
+
+  # GPA bucket selects: every company buckets differently, so we store the
+  # number once and pick whichever option's range contains it. If
+  # education.0.gpa is unset, the resolver may use academics.gpaBandLow as the
+  # documented fallback for range buckets.
+  - key: gpa
+    aliases:
+      - "what is your gpa"
+      - "what is your current cumulative gpa"
+      - "for your most recent degree what is was your gpa normalized to a 4 0 scale"
+    strategy: { type: numericRange, source: "education.0.gpa" }
+
+  - key: sat_score
+    aliases:
+      - "provide your best result on sat"
+    strategy: { type: numericRange, source: "academics.satTotal" }
+
+  - key: act_score
+    aliases:
+      - "provide your best result on act"
+    strategy: { type: numericRange, source: "academics.actComposite" }
+
+  # Graduation timing, asked as a month/date-range select.
+  # ("when is your expected graduation month" resolves only if the engine can
+  #  parse bare month options; otherwise it safely falls through to a human.)
+  - key: grad_date
+    aliases:
+      - "when is your anticipated graduation date please select a graduation date range"
+      - "when is your expected graduation date"
+      - "when is your expected graduation month"
+    strategy: { type: dateRange, source: "graduation.date" }
+
+  # Graduation timing, asked as a plain year select.
+  - key: grad_year
+    aliases:
+      - "when is was your graduation year"
+      - "what year are you expected to graduate"
+      - "when is your expected year of graduation"
+    strategy: { type: literal, source: "graduation.year" }
+
+  # Degree currently pursued. The profile value must exactly match an option
+  # label (profile.sample.yaml uses "Bachelor's" style labels for this reason).
+  - key: degree_pursuing
+    aliases:
+      - "what degree are you currently pursuing or have recently completed"
+    strategy: { type: literal, source: "education.0.degree" }
+
+  - key: field_of_study
+    aliases:
+      - "what is your latest field of study"
+      - "please select all fields of study that closely align with your education background"
+    strategy: { type: literal, source: "education.0.major" }
+
+  # School pickers with a fixed list. Resolves only when the profile's school
+  # string exactly matches an option label; "Princeton University" will NOT
+  # silently match a "Princeton" option — that mismatch goes to a human.
+  - key: school_attended
+    aliases:
+      - "what school do you currently attend select other if not listed"
+    strategy: { type: literal, source: "education.0.school" }
+
+  # ───────────────────── US work authorization & sponsorship ─────────────────
+  # Auth/sponsorship answers derive ONLY from the profile booleans:
+  #   authorization.usWorkAuthorized  true  -> "authorized?"          = Yes
+  #   authorization.requiresSponsorship false -> "require sponsorship?" = No
+  # Inverse phrasings are mapped per-entry so the meaning is never flipped.
+  # UK/other-country right-to-work questions are intentionally ABSENT: the
+  # profile booleans are US-scoped and must not answer for other countries.
+
+  - key: work_authorized_us
+    aliases:
+      - "are you legally authorized to work in the united states"
+      - "are you legally authorized to work in the united states of america"
+      - "are you legally eligible to work in the u s"
+      - "are you presently authorized under u s immigration laws to work in the united states"
+      - "u s work authorization"
+    strategy: { type: booleanYesNo, source: "authorization.usWorkAuthorized" }
+
+  # Compound inverse phrasing: "authorized WITHOUT sponsorship?" -> Yes.
+  # This maps to usWorkAuthorized under the profile convention that
+  # usWorkAuthorized means authorization NOT contingent on employer
+  # sponsorship (the paired requiresSponsorship: false). If your authorization
+  # depends on future sponsorship (requiresSponsorship: true), DELETE this
+  # entry — the single boolean would no longer be truthful here.
+  - key: work_authorized_without_sponsorship
+    aliases:
+      - "are you authorized to work in the united states without sponsorship"
+      - "are you legally authorized to work in the united states for the duration of this internship without sponsorship from the firm"
+    # Compound: only truthful when authorized AND needing no sponsorship. The
+    # guard makes it refuse (-> human) for anyone who requires sponsorship
+    # (e.g. an F-1 student), instead of falsely answering "Yes".
+    strategy:
+      type: booleanYesNo
+      source: "authorization.usWorkAuthorized"
+      guard: { source: "authorization.requiresSponsorship", equals: false }
+
+  - key: requires_sponsorship
+    aliases:
+      - "will you now or in the future require sponsorship for employment visa status to work in the united states"
+      - "will you now or in the future require sponsorship for an employment visa e g h 1b to work in the united states"
+      - "will you now or in the future require sponsorship for employment visa status e g h 1b visa status"
+      - "will you now or in the future require sponsorship for employment visa status for example h 1b visa status"
+      - "will you now or in the future require visa sponsorship for employment at ai2"
+      - "will you now or in the future require sponsorship to continue to be authorized under u s immigration law to be employed by latitude ai"
+      - "will you require immigration sponsorship now or in the future"
+      - "will you require immigration sponsorship to begin working for imc"
+      - "will you require immigration sponsorship in the future to continue working for imc"
+      - "will you require sponsorship from anduril for employment now or in the future e g h1b visa"
+      - "will you now or in the future require company assistance or sponsorship in order to ensure your continued eligibility to work lawfully for the company in the country in which you re applying to work e g h 1b visa e 3 visa o 1 visa tn visa"
+    strategy: { type: booleanYesNo, source: "authorization.requiresSponsorship" }
+
+  # ──────────────────────────── Consents / agreements ────────────────────────
+  # Blanket application consents where the only affirmative option is an
+  # "I agree" variant. Option matching is normalized, so "I Agree" also
+  # matches "I agree".
+  - key: privacy_consent
+    aliases:
+      - "privacy statement"
+      - "interview code of conduct"
+      - "affirmation"
+      - "i agree that by submitting my application i am agreeing to not disclose or discuss any interview or test details to those outside of marshall wace i am also acknowledging my agreement of the marshall wace privacy policy which can be found here https www mwam com regulatory disclosures privacy policy"
+      - "i hereby certify that all information in my application is true and complete to the best of my knowledge i understand that ai2 may perform a background investigation to make inquiries regarding my education work experience credit record criminal history and references to determine my suitability for employment i authorize ai2 to secure any information necessary to make a decision i understand that ai2 will adhere to the provisions of the fair credit reporting act if applicable and other applicable state and federal statutes concerning the securing of information handling utilization and release of information obtained in the pre employment investigation i understand that any material misrepresentation or omission on this application may be grounds for rejection of my application or termination of any subsequent employment with ai2"
+    strategy: { type: literal, value: "I Agree" }
+
+  # ─────────────────────────── How did you hear ──────────────────────────────
+  # First option in 'prefer' that exists on the form wins. Generic, truthful
+  # catch-alls first; board-specific strings after.
+  - key: how_did_you_hear
+    aliases:
+      - "how did you hear about this job"
+      - "how did you hear about us"
+      - "how did you hear about this role"
+      - "how did you hear about this opportunity"
+      - "how did you hear about anduril"
+    strategy:
+      type: choice
+      prefer:
+        - "Other"
+        - "Job board"
+        - "Search Engine"
+        - "LinkedIn Jobs"
+        - "Search engine (e.g., Google)"
+        - "Search engine (Google, Yahoo, etc.)"
+        - "Google job search"
+        - "Job Board (Indeed, Monster, etc)"
+        - "Other (not specified)"
+        - "Other (please state in next box)"
+
+  # ──────────────────── EEO / demographics: ALWAYS decline ───────────────────
+  # Demographics are never guessed. Each entry picks the form's decline option
+  # ("Decline To Self Identify", "I don't wish to answer", "I do not want to
+  # answer", "Prefer not to say/state", "Choose not to disclose", "I elect not
+  # to self-identify."). Forms with no decline option resolve nothing and go
+  # to a human. The resolver also routes the raw Greenhouse compliance ids
+  # (gender, race, veteran_status, disability_status) to these entries.
+
+  - key: eeo_gender
+    aliases:
+      - "gender"
+      - "what is your gender gender identity"
+      - "which most closely describes your gender"
+      - "i identify my gender as"
+      - "how would you describe your gender identity mark all that apply"
+      # No decline option on this one -> resolves nothing (correct).
+      - "what gender do you identify as"
+    strategy: { type: decline }
+
+  - key: eeo_race
+    aliases:
+      - "race"
+      - "what is your race ethnicity"
+      - "what is your race and ethnicity"
+      - "how would you describe your racial ethnic background mark all that apply"
+    strategy: { type: decline }
+
+  - key: eeo_ethnicity
+    aliases:
+      - "what is your ethnicity"
+      # No decline option on this one -> resolves nothing (correct).
+      - "i identify my ethnicity as select all that apply"
+    strategy: { type: decline }
+
+  - key: eeo_veteran
+    aliases:
+      - "veteranstatus"
+      - "are you a military veteran with one of the united states armed forces"
+      - "are you a veteran or active member of the united states armed forces"
+    strategy: { type: decline }
+
+  - key: eeo_disability
+    aliases:
+      - "disabilitystatus"
+      - "do you have a disability or chronic condition physical visual auditory cognitive mental emotional or other that substantially limits one or more of your major life activities including mobility communication seeing hearing speaking and learning"
+    strategy: { type: decline }
+
+  - key: eeo_sexual_orientation
+    aliases:
+      - "how would you describe your sexual orientation mark all that apply"
+    strategy: { type: decline }
+
+  - key: eeo_transgender
+    aliases:
+      - "do you identify as transgender"
+    strategy: { type: decline }
+
+  # Pronouns are shared only if the user chose to record them in the profile;
+  # otherwise (unset/TODO) these questions go to a human.
+  - key: pronouns
+    aliases:
+      - "pronouns"
+      - "what are your preferred pronouns"
+    strategy: { type: literal, source: "preferences.pronouns" }
+
+  # ─────────────────────── Location & relocation ─────────────────────────────
+
+  - key: relocation_open
+    aliases:
+      - "if you re currently outside a commutable distance are you open to relocating to our corporate headquarters in playa vista ca"
+      - "this role is in seattle if you are not currently local are you willing to relocate"
+    strategy: { type: booleanYesNo, source: "preferences.openToRelocation" }
+
+  # Preferred office pickers (city lists vary per company). Emits the user's
+  # TOP preference only, and only when it exactly matches an option label;
+  # otherwise a human picks. Requires preferences.preferredLocations in the
+  # profile (list, most-preferred first).
+  - key: preferred_work_location
+    aliases:
+      - "what is your preferred work location"
+      - "what is your top location preference"
+      - "location preference"
+    strategy: { type: literal, source: "preferences.preferredLocations.0" }
+
+  # Country select ("United States", not "USA"): resolves only when the
+  # profile's country string exactly matches an option label.
+  - key: current_country
+    aliases:
+      - "please select your current location"
+    strategy: { type: literal, source: "location.country" }
+
+  # US state of residence. Select lists use full names ("New Jersey"); a
+  # profile abbreviation ("NJ") won't match and goes to a human.
+  - key: state_of_residence
+    aliases:
+      - "state"
+      - "which state do you currently reside in"
+    strategy: { type: literal, source: "location.state" }
+
+  # ─────────────────────────── Links & work history ──────────────────────────
+  # (first name / last name / email / phone / linkedin / github / website /
+  #  location / school / current company / preferred name are already handled
+  #  by the resolver's standard-field ids and exact label dictionary — they are
+  #  deliberately NOT duplicated here.)
+
+  - key: other_website
+    aliases:
+      - "other website url"
+    strategy: { type: literal, source: "links.website" }
+
+  # Answered with the profile's GitHub URL (which contains the username).
+  - key: github_username
+    aliases:
+      - "what is your github username"
+    strategy: { type: literal, source: "links.github" }
+  # NOTE: "most recent employer/title" questions are intentionally handled by
+  # resolve.ts's LABEL_DICTIONARY (mostRecentEmployer/mostRecentJobTitle), which
+  # picks the entry by endDate rather than trusting array order — so they are
+  # NOT duplicated here.
+
+# ============================================================================
+# DELIBERATELY NOT AUTO-ANSWERED (reviewed against the live question corpus).
+# These stay with a human because no truthful profile-derived answer exists:
+#
+#   Personal history & judgment
+#   - "do you currently have any offers" / outstanding offers, deadlines,
+#     late-stage processes (+ their "if yes, specify" follow-ups)
+#   - "have you applied to this role or another role imc within the last
+#     12 18 months..." / "have you applied to marshall wace before" /
+#     "have you worked at accenture in the past" / referred-by-an-employee
+#   - "are you considering or committed to pursuing further education..."
+#   - skill/experience claims: ML libraries, programming languages, math
+#     competitions, quant-finance exposure, internships at hedge funds,
+#     2+ years consulting, ERP systems, Python/SQL proficiency
+#   - salary / compensation expectations; essays and free-text prompts
+#   - availability confirmations: "i confirm that the listed dates are
+#     suitable...", 12-month-contract acknowledgment, "i confirm that this
+#     application is my preference for role and location", willing to work
+#     in-person 12 weeks, 4-days-per-week office policy
+#   - non-compete/NDA status, security clearance, US-government employment,
+#     dealer/partner/supplier conflicts, family members at the company
+#
+#   Facts the profile does not (and should not pretend to) encode
+#   - "when did you graduate from high school" (college start date is not a
+#     safe proxy)
+#   - "select your standardized test score type" (depends on which of SAT/ACT
+#     the profile actually holds — conditional, engine may learn this later)
+#   - "please provide your university email address" — no schema field; add it
+#     to profile custom with the exact question label to auto-fill via the
+#     custom stage
+#   - "please select your highest completed level of education" (for a current
+#     undergrad the truthful answer is usually "High School diploma or GED";
+#     needs completion-status logic, not a stored string)
+#   - "do you hold a degree in computer science..." (currently PURSUING a
+#     degree does not mean holding one)
+#   - age questions ("are you over 18 years of age", age range) — no DOB field
+#   - citizenship-status questions (export controls / ITAR) — usWorkAuthorized
+#     does not distinguish citizen / green card / visa status
+#   - UK right-to-work, UK sponsorship, UK residency, UK degree classification
+#     — authorization booleans are US-scoped and MUST NOT answer for other
+#     countries
+#   - accommodations/adjustments questions — disability-adjacent, human only
+#   - "from the cities above are there any other imc locations you d consider"
+#     (secondary preferences conflict with the top-choice answer)
+#   - resume/cover-letter paste-text alternates (file uploads are handled by
+#     the documents stage), video link URL
+# ============================================================================

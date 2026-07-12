@@ -10,4 +10,8 @@ coverage/
 .vault/
 *.tsbuildinfo
 
+# Real user data — only the *.sample.yaml counterparts get committed
+config/profile.yaml
+config/answer-bank.yaml
+
 *.tsbuildinfo

@@ -1,5 +1,6 @@
 import type { Question } from '@sower/core';
 import { describe, expect, it } from 'vitest';
+import type { AnswerBank } from './answer-bank.js';
 import type { Profile } from './profile.js';
 import {
   normalizeLabel,
@@ -1189,5 +1190,170 @@ describe('resolveAnswers — jsonb boolean coercion (Ashby Yes/No)', () => {
       ],
     });
     expect(no.resolved[0]?.value).toBe('false');
+  });
+});
+
+describe('resolveAnswers — curated answer bank stage', () => {
+  const answerBank: AnswerBank = {
+    version: 1,
+    entries: [
+      {
+        key: 'gpa',
+        aliases: ['what is your cumulative gpa'],
+        strategy: { type: 'numericRange', source: 'education.0.gpa' },
+      },
+      {
+        // Deliberate trap: if the bank ever outranked the direct profile
+        // stages, 'Email' would resolve to this wrong literal.
+        key: 'email_trap',
+        aliases: ['email'],
+        strategy: { type: 'literal', value: 'trap@wrong.example' },
+      },
+      {
+        key: 'eeo_gender',
+        aliases: [],
+        strategy: { type: 'decline' },
+      },
+    ],
+  };
+
+  const gpaOptions = [
+    { label: 'Below 3.0', value: 'b30' },
+    { label: '3.0 - 3.5', value: 'b35' },
+    { label: '3.6 - 4.0', value: 'b40' },
+  ];
+  const gpaQuestion = q({
+    id: 'q_gpa',
+    label: 'What is your cumulative GPA?',
+    type: 'select',
+    options: gpaOptions,
+  });
+
+  it('resolves a range select via the bank with source profile (only when passed)', () => {
+    const without = resolveAnswers([gpaQuestion], profile);
+    expect(without.missing).toEqual([gpaQuestion]);
+
+    const withBank = resolveAnswers([gpaQuestion], profile, { answerBank });
+    expect(withBank.missing).toEqual([]);
+    expect(withBank.resolved).toEqual([
+      { questionId: 'q_gpa', source: 'profile', value: 'b40' },
+    ]);
+  });
+
+  it('runs AFTER the direct profile stages (they win on conflict)', () => {
+    const question = q({ id: 'q_email', label: 'Email' });
+    const result = resolveAnswers([question], profile, { answerBank });
+    expect(result.resolved).toEqual([
+      {
+        questionId: 'q_email',
+        source: 'profile',
+        value: 'jane.doe@example.com',
+      },
+    ]);
+  });
+
+  it('runs BEFORE the user bank, which still catches what the bank cannot', () => {
+    // Curated bank beats a conflicting user-bank entry...
+    const both = resolveAnswers([gpaQuestion], profile, {
+      answerBank,
+      bank: [{ normalizedLabel: 'what is your cumulative gpa', value: 'b30' }],
+    });
+    expect(both.resolved).toEqual([
+      { questionId: 'q_gpa', source: 'profile', value: 'b40' },
+    ]);
+
+    // ...but when the bank has no truthful bucket (gap: 3.9 fits nothing
+    // here), the user's explicitly saved answer still resolves.
+    const gapQuestion = q({
+      id: 'q_gpa_gap',
+      label: 'What is your cumulative GPA?',
+      type: 'select',
+      options: [
+        { label: 'Over 3.9', value: 'over' },
+        { label: '3.8 - 3.89', value: 'b389' },
+      ],
+    });
+    const fallthrough = resolveAnswers([gapQuestion], profile, {
+      answerBank,
+      bank: [{ normalizedLabel: 'what is your cumulative gpa', value: 'over' }],
+    });
+    expect(fallthrough.resolved).toEqual([
+      { questionId: 'q_gpa_gap', source: 'bank', value: 'over' },
+    ]);
+  });
+
+  it('routes Greenhouse compliance ids to the eeo decline entries', () => {
+    const question = q({
+      id: 'gender',
+      label: 'Gender (voluntary self-identification)',
+      type: 'select',
+      options: [
+        { label: 'Male', value: '1' },
+        { label: 'Female', value: '2' },
+        { label: 'Decline To Self Identify', value: '3' },
+      ],
+    });
+    const result = resolveAnswers([question], profile, { answerBank });
+    expect(result.resolved).toEqual([
+      { questionId: 'gender', source: 'profile', value: '3' },
+    ]);
+  });
+});
+
+describe('resolveAnswers — non-US-country guard (truthfulness)', () => {
+  it('never answers non-US sponsorship/right-to-work from US-scoped booleans', () => {
+    // Live Marshall Wace question: profile says requiresSponsorship: false,
+    // but that boolean is US-scoped — answering 'No' for the UK would be a
+    // fabricated claim. Must go to a human.
+    const questions: Question[] = [
+      q({
+        id: 'q_uk_sponsor',
+        label:
+          'Would you now, or in the future, require sponsorship to work in the UK?',
+        type: 'select',
+        options: [
+          { label: 'Yes', value: 'yes' },
+          { label: 'No', value: 'no' },
+        ],
+      }),
+      q({
+        id: 'q_uk_auth',
+        label: 'Are you authorized to work in the United Kingdom?',
+      }),
+    ];
+    const result = resolveAnswers(questions, profile);
+    expect(result.resolved).toEqual([]);
+    expect(result.missing).toEqual(questions);
+  });
+
+  it('still answers the US phrasings', () => {
+    const result = resolveAnswers(
+      [
+        q({
+          id: 'q_us_auth',
+          label: 'Are you authorized to work in the United States?',
+        }),
+      ],
+      profile,
+    );
+    expect(result.resolved).toEqual([
+      { questionId: 'q_us_auth', source: 'profile', value: 'Yes' },
+    ]);
+  });
+});
+
+describe('auth detail guard (review fix)', () => {
+  it('does not answer work-authorization expiry/type questions as yes/no', () => {
+    for (const label of [
+      'When does your work authorization expire?',
+      'Will your work authorization expire during your employment?',
+      'What type of work authorization do you have?',
+    ]) {
+      const result = resolveAnswers(
+        [q({ id: 'auth', label, type: 'text' })],
+        profile,
+      );
+      expect(result.resolved).toEqual([]);
+    }
   });
 });

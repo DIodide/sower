@@ -43,6 +43,35 @@ export const ProfileSchema = z.object({
     usWorkAuthorized: z.boolean(),
     requiresSponsorship: z.boolean(),
   }),
+  graduation: z
+    .object({
+      /** Anticipated graduation month in YYYY-MM form, e.g. "2028-05". */
+      date: z
+        .string()
+        .regex(/^\d{4}-(0[1-9]|1[0-2])$/, 'graduation.date must be YYYY-MM')
+        .optional(),
+      year: z.number().int().optional(),
+    })
+    .optional(),
+  academics: z
+    .object({
+      satTotal: z.number().int().optional(),
+      actComposite: z.number().int().optional(),
+      /**
+       * Lower bound of the user's GPA band (e.g. 3.7 for a 3.7–4.0 band).
+       * Lets range-bucket selects resolve even when the exact GPA is unset.
+       */
+      gpaBandLow: z.number().optional(),
+    })
+    .optional(),
+  preferences: z
+    .object({
+      openToRelocation: z.boolean().optional(),
+      howDidYouHear: z.string().optional(),
+      preferredLocations: z.array(z.string()).optional(),
+      pronouns: z.string().optional(),
+    })
+    .optional(),
   custom: z.record(z.string()).default({}),
 });
 

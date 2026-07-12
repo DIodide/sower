@@ -1,3 +1,4 @@
+import { type AnswerBank, loadAnswerBank } from '@sower/answers';
 import { createDb } from '@sower/db';
 import {
   applyVerdict,
@@ -25,13 +26,24 @@ async function main(): Promise<void> {
     applyVerdict,
   };
 
+  // Curated answer bank, loaded ONCE at startup and reused per request. A
+  // missing or invalid bank file only logs a warning: resolution then runs
+  // without the bank stage, exactly as before the bank existed.
+  let answerBank: AnswerBank | undefined;
+  try {
+    answerBank = loadAnswerBank(config.ANSWER_BANK_PATH);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[sower] answer bank disabled: ${message}`);
+  }
+
   // The inline queue handler closes over deps, which is assigned below before
   // the server starts accepting requests (so before any enqueue can happen).
   let deps: Deps;
   const queue: Queue = createQueue(config, async (taskId: string) => {
     await processTask(deps, taskId);
   });
-  deps = { db, queue, config, notify };
+  deps = { db, queue, config, notify, answerBank };
 
   const app = buildServer(deps);
   await app.listen({ port: config.PORT, host: '0.0.0.0' });
