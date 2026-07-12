@@ -5,8 +5,38 @@ import * as schema from './schema.js';
 export * from './schema.js';
 export { schema };
 
+/**
+ * Cloud SQL's unix-socket convention (borrowed from node-postgres):
+ *   postgres://user:pass@localhost/db?host=/cloudsql/<project:region:instance>
+ * postgres-js ignores the ?host= query param entirely (it would silently dial
+ * TCP to localhost), so we detect the form and pass explicit options instead —
+ * a host option containing '/' makes postgres-js connect to
+ * `${host}/.s.PGSQL.5432` as a unix socket.
+ */
+export function parseSocketUrl(
+  connectionString: string,
+): { host: string; database: string; username: string; password: string } | null {
+  let url: URL;
+  try {
+    url = new URL(connectionString);
+  } catch {
+    return null;
+  }
+  const socketHost = url.searchParams.get('host');
+  if (!socketHost || !socketHost.startsWith('/')) return null;
+  return {
+    host: socketHost,
+    database: url.pathname.replace(/^\//, ''),
+    username: decodeURIComponent(url.username),
+    password: decodeURIComponent(url.password),
+  };
+}
+
 export function createDb(connectionString: string) {
-  const client = postgres(connectionString, { max: 5 });
+  const socket = parseSocketUrl(connectionString);
+  const client = socket
+    ? postgres({ ...socket, max: 5 })
+    : postgres(connectionString, { max: 5 });
   return drizzle(client, { schema });
 }
 
