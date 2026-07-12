@@ -1,6 +1,15 @@
 import { getTableColumns, getTableName, type Table } from 'drizzle-orm';
+import { getTableConfig } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
-import { accounts, answers, applicationTasks, events, jobs } from './schema.js';
+import {
+  accounts,
+  answers,
+  apiCalls,
+  applicationTasks,
+  documents,
+  events,
+  jobs,
+} from './schema.js';
 
 function sqlColumnNames(table: Table): string[] {
   return Object.values(getTableColumns(table))
@@ -71,6 +80,63 @@ describe('schema', () => {
       'value',
     ]);
     expect(answers.value.notNull).toBe(true);
+  });
+
+  it('defines the api_calls table', () => {
+    expect(getTableName(apiCalls)).toBe('api_calls');
+    expect(sqlColumnNames(apiCalls)).toEqual([
+      'created_at',
+      'dry_run',
+      'duration_ms',
+      'id',
+      'method',
+      'phase',
+      'request_body',
+      'request_headers',
+      'response_body',
+      'response_headers',
+      'response_status',
+      'seq',
+      'task_id',
+      'url',
+    ]);
+    expect(apiCalls.taskId.notNull).toBe(true);
+    expect(apiCalls.seq.notNull).toBe(true);
+    expect(apiCalls.phase.notNull).toBe(true);
+    expect(apiCalls.method.notNull).toBe(true);
+    expect(apiCalls.url.notNull).toBe(true);
+    expect(apiCalls.dryRun.notNull).toBe(true);
+    expect(apiCalls.dryRun.default).toBe(false);
+  });
+
+  it('references application_tasks and indexes task_id on api_calls', () => {
+    const config = getTableConfig(apiCalls);
+    const fk = config.foreignKeys[0]?.reference();
+    expect(fk?.foreignTable && getTableName(fk.foreignTable)).toBe(
+      'application_tasks',
+    );
+    expect(fk?.columns.map((c) => c.name)).toEqual(['task_id']);
+    expect(config.indexes.map((idx) => idx.config.name ?? null)).toContain(
+      'api_calls_task_id_idx',
+    );
+  });
+
+  it('defines the documents table', () => {
+    expect(getTableName(documents)).toBe('documents');
+    expect(sqlColumnNames(documents)).toEqual([
+      'content_type',
+      'created_at',
+      'filename',
+      'id',
+      'kind',
+      'size_bytes',
+      'storage_path',
+    ]);
+    expect(documents.kind.notNull).toBe(true);
+    expect(documents.filename.notNull).toBe(true);
+    expect(documents.storagePath.notNull).toBe(true);
+    expect(documents.contentType.notNull).toBe(false);
+    expect(documents.sizeBytes.notNull).toBe(false);
   });
 
   it('defines the accounts table', () => {

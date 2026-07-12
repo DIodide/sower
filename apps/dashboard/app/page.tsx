@@ -1,89 +1,125 @@
-// NOTE: no auth on this dashboard — it is read-only and intended to run
-// locally / on a private network only. Do not expose it publicly as-is.
-import { applicationTasks, createDb, jobs } from '@sower/db';
-import { desc, eq } from 'drizzle-orm';
+import { ALLOWED, type TaskState } from '@sower/core';
+import { applicationTasks, jobs } from '@sower/db';
+import { and, desc, eq, type SQL } from 'drizzle-orm';
+import Link from 'next/link';
 import type { CSSProperties } from 'react';
+import { getDb } from '../lib/db';
+import { formatDate, relativeTime } from '../lib/format';
+import {
+  cellStyle,
+  Empty,
+  headStyle,
+  linkStyle,
+  MONO,
+  MUTED,
+  StateBadge,
+  TableWrap,
+} from '../lib/ui';
 
 export const dynamic = 'force-dynamic';
 
-// Reuse one connection pool across requests instead of reconnecting on every
-// render (the page is force-dynamic).
-let dbSingleton: ReturnType<typeof createDb> | null = null;
+const TASK_STATES = Object.keys(ALLOWED) as TaskState[];
 
-function getDb(url: string) {
-  dbSingleton ??= createDb(url);
-  return dbSingleton;
+function isTaskState(value: string): value is TaskState {
+  return (TASK_STATES as string[]).includes(value);
 }
 
-const STATE_COLORS: Record<string, { bg: string; fg: string }> = {
-  INGESTED: { bg: '#16283f', fg: '#60a5fa' },
-  PARSED: { bg: '#16283f', fg: '#60a5fa' },
-  QUEUED: { bg: '#16283f', fg: '#93c5fd' },
-  PREPARING: { bg: '#2a2140', fg: '#a78bfa' },
-  NEEDS_INPUT: { bg: '#3a2f14', fg: '#fbbf24' },
-  REVIEW: { bg: '#3a2f14', fg: '#fbbf24' },
-  AWAITING_OTP: { bg: '#3a2f14', fg: '#fcd34d' },
-  FILLING: { bg: '#2a2140', fg: '#c4b5fd' },
-  SUBMITTED: { bg: '#143322', fg: '#34d399' },
-  CONFIRMED: { bg: '#143322', fg: '#4ade80' },
-  FAILED: { bg: '#3a1a1a', fg: '#f87171' },
-  DUPLICATE: { bg: '#26262b', fg: '#9ca3af' },
-};
+function firstParam(value: string | string[] | undefined): string | null {
+  if (Array.isArray(value)) return value[0] ?? null;
+  return value ?? null;
+}
 
-const FALLBACK_COLOR = { bg: '#26262b', fg: '#9ca3af' };
+function filterHref(state: string | null, platform: string | null): string {
+  const qs = new URLSearchParams();
+  if (state) qs.set('state', state);
+  if (platform) qs.set('platform', platform);
+  const s = qs.toString();
+  return s ? `/?${s}` : '/';
+}
 
-function StateBadge({ state }: { state: string }) {
-  const color = STATE_COLORS[state] ?? FALLBACK_COLOR;
+function FilterChip({
+  href,
+  active,
+  label,
+}: {
+  href: string;
+  active: boolean;
+  label: string;
+}) {
+  const style: CSSProperties = {
+    color: active ? '#d7dae0' : MUTED,
+    backgroundColor: active ? '#1c2130' : 'transparent',
+    border: `1px solid ${active ? '#2a3147' : '#1c2130'}`,
+    borderRadius: '9999px',
+    padding: '0.125rem 0.625rem',
+    fontSize: '0.75rem',
+    fontFamily: MONO,
+    textDecoration: 'none',
+    whiteSpace: 'nowrap',
+  };
   return (
-    <span
-      style={{
-        backgroundColor: color.bg,
-        color: color.fg,
-        borderRadius: '9999px',
-        padding: '0.125rem 0.625rem',
-        fontSize: '0.75rem',
-        fontWeight: 600,
-        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-        whiteSpace: 'nowrap',
-      }}
-    >
-      {state}
-    </span>
+    <Link href={href} style={style}>
+      {label}
+    </Link>
   );
 }
 
-const cellStyle: CSSProperties = {
-  padding: '0.5rem 0.75rem',
-  borderBottom: '1px solid #1c2130',
-  textAlign: 'left',
-  fontSize: '0.875rem',
-};
-
-const headStyle: CSSProperties = {
-  ...cellStyle,
-  color: '#8b93a7',
-  fontSize: '0.75rem',
-  textTransform: 'uppercase',
-  letterSpacing: '0.05em',
-};
-
-function formatTime(value: Date | null): string {
-  if (!value) return '—';
-  return `${value.toISOString().replace('T', ' ').slice(0, 16)} UTC`;
+function FilterRow({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        gap: '0.375rem',
+        marginBottom: '0.5rem',
+      }}
+    >
+      <span
+        style={{
+          color: MUTED,
+          fontSize: '0.75rem',
+          textTransform: 'uppercase',
+          letterSpacing: '0.05em',
+          marginRight: '0.25rem',
+          minWidth: '4.5rem',
+        }}
+      >
+        {title}
+      </span>
+      {children}
+    </div>
+  );
 }
 
-export default async function Page() {
-  const databaseUrl = process.env.DATABASE_URL;
+export default async function Page({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const params = await searchParams;
+  const rawState = firstParam(params.state);
+  const stateFilter = rawState && isTaskState(rawState) ? rawState : null;
+  const platformFilter = firstParam(params.platform);
 
-  if (!databaseUrl) {
-    return (
-      <p style={{ color: '#fbbf24' }}>
-        set <code>DATABASE_URL</code> to view application tasks.
-      </p>
-    );
-  }
+  const db = getDb();
 
-  const db = getDb(databaseUrl);
+  const platformRows = await db
+    .selectDistinct({ platform: jobs.platform })
+    .from(jobs)
+    .orderBy(jobs.platform);
+  const platforms = platformRows.map((r) => r.platform);
+
+  const conditions: SQL[] = [];
+  if (stateFilter) conditions.push(eq(applicationTasks.state, stateFilter));
+  if (platformFilter) conditions.push(eq(jobs.platform, platformFilter));
+
   const rows = await db
     .select({
       id: applicationTasks.id,
@@ -92,51 +128,100 @@ export default async function Page() {
       company: jobs.company,
       title: jobs.title,
       platform: jobs.platform,
+      tenant: jobs.tenant,
     })
     .from(applicationTasks)
     .innerJoin(jobs, eq(applicationTasks.jobId, jobs.id))
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
     .orderBy(desc(applicationTasks.updatedAt))
-    .limit(50);
+    .limit(200);
 
-  if (rows.length === 0) {
-    return <p style={{ color: '#8b93a7' }}>no application tasks yet.</p>;
-  }
+  const hasFilters = stateFilter !== null || platformFilter !== null;
 
   return (
-    <div style={{ overflowX: 'auto' }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-        <thead>
-          <tr>
-            <th style={headStyle}>company</th>
-            <th style={headStyle}>title</th>
-            <th style={headStyle}>platform</th>
-            <th style={headStyle}>state</th>
-            <th style={headStyle}>updated</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.id}>
-              <td style={cellStyle}>{row.company ?? '—'}</td>
-              <td style={cellStyle}>{row.title ?? '—'}</td>
-              <td
-                style={{
-                  ...cellStyle,
-                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-                }}
-              >
-                {row.platform}
-              </td>
-              <td style={cellStyle}>
-                <StateBadge state={row.state} />
-              </td>
-              <td style={{ ...cellStyle, color: '#8b93a7' }}>
-                {formatTime(row.updatedAt)}
-              </td>
+    <div>
+      <FilterRow title="state">
+        <FilterChip
+          href={filterHref(null, platformFilter)}
+          active={stateFilter === null}
+          label="all"
+        />
+        {TASK_STATES.map((s) => (
+          <FilterChip
+            key={s}
+            href={filterHref(s, platformFilter)}
+            active={stateFilter === s}
+            label={s}
+          />
+        ))}
+      </FilterRow>
+      <FilterRow title="platform">
+        <FilterChip
+          href={filterHref(stateFilter, null)}
+          active={platformFilter === null}
+          label="all"
+        />
+        {platforms.map((p) => (
+          <FilterChip
+            key={p}
+            href={filterHref(stateFilter, p)}
+            active={platformFilter === p}
+            label={p}
+          />
+        ))}
+      </FilterRow>
+
+      {rows.length === 0 ? (
+        hasFilters ? (
+          <Empty>
+            no tasks match these filters.{' '}
+            <Link href="/" style={linkStyle}>
+              clear filters
+            </Link>
+          </Empty>
+        ) : (
+          <Empty>no application tasks yet.</Empty>
+        )
+      ) : (
+        <TableWrap>
+          <thead>
+            <tr>
+              <th style={headStyle}>company</th>
+              <th style={headStyle}>title</th>
+              <th style={headStyle}>platform</th>
+              <th style={headStyle}>state</th>
+              <th style={headStyle}>updated</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.id}>
+                <td style={cellStyle}>{row.company ?? '—'}</td>
+                <td style={cellStyle}>
+                  <Link href={`/tasks/${row.id}`} style={linkStyle}>
+                    {row.title ?? row.id}
+                  </Link>
+                </td>
+                <td style={{ ...cellStyle, fontFamily: MONO }}>
+                  {row.platform}
+                  {row.tenant ? (
+                    <span style={{ color: MUTED }}> / {row.tenant}</span>
+                  ) : null}
+                </td>
+                <td style={cellStyle}>
+                  <StateBadge state={row.state} />
+                </td>
+                <td
+                  style={{ ...cellStyle, color: MUTED, whiteSpace: 'nowrap' }}
+                  title={formatDate(row.updatedAt)}
+                >
+                  {relativeTime(row.updatedAt)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </TableWrap>
+      )}
     </div>
   );
 }

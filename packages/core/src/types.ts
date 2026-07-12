@@ -56,7 +56,15 @@ export interface JobSpec {
 
 export interface ResolvedAnswer {
   questionId: string;
-  source: 'profile' | 'bank' | 'default';
+  /**
+   * Where the answer came from:
+   * - 'profile': the user's profile (including profile.custom)
+   * - 'bank': the answers bank (previously saved user answers)
+   * - 'default': a platform default
+   * - 'user': explicit user input via the dashboard
+   * - 'document': a stored document; value is its storage path
+   */
+  source: 'profile' | 'bank' | 'default' | 'user' | 'document';
   value: string | string[] | null;
 }
 

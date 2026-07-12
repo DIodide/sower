@@ -20,7 +20,8 @@
       "@sower/queue": ["./packages/queue/src/index.ts"],
       "@sower/platforms": ["./packages/platforms/src/index.ts"],
       "@sower/answers": ["./packages/answers/src/index.ts"],
-      "@sower/sources": ["./packages/sources/src/index.ts"]
+      "@sower/sources": ["./packages/sources/src/index.ts"],
+      "@sower/storage": ["./packages/storage/src/index.ts"]
     }
   }
 }

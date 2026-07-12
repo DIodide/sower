@@ -6,6 +6,8 @@ import type {
   ResolvedAnswer,
 } from '@sower/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SubmitFile } from '../contract.js';
+import type { ApiCallRecord } from '../recorder.js';
 import { GreenhouseAdapter } from './index.js';
 
 // Raw response from GET boards-api.greenhouse.io/v1/boards/stripe/jobs/7954688?questions=true
@@ -222,6 +224,31 @@ describe('GreenhouseAdapter.discover', () => {
       ),
     ).rejects.toThrow(/externalId/);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('passes the recorder through recordedFetch and records exactly one call', async () => {
+    // Use a real Response so the recorder can clone and capture the body.
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify(fixture), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const recorder = vi.fn();
+
+    const spec = await adapter.discover(ref, url, { recorder });
+
+    expect(spec.title).toBe('Account Executive, AI Sales (Grower)');
+    expect(recorder).toHaveBeenCalledTimes(1);
+    const call = recorder.mock.calls[0]?.[0] as ApiCallRecord;
+    expect(call).toMatchObject({
+      phase: 'discover',
+      method: 'GET',
+      url: 'https://boards-api.greenhouse.io/v1/boards/stripe/jobs/7954688?questions=true',
+      responseStatus: 200,
+    });
+    expect(call.durationMs).toBeGreaterThanOrEqual(0);
+    expect(call.dryRun).toBeUndefined();
   });
 
   it('throws with the status code on a non-ok response', async () => {
@@ -486,6 +513,106 @@ describe('GreenhouseAdapter.buildSubmitPayload', () => {
       first_name: 'Jane',
       'question_67165646[]': ['United States'],
     });
+  });
+});
+
+describe('GreenhouseAdapter.dryRunSubmit', () => {
+  const adapter = new GreenhouseAdapter();
+  const answers: ResolvedAnswer[] = [
+    { questionId: 'first_name', source: 'profile', value: 'Jane' },
+    { questionId: 'question_67165646[]', source: 'bank', value: ['US'] },
+    { questionId: 'cover_letter_text', source: 'default', value: null },
+  ];
+  const files: SubmitFile[] = [
+    {
+      questionId: 'resume',
+      storagePath: 'documents/00000000-0000-4000-8000-000000000000/resume.pdf',
+      filename: 'resume.pdf',
+    },
+  ];
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('NEVER invokes global fetch (zero network I/O)', async () => {
+    const fetchSpy = vi.fn(() => {
+      throw new Error('dryRunSubmit performed network I/O — forbidden');
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    const recorder = vi.fn();
+
+    await adapter.dryRunSubmit(sampleSpec, answers, files, { recorder });
+    await adapter.dryRunSubmit(sampleSpec, answers, files); // no recorder path
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns the payload with answers keyed by question id and file metadata', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+
+    const result = await adapter.dryRunSubmit(sampleSpec, answers, files);
+
+    expect(result.dryRun).toBe(true);
+    expect(result.payload).toEqual({
+      first_name: 'Jane',
+      'question_67165646[]': ['US'],
+      resume: {
+        kind: 'file',
+        filename: 'resume.pdf',
+        storagePath:
+          'documents/00000000-0000-4000-8000-000000000000/resume.pdf',
+      },
+    });
+  });
+
+  it('file metadata wins over a storage-path answer for the same question', async () => {
+    const withDocAnswer: ResolvedAnswer[] = [
+      ...answers,
+      { questionId: 'resume', source: 'profile', value: 'stale-path' },
+    ];
+
+    const result = await adapter.dryRunSubmit(sampleSpec, withDocAnswer, files);
+
+    expect(result.payload.resume).toEqual({
+      kind: 'file',
+      filename: 'resume.pdf',
+      storagePath: 'documents/00000000-0000-4000-8000-000000000000/resume.pdf',
+    });
+  });
+
+  it('records exactly one dryRun submit_dryrun call via the recorder', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const recorder = vi.fn();
+
+    const result = await adapter.dryRunSubmit(sampleSpec, answers, files, {
+      recorder,
+    });
+
+    expect(recorder).toHaveBeenCalledTimes(1);
+    expect(recorder).toHaveBeenCalledWith({
+      phase: 'submit_dryrun',
+      method: 'POST',
+      url: sampleSpec.applyUrl,
+      requestBody: result.payload,
+      dryRun: true,
+      durationMs: 0,
+    });
+  });
+
+  it('swallows recorder failures and still returns the payload', async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const failingRecorder = vi.fn().mockRejectedValue(new Error('db down'));
+
+    const result = await adapter.dryRunSubmit(sampleSpec, answers, files, {
+      recorder: failingRecorder,
+    });
+
+    expect(result.dryRun).toBe(true);
+    expect(result.payload.first_name).toBe('Jane');
+    expect(warnSpy).toHaveBeenCalledTimes(1);
   });
 });
 

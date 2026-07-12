@@ -18,6 +18,7 @@ export const ProfileSchema = z.object({
     website: z.string().optional(),
     github: z.string().optional(),
     linkedin: z.string().optional(),
+    twitter: z.string().optional(),
   }),
   education: z.array(
     z.object({

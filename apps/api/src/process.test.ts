@@ -6,6 +6,7 @@ import type { Deps } from './types.js';
 const adapterState = vi.hoisted(() => ({
   discoverError: null as string | null,
   questions: [] as unknown[],
+  lastDiscoverOpts: undefined as { recorder?: unknown } | undefined,
 }));
 
 const answersState = vi.hoisted(() => ({
@@ -13,13 +14,19 @@ const answersState = vi.hoisted(() => ({
     resolved: unknown[];
     missing: unknown[];
   },
+  lastOpts: undefined as unknown,
 }));
 
 vi.mock('@sower/platforms', () => ({
   getAdapter: (platform: string) =>
     platform === 'greenhouse'
       ? {
-          discover: async () => {
+          discover: async (
+            _ref: unknown,
+            _url: unknown,
+            opts?: { recorder?: unknown },
+          ) => {
+            adapterState.lastDiscoverOpts = opts;
             if (adapterState.discoverError) {
               throw new Error(adapterState.discoverError);
             }
@@ -41,7 +48,10 @@ vi.mock('@sower/platforms', () => ({
 
 vi.mock('@sower/answers', () => ({
   loadProfile: async () => ({}),
-  resolveAnswers: () => answersState.result,
+  resolveAnswers: (_questions: unknown, _profile: unknown, opts?: unknown) => {
+    answersState.lastOpts = opts;
+    return answersState.result;
+  },
 }));
 
 interface FakeTaskRow {
@@ -90,7 +100,13 @@ function createFakeTaskDb(initial: { state: string; attempt?: number }) {
   const eventRows: FakeEventRow[] = [];
 
   const db = {
-    select: () => {
+    select: (fields?: Record<string, unknown>) => {
+      // Bank (answers) and documents selects resolve empty; the task+job
+      // lookup resolves the single task row.
+      const isBankSelect = fields !== undefined && 'normalizedLabel' in fields;
+      const isDocumentsSelect = fields !== undefined && 'kind' in fields;
+      const result =
+        isBankSelect || isDocumentsSelect ? [] : [{ task: { ...task }, job }];
       const chain = {
         from: () => chain,
         innerJoin: () => chain,
@@ -98,7 +114,7 @@ function createFakeTaskDb(initial: { state: string; attempt?: number }) {
         limit: () => chain,
         // biome-ignore lint/suspicious/noThenProperty: mimics drizzle's awaitable builder
         then: (onFulfilled: (value: unknown) => unknown) =>
-          Promise.resolve([{ task: { ...task }, job }]).then(onFulfilled),
+          Promise.resolve(result).then(onFulfilled),
       };
       return chain;
     },
@@ -195,7 +211,9 @@ function createDeps(db: Deps['db']): Deps {
 beforeEach(() => {
   adapterState.discoverError = null;
   adapterState.questions = [];
+  adapterState.lastDiscoverOpts = undefined;
   answersState.result = { resolved: [], missing: [] };
+  answersState.lastOpts = undefined;
 });
 
 describe('processTask', () => {
@@ -231,6 +249,10 @@ describe('processTask', () => {
       ['PROCESS_START', 'QUEUED', 'PREPARING'],
       ['RESOLVED_ALL', 'PREPARING', 'REVIEW'],
     ]);
+    // A per-task recorder is handed to the adapter, and the answers bank +
+    // documents (empty here) are passed through to resolveAnswers.
+    expect(adapterState.lastDiscoverOpts?.recorder).toBeTypeOf('function');
+    expect(answersState.lastOpts).toEqual({ bank: [], documents: [] });
   });
 
   it('moves to REVIEW when only OPTIONAL answers are missing', async () => {

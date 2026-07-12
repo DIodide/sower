@@ -1,9 +1,10 @@
 import { loadProfile, resolveAnswers } from '@sower/answers';
 import type { Platform, ResolutionResult, TaskState } from '@sower/core';
 import { transition } from '@sower/core';
-import { applicationTasks, events, jobs } from '@sower/db';
+import { answers, applicationTasks, documents, events, jobs } from '@sower/db';
 import { getAdapter } from '@sower/platforms';
 import { and, eq, inArray, lt, sql } from 'drizzle-orm';
+import { createTaskRecorder } from './recorder.js';
 import { transitionTask } from './transitions.js';
 import type { Deps } from './types.js';
 
@@ -84,6 +85,9 @@ export async function processTask(
     if (!adapter) {
       throw new Error(`no adapter for platform '${job.platform}'`);
     }
+    // Record every adapter HTTP call as an api_calls row (HAR-style trail).
+    // Recording is best-effort and never blocks or fails processing.
+    const recorder = createTaskRecorder(db, taskId);
     const jobSpec = await adapter.discover(
       {
         platform: job.platform as Platform,
@@ -91,6 +95,7 @@ export async function processTask(
         externalId: job.externalId,
       },
       job.url,
+      { recorder },
     );
     await db
       .update(applicationTasks)
@@ -98,9 +103,32 @@ export async function processTask(
       .where(eq(applicationTasks.id, taskId));
 
     const profile = await loadProfile(config.PROFILE_PATH);
+    // The answers bank (user-entered values keyed by normalized label) and
+    // stored documents (resume/cover letter files) extend the profile as
+    // answer sources. Truthfulness is preserved: nothing is ever guessed.
+    const bankRows = await db
+      .select({
+        normalizedLabel: answers.normalizedLabel,
+        value: answers.value,
+      })
+      .from(answers);
+    const documentRows = await db
+      .select({
+        kind: documents.kind,
+        storagePath: documents.storagePath,
+        filename: documents.filename,
+      })
+      .from(documents);
     const { resolved, missing } = await resolveAnswers(
       jobSpec.questions,
       profile,
+      {
+        bank: bankRows.map((row) => ({
+          normalizedLabel: row.normalizedLabel,
+          value: row.value as string | string[],
+        })),
+        documents: documentRows,
+      },
     );
     // REVIEW gates on REQUIRED answers only; optional gaps never block.
     const requiredMissing = missing.filter((question) => question.required);

@@ -1,12 +1,13 @@
 import { timingSafeEqual } from 'node:crypto';
-import { applicationTasks, jobs } from '@sower/db';
+import { apiCalls, applicationTasks, events, jobs } from '@sower/db';
 import { detectPlatform } from '@sower/platforms';
 import { fetchSimplifyListings, filterListings } from '@sower/sources';
-import { desc, eq } from 'drizzle-orm';
+import { asc, desc, eq } from 'drizzle-orm';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { ingestJob } from './ingest.js';
 import { processTask } from './process.js';
+import { approveTask, requeueTask } from './task-actions.js';
 import type { Deps } from './types.js';
 
 const ingestBodySchema = z.object({
@@ -16,6 +17,10 @@ const ingestBodySchema = z.object({
 
 const processBodySchema = z.object({
   taskId: z.string().uuid(),
+});
+
+const taskParamsSchema = z.object({
+  id: z.string().uuid(),
 });
 
 /** Constant-time string comparison (length-guarded). */
@@ -75,6 +80,88 @@ export function buildServer(deps: Deps): FastifyInstance {
       .orderBy(desc(applicationTasks.updatedAt))
       .limit(50);
     return { tasks };
+  });
+
+  // Task detail: task + job + resolution + events + api_calls. The dashboard
+  // mainly reads the db directly; this exists as a fallback/debugging surface.
+  app.get('/tasks/:id', async (request, reply) => {
+    const parsed = taskParamsSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid task id', issues: parsed.error.issues });
+    }
+    const taskId = parsed.data.id;
+    const rows = await deps.db
+      .select({ task: applicationTasks, job: jobs })
+      .from(applicationTasks)
+      .innerJoin(jobs, eq(applicationTasks.jobId, jobs.id))
+      .where(eq(applicationTasks.id, taskId))
+      .limit(1);
+    const row = rows[0];
+    if (!row) {
+      return reply.code(404).send({ error: 'task not found' });
+    }
+    const taskEvents = await deps.db
+      .select()
+      .from(events)
+      .where(eq(events.taskId, taskId))
+      .orderBy(asc(events.createdAt));
+    const taskApiCalls = await deps.db
+      .select()
+      .from(apiCalls)
+      .where(eq(apiCalls.taskId, taskId))
+      .orderBy(asc(apiCalls.seq));
+    return {
+      task: row.task,
+      job: row.job,
+      resolution: row.task.resolution ?? null,
+      events: taskEvents,
+      apiCalls: taskApiCalls,
+    };
+  });
+
+  app.post('/tasks/:id/requeue', async (request, reply) => {
+    const parsed = taskParamsSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid task id', issues: parsed.error.issues });
+    }
+    const outcome = await requeueTask(deps, parsed.data.id);
+    if (outcome.kind === 'not_found') {
+      return reply.code(404).send({ error: 'task not found' });
+    }
+    if (outcome.kind === 'skipped') {
+      return reply.code(200).send({ skipped: true, state: outcome.state });
+    }
+    return reply.code(200).send({ state: outcome.state });
+  });
+
+  // Approve a REVIEW task: DRY-RUN submit only. The payload is constructed
+  // and recorded (api_calls, phase 'submit_dryrun') — never sent anywhere.
+  app.post('/tasks/:id/approve', async (request, reply) => {
+    const parsed = taskParamsSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid task id', issues: parsed.error.issues });
+    }
+    const outcome = await approveTask(deps, parsed.data.id);
+    if (outcome.kind === 'not_found') {
+      return reply.code(404).send({ error: 'task not found' });
+    }
+    if (outcome.kind === 'skipped') {
+      return reply.code(200).send({ skipped: true, state: outcome.state });
+    }
+    if (outcome.kind === 'failed') {
+      return reply.code(500).send({ error: outcome.error });
+    }
+    return reply.code(200).send({
+      state: outcome.state,
+      dryRun: outcome.dryRun,
+      payloadSummary: outcome.payloadSummary,
+    });
   });
 
   app.post('/ingest', async (request, reply) => {

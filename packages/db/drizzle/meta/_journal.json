@@ -8,6 +8,20 @@
       "when": 1783823017858,
       "tag": "0000_init",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1783835982066,
+      "tag": "0001_api_calls_documents",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1783838615479,
+      "tag": "0002_events_index",
+      "breakpoints": true
     }
   ]
 }

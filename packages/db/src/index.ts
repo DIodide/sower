@@ -55,3 +55,7 @@ export type Answer = typeof schema.answers.$inferSelect;
 export type NewAnswer = typeof schema.answers.$inferInsert;
 export type Account = typeof schema.accounts.$inferSelect;
 export type NewAccount = typeof schema.accounts.$inferInsert;
+export type ApiCall = typeof schema.apiCalls.$inferSelect;
+export type NewApiCall = typeof schema.apiCalls.$inferInsert;
+export type Document = typeof schema.documents.$inferSelect;
+export type NewDocument = typeof schema.documents.$inferInsert;

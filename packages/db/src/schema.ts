@@ -1,5 +1,7 @@
 import type { JobSpec, ResolutionResult, TaskState } from '@sower/core';
 import {
+  boolean,
+  index,
   integer,
   jsonb,
   pgTable,
@@ -36,19 +38,24 @@ export const applicationTasks = pgTable('application_tasks', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
 
-export const events = pgTable('events', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  taskId: uuid('task_id')
-    .notNull()
-    .references(() => applicationTasks.id),
-  // Spec: free text. In practice always a TaskEvent recorded via the
-  // @sower/core transition table (e.g. PARSE_OK, PARK, PROCESS_START, FAIL).
-  type: text('type').notNull(),
-  fromState: text('from_state').$type<TaskState>(),
-  toState: text('to_state').$type<TaskState>(),
-  data: jsonb('data'),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
-});
+export const events = pgTable(
+  'events',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => applicationTasks.id),
+    // Spec: free text. In practice always a TaskEvent recorded via the
+    // @sower/core transition table (e.g. PARSE_OK, PARK, PROCESS_START, FAIL).
+    type: text('type').notNull(),
+    fromState: text('from_state').$type<TaskState>(),
+    toState: text('to_state').$type<TaskState>(),
+    data: jsonb('data'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  },
+  // The task detail + tenant pages read a task's events by task_id.
+  (table) => [index('events_task_id_idx').on(table.taskId)],
+);
 
 export const answers = pgTable('answers', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -56,6 +63,39 @@ export const answers = pgTable('answers', {
   normalizedLabel: text('normalized_label').notNull(),
   value: jsonb('value').notNull(),
   source: text('source').notNull().default('user'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+});
+
+export const apiCalls = pgTable(
+  'api_calls',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => applicationTasks.id),
+    seq: integer('seq').notNull(),
+    phase: text('phase').notNull(),
+    method: text('method').notNull(),
+    url: text('url').notNull(),
+    requestHeaders: jsonb('request_headers').$type<Record<string, string>>(),
+    requestBody: jsonb('request_body'),
+    responseStatus: integer('response_status'),
+    responseHeaders: jsonb('response_headers').$type<Record<string, string>>(),
+    responseBody: jsonb('response_body'),
+    durationMs: integer('duration_ms'),
+    dryRun: boolean('dry_run').notNull().default(false),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  },
+  (table) => [index('api_calls_task_id_idx').on(table.taskId)],
+);
+
+export const documents = pgTable('documents', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  kind: text('kind').notNull(),
+  filename: text('filename').notNull(),
+  storagePath: text('storage_path').notNull(),
+  contentType: text('content_type'),
+  sizeBytes: integer('size_bytes'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
 

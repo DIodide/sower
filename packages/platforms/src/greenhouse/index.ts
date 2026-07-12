@@ -5,7 +5,8 @@ import type {
   QuestionOption,
   ResolvedAnswer,
 } from '@sower/core';
-import type { PlatformAdapter } from '../contract.js';
+import type { PlatformAdapter, SubmitFile } from '../contract.js';
+import { type Recorder, recordedFetch, safeRecord } from '../recorder.js';
 
 interface GreenhouseFieldValue {
   label: string;
@@ -154,7 +155,11 @@ function toDemographicQuestion(raw: GreenhouseDemographicQuestion): Question {
 export class GreenhouseAdapter implements PlatformAdapter {
   readonly platform = 'greenhouse' as const;
 
-  async discover(ref: PlatformRef, url: string): Promise<JobSpec> {
+  async discover(
+    ref: PlatformRef,
+    url: string,
+    opts?: { recorder?: Recorder },
+  ): Promise<JobSpec> {
     const { tenant, externalId } = ref;
     if (!tenant || !externalId) {
       throw new Error(
@@ -167,7 +172,7 @@ export class GreenhouseAdapter implements PlatformAdapter {
     const endpoint = `https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(
       tenant,
     )}/jobs/${encodeURIComponent(externalId)}?questions=true`;
-    const response = await fetch(endpoint, {
+    const response = await recordedFetch(opts?.recorder, 'discover', endpoint, {
       signal: AbortSignal.timeout(10_000),
     });
     if (!response.ok) {
@@ -221,6 +226,39 @@ export class GreenhouseAdapter implements PlatformAdapter {
       payload[answer.questionId] = answer.value;
     }
     return payload;
+  }
+
+  /**
+   * SAFETY: constructs and records the submission payload REPRESENTATION
+   * only. This method performs ZERO network I/O — it never calls fetch (or
+   * any other HTTP client) and must stay that way. The single recorded
+   * ApiCallRecord is explicitly flagged { dryRun: true }.
+   */
+  async dryRunSubmit(
+    spec: JobSpec,
+    answers: ResolvedAnswer[],
+    files: SubmitFile[],
+    opts?: { recorder?: Recorder },
+  ): Promise<{ dryRun: true; payload: Record<string, unknown> }> {
+    const payload = this.buildSubmitPayload(spec, answers);
+    for (const file of files) {
+      // Multipart file parts are represented by metadata only — contents
+      // never leave the vault during a dry run.
+      payload[file.questionId] = {
+        kind: 'file',
+        filename: file.filename,
+        storagePath: file.storagePath,
+      };
+    }
+    await safeRecord(opts?.recorder, {
+      phase: 'submit_dryrun',
+      method: 'POST',
+      url: spec.applyUrl,
+      requestBody: payload,
+      dryRun: true,
+      durationMs: 0,
+    });
+    return { dryRun: true, payload };
   }
 
   /**
