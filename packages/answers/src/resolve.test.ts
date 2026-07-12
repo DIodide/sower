@@ -1158,3 +1158,36 @@ describe('resolveAnswers — Ashby system field ids', () => {
     });
   });
 });
+
+describe('resolveAnswers — jsonb boolean coercion (Ashby Yes/No)', () => {
+  it('resolves a Boolean select when the bank value is a BOOLEAN', () => {
+    const question = q({
+      id: 'ashby_bool',
+      label: 'Do you have 2+ years experience?',
+      type: 'select',
+      options: [
+        { label: 'Yes', value: 'true' },
+        { label: 'No', value: 'false' },
+      ],
+    });
+    // jsonb returns 'true'/'false' select answers as JS booleans.
+    const yes = resolveAnswers([question], profile, {
+      bank: [
+        {
+          normalizedLabel: 'do you have 2 years experience',
+          value: true as unknown as string,
+        },
+      ],
+    });
+    expect(yes.resolved[0]?.value).toBe('true');
+    const no = resolveAnswers([question], profile, {
+      bank: [
+        {
+          normalizedLabel: 'do you have 2 years experience',
+          value: false as unknown as string,
+        },
+      ],
+    });
+    expect(no.resolved[0]?.value).toBe('false');
+  });
+});

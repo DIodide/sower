@@ -277,12 +277,23 @@ function matchOption(
  * to EXACTLY match one option label or value; text fields accept only plain
  * strings.
  *
- * Values are coerced from number to string first: option value ids are numeric,
- * and a select answer stored in the answers bank comes back from jsonb as a
- * number (not the original string), so `731269090` must still match the
- * option whose value is `731269090`.
+ * Scalars are coerced to string first. Option value ids are numeric, and jsonb
+ * does not preserve the original JS type on read: a select answer stored in the
+ * answers bank comes back as a number (`731269090`) or, for an Ashby Yes/No
+ * (Boolean) field whose option value is `'true'`/`'false'`, as a boolean
+ * `true`/`false`. Coercion lets `731269090`/`true` still match the option whose
+ * value is `731269090`/`'true'`.
  */
-type RawCandidate = string | number | Array<string | number> | null | undefined;
+type RawScalar = string | number | boolean;
+type RawCandidate = RawScalar | RawScalar[] | null | undefined;
+
+function isScalar(value: unknown): value is RawScalar {
+  return (
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  );
+}
 
 function finalize(
   question: Question,
@@ -292,7 +303,7 @@ function finalize(
   if (raw === null || raw === undefined) return null;
 
   if (question.type === 'select') {
-    if (typeof raw !== 'string' && typeof raw !== 'number') return null;
+    if (!isScalar(raw)) return null;
     const option = matchOption(String(raw), question.options ?? []);
     if (option === undefined) return null;
     return { questionId: question.id, source, value: String(option.value) };
@@ -303,7 +314,7 @@ function finalize(
     if (values.length === 0) return null;
     const matched: string[] = [];
     for (const value of values) {
-      if (typeof value !== 'string' && typeof value !== 'number') return null;
+      if (!isScalar(value)) return null;
       const option = matchOption(String(value), question.options ?? []);
       if (option === undefined) return null;
       matched.push(String(option.value));
@@ -311,8 +322,8 @@ function finalize(
     return { questionId: question.id, source, value: matched };
   }
 
-  // text / textarea: a single scalar fills the field (numbers coerced).
-  if (typeof raw !== 'string' && typeof raw !== 'number') return null;
+  // text / textarea: a single scalar fills the field.
+  if (!isScalar(raw)) return null;
   return { questionId: question.id, source, value: String(raw) };
 }
 
