@@ -1,0 +1,17 @@
+title = "sower gitleaks config"
+
+# Keep all of gitleaks' default rules...
+[extend]
+useDefault = true
+
+# ...but allowlist the Discord application PUBLIC key. It is NOT a secret: it is
+# the public half of Discord's Ed25519 keypair, used only to VERIFY that inbound
+# interaction requests were signed by Discord. Discord exposes it openly and it
+# is safe to commit as a default (env DISCORD_PUBLIC_KEY still overrides it). The
+# 64-hex shape trips gitleaks' generic "discord-api-token" rule — a false match.
+# The bot TOKEN remains uncommitted (Secret Manager / DISCORD_BOT_TOKEN only).
+[allowlist]
+description = "Discord application public key (non-secret; verifies interaction signatures)"
+regexes = [
+  '''c461bfe425fa9fb69b7ae93f440e957ab93b472be6525502a7374b0f01813f5c''',
+]
