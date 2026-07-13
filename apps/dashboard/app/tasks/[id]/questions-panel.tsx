@@ -32,6 +32,10 @@ export interface QuestionView {
   resolvedSource?: string;
   /** Display-ready values (option labels / document filenames). */
   resolvedValues?: string[];
+  /** Branch/conditional question — only applies based on a prior answer. */
+  conditional?: boolean;
+  /** Human hint under the label (e.g. which parent answer reveals this one). */
+  help?: string;
 }
 
 export interface DocumentOption {
@@ -281,7 +285,20 @@ function QuestionRow({
   scopeCompany?: string;
 }) {
   return (
-    <div className="q-row">
+    <div
+      className="q-row"
+      style={
+        // Conditional (branch) questions are visually nested under their
+        // parent with a left rule, so a long questionnaire reads as a tree.
+        view.conditional
+          ? {
+              marginLeft: '0.75rem',
+              paddingLeft: '0.75rem',
+              borderLeft: '2px solid var(--border, #d0d7de)',
+            }
+          : undefined
+      }
+    >
       <div className="q-label-row">
         <label
           className="q-label"
@@ -296,6 +313,11 @@ function QuestionRow({
         >
           {view.label}
         </label>
+        {view.conditional ? (
+          <Badge tone="neutral" title="Only applies based on a prior answer">
+            conditional
+          </Badge>
+        ) : null}
         {view.status === 'missing' ? (
           view.required ? (
             <Badge tone="danger">required</Badge>
@@ -307,6 +329,14 @@ function QuestionRow({
           {view.id} · {view.type}
         </span>
       </div>
+      {view.help ? (
+        <p
+          className="hint faint"
+          style={{ margin: '0.15rem 0 0.35rem', fontSize: '0.78rem' }}
+        >
+          {view.help}
+        </p>
+      ) : null}
       {view.status === 'resolved' ? (
         <ResolvedValue view={view} />
       ) : view.status === 'missing' ? (

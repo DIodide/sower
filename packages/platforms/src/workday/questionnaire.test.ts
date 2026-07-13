@@ -101,7 +101,10 @@ describe('parseQuestionnaireDefinition (real datasite fixture)', () => {
   });
 });
 
-import { parseWorkdayQuestionnaire } from './questionnaire.js';
+import {
+  parseWorkdayQuestionnaire,
+  workdayFieldsToQuestions,
+} from './questionnaire.js';
 
 const caciFixture = JSON.parse(
   readFileSync(
@@ -151,5 +154,44 @@ describe('parseWorkdayQuestionnaire (real CACI GET response, with options + bran
   it('has more fields than top-level questions (branches included)', () => {
     // 9 top-level + at least the one branch.
     expect(fields.length).toBeGreaterThanOrEqual(10);
+  });
+});
+
+describe('workdayFieldsToQuestions (pipeline Question mapping)', () => {
+  const questions = workdayFieldsToQuestions(
+    parseWorkdayQuestionnaire(caciFixture),
+  );
+
+  it('maps select controls with options to select Questions carrying descriptors', () => {
+    const usPerson = questions.find((q) =>
+      q.label.startsWith('Are you a U.S. Person'),
+    );
+    expect(usPerson?.type).toBe('select');
+    // Option label AND value are the descriptor (the calypso responses builder
+    // matches by descriptor).
+    expect(usPerson?.options).toEqual([
+      { label: 'Yes', value: 'Yes' },
+      { label: 'No', value: 'No' },
+      { label: 'I choose not to disclose', value: 'I choose not to disclose' },
+    ]);
+    expect(usPerson?.required).toBe(true);
+    expect(usPerson?.conditional).toBeUndefined();
+  });
+
+  it('flags a branch question conditional and builds a human help hint', () => {
+    const branch = questions.find((q) =>
+      q.label.startsWith('For purposes of obtaining a U.S. security clearance'),
+    );
+    expect(branch?.conditional).toBe(true);
+    expect(branch?.required).toBe(false);
+    // The hint names the parent question (truncated) and the revealing answer.
+    expect(branch?.help).toMatch(/^Shown only when “Are you a U\.S\. Person/);
+    expect(branch?.help).toMatch(/is answered “Yes”\.$/);
+  });
+
+  it('leaves non-conditional questions without conditional/help', () => {
+    const salary = questions.find((q) => q.label.includes('desired salary'));
+    expect(salary?.conditional).toBeUndefined();
+    expect(salary?.help).toBeUndefined();
   });
 });

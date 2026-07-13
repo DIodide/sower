@@ -127,6 +127,8 @@ function buildQuestionViews(
       required: question.required,
       options,
       docKind: documentKind(question),
+      ...(question.conditional ? { conditional: true } : {}),
+      ...(question.help ? { help: question.help } : {}),
     };
 
     if (answer) {

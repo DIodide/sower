@@ -259,6 +259,7 @@ export function parseQuestionnaireDefinition(
 export function workdayFieldsToQuestions(
   fields: WorkdayQuestionnaireField[],
 ): Question[] {
+  const byId = new Map(fields.map((f) => [f.id, f]));
   return fields.map((field): Question => {
     const type: Question['type'] =
       field.control === 'select'
@@ -278,6 +279,39 @@ export function workdayFieldsToQuestions(
         value: o.descriptor,
       }));
     }
+    if (field.conditional) {
+      question.conditional = true;
+      const help = branchHelpText(field.branchTrigger, byId);
+      if (help) question.help = help;
+    }
     return question;
   });
+}
+
+/** Longest a parent-question label may be inside a branch hint before it is
+ *  truncated (branch parents can be full paragraphs of legal text). */
+const BRANCH_PARENT_LABEL_MAX = 80;
+
+/**
+ * Build a human hint for a conditional field: "Shown only when '<parent>' is
+ * answered '<option>'." Resolves the parent question's label and the triggering
+ * option's descriptor from the flat field list. Returns undefined when the
+ * trigger or its referents can't be resolved (the field is still flagged
+ * conditional; it just carries no hint).
+ */
+function branchHelpText(
+  trigger: BranchTrigger | undefined,
+  byId: Map<string, WorkdayQuestionnaireField>,
+): string | undefined {
+  if (!trigger) return undefined;
+  const parent = byId.get(trigger.questionId);
+  if (!parent) return undefined;
+  const option = parent.options?.find((o) => o.id === trigger.answerId);
+  const parentLabel =
+    parent.label.length > BRANCH_PARENT_LABEL_MAX
+      ? `${parent.label.slice(0, BRANCH_PARENT_LABEL_MAX).trimEnd()}…`
+      : parent.label;
+  return option
+    ? `Shown only when “${parentLabel}” is answered “${option.descriptor}”.`
+    : `Shown only for a specific answer to “${parentLabel}”.`;
 }

@@ -41,6 +41,17 @@ export interface Question {
   type: 'text' | 'textarea' | 'file' | 'select' | 'multiselect';
   required: boolean;
   options?: QuestionOption[];
+  /**
+   * True when this question only applies based on a prior answer (a branch /
+   * conditional sub-question, e.g. Workday's "if yes, …" follow-ups). It is not
+   * required up front and the UI surfaces it as depending on another answer.
+   */
+  conditional?: boolean;
+  /**
+   * Optional human hint shown under the label — e.g. which parent answer
+   * reveals a conditional question. Display-only; never submitted.
+   */
+  help?: string;
 }
 
 export interface JobSpec {
