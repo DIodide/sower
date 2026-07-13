@@ -193,13 +193,17 @@ export class CalypsoClient {
 
   /**
    * Cheap read-only probe that the session is still valid: GET the candidate
-   * home applications list. Returns true on 200, false on any error (including
-   * the HTTP 500 datasite returns for an expired session). This is the
+   * home USER PROFILE. Returns true on 200, false on any error. This is the
    * "verify before you trust" primitive the session broker runs before storing
    * a freshly-captured session — a single capture is never assumed good.
+   *
+   * NB: uses `userprofile`, NOT `applications` — the applications endpoint
+   * returns HTTP 500 for a fresh/empty candidate home even on a VALID session
+   * (observed live), so it is a false-negative health check. userprofile is a
+   * reliable authenticated 200.
    */
   async checkSession(): Promise<boolean> {
-    const url = `${this.base}/wday/calypso/cxs/candidatehome/${this.session.tenant}/${this.session.tenant}/applications`;
+    const url = `${this.base}/wday/calypso/cxs/candidatehome/${this.session.tenant}/${this.session.tenant}/userprofile`;
     try {
       await this.call('checksession', 'GET', url);
       return true;

@@ -160,7 +160,8 @@ describe('CalypsoClient.checkSession — verify primitive', () => {
     });
     expect(await client.checkSession()).toBe(true);
     const [url] = fetchMock.mock.calls[0] as [string];
-    expect(url).toContain('/candidatehome/datasite/datasite/applications');
+    // userprofile (NOT applications, which 500s on an empty candidate home).
+    expect(url).toContain('/candidatehome/datasite/datasite/userprofile');
   });
 
   it('returns false on an error (e.g. datasite 500 for an expired session)', async () => {
