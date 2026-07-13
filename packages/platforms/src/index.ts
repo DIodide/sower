@@ -32,6 +32,12 @@ export {
   WORKDAY_REF,
 } from './workday/calypso-sections.js';
 export {
+  buildCurlImpersonateArgs,
+  createCurlImpersonateFetch,
+  type ImpersonateOptions,
+  parseCurlOutput,
+} from './workday/calypso-transport.js';
+export {
   parseWorkdayJobUrl,
   WorkdayAdapter,
   WorkdayBrowserTierRequiredError,
