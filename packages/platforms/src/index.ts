@@ -19,6 +19,19 @@ export { getAdapter } from './registry.js';
 export { resolveUrl } from './resolve-url.js';
 export { realSubmit } from './submit-common.js';
 export {
+  CalypsoClient,
+  type CalypsoClientOptions,
+  WorkdayFinalizeGateError,
+  type WorkdaySession,
+  WorkdaySessionExpiredError,
+} from './workday/calypso.js';
+export {
+  buildEmailSection,
+  buildNameSection,
+  buildPhoneSection,
+  WORKDAY_REF,
+} from './workday/calypso-sections.js';
+export {
   parseWorkdayJobUrl,
   WorkdayAdapter,
   WorkdayBrowserTierRequiredError,

@@ -123,9 +123,11 @@ export async function recordedFetch(
   phase: string,
   url: string,
   init?: RequestInit,
+  /** Injectable fetch (defaults to global); lets clients pass a mock/proxy. */
+  fetchImpl: typeof fetch = fetch,
 ): Promise<Response> {
   if (!recorder) {
-    return fetch(url, init);
+    return fetchImpl(url, init);
   }
 
   const call: ApiCallRecord = {
@@ -152,7 +154,7 @@ export async function recordedFetch(
   const start = performance.now();
   let response: Response;
   try {
-    response = await fetch(url, init);
+    response = await fetchImpl(url, init);
   } catch (error) {
     // Record the failed attempt (no response fields), then rethrow untouched.
     call.durationMs = Math.round(performance.now() - start);
