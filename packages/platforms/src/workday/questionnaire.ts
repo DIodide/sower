@@ -43,6 +43,20 @@ export interface WorkdayQuestionnaireField {
   order: string;
   /** True when a 'select'/choice control still needs its options fetched. */
   needsOptions: boolean;
+  /**
+   * Choice options {id, descriptor} for a 'select' control. NOT present in the
+   * shallow definition schema — the orchestrator fetches them live (from the
+   * in-context definition) and attaches them so answers can be matched to the
+   * option GUID the questionnaireResponses payload requires.
+   */
+  options?: WorkdayQuestionOption[];
+}
+
+export interface WorkdayQuestionOption {
+  /** The option GUID submitted in questionMultipleChoiceAnswers. */
+  id: string;
+  /** Human label, e.g. 'Yes' / 'No'. */
+  descriptor: string;
 }
 
 interface DefinitionSchema {

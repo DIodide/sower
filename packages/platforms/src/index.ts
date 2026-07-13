@@ -51,4 +51,13 @@ export {
 export {
   parseQuestionnaireDefinition,
   type WorkdayQuestionnaireField,
+  type WorkdayQuestionOption,
 } from './workday/questionnaire.js';
+export {
+  buildQuestionnaireResolution,
+  buildQuestionnaireResponses,
+  matchOption,
+  type QuestionnaireAnswer,
+  type QuestionnaireResolution,
+  resolveQuestionnaireAnswer,
+} from './workday/questionnaire-responses.js';
