@@ -2,46 +2,59 @@
 
 import { useActionState } from 'react';
 import type { ActionResult } from './actions';
-import { approveTask, requeueTask } from './actions';
+import { approveTask, requeueTask, startSessionCapture } from './actions';
+
+const LABELS: Record<
+  'requeue' | 'approve' | 'start',
+  { idle: string; className: string; title: string }
+> = {
+  approve: {
+    idle: 'Approve & dry-run submit',
+    className: 'btn btn--success',
+    title:
+      'Constructs and records the submission payload — nothing is sent to the platform',
+  },
+  requeue: {
+    idle: 'Requeue task',
+    className: 'btn btn--primary',
+    title: 'Puts the task back on the queue for another processing attempt',
+  },
+  start: {
+    idle: 'Start session capture',
+    className: 'btn btn--primary',
+    title:
+      'Asks the local agent to open a browser on your machine so you can sign in to Workday',
+  },
+};
 
 export function TaskActions({
   taskId,
   mode,
 }: {
   taskId: string;
-  mode: 'requeue' | 'approve';
+  mode: 'requeue' | 'approve' | 'start';
 }) {
   const [result, formAction, pending] = useActionState<
     ActionResult | null,
     FormData
-  >(
-    async () =>
-      mode === 'approve' ? approveTask(taskId) : requeueTask(taskId),
-    null,
-  );
+  >(async () => {
+    if (mode === 'approve') return approveTask(taskId);
+    if (mode === 'start') return startSessionCapture(taskId);
+    return requeueTask(taskId);
+  }, null);
 
+  const label = LABELS[mode];
   return (
     <form action={formAction}>
       <div className="row">
-        {mode === 'approve' ? (
-          <button
-            type="submit"
-            disabled={pending}
-            className="btn btn--success"
-            title="Constructs and records the submission payload — nothing is sent to the platform"
-          >
-            {pending ? 'Working…' : 'Approve & dry-run submit'}
-          </button>
-        ) : (
-          <button
-            type="submit"
-            disabled={pending}
-            className="btn btn--primary"
-            title="Puts the task back on the queue for another processing attempt"
-          >
-            {pending ? 'Working…' : 'Requeue task'}
-          </button>
-        )}
+        <button
+          type="submit"
+          disabled={pending}
+          className={label.className}
+          title={label.title}
+        >
+          {pending ? 'Working…' : label.idle}
+        </button>
       </div>
       {result ? (
         <p

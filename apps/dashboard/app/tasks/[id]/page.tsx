@@ -7,6 +7,8 @@ import {
   events,
   jobDescriptions,
   jobs,
+  type WorkdaySessionRow,
+  workdaySessions,
 } from '@sower/db';
 import { asc, desc, eq } from 'drizzle-orm';
 import Link from 'next/link';
@@ -176,13 +178,62 @@ function NextStep({
   task,
   requiredMissing,
   optionalMissing,
+  needsSession,
+  session,
+  tenant,
 }: {
   task: { id: string; state: string; lastError: string | null };
   requiredMissing: number;
   optionalMissing: number;
+  /** Workday task parked account-required (a session must be captured first). */
+  needsSession?: boolean;
+  session?: WorkdaySessionRow;
+  tenant?: string | null;
 }) {
   switch (task.state) {
     case 'NEEDS_INPUT': {
+      // Workday-before-a-session: a capture banner, not an answer-questions one.
+      if (needsSession) {
+        const status = session?.status;
+        if (status === 'requested' || status === 'capturing') {
+          return (
+            <div className="banner banner--progress">
+              <p>
+                <strong>
+                  {status === 'capturing'
+                    ? 'Capturing now.'
+                    : 'Session capture requested.'}
+                </strong>{' '}
+                {status === 'capturing'
+                  ? 'Complete the sign-in in the browser window that opened on your machine.'
+                  : `The local agent will open a browser on your machine to sign in to ${tenant ?? 'this tenant'}. If nothing opens, make sure the agent is running (see the Sessions tab).`}
+              </p>
+            </div>
+          );
+        }
+        return (
+          <div className="banner banner--attention">
+            <div style={{ flex: '1 1 20rem' }}>
+              <p style={{ marginBottom: '0.625rem' }}>
+                <strong>
+                  This Workday job needs a browser session for{' '}
+                  {tenant ?? 'its tenant'}.
+                </strong>{' '}
+                Start a capture — the local agent opens a Chrome window on your
+                machine; sign in there and the task advances automatically.
+                {status === 'failed' && session?.error ? (
+                  <>
+                    {' '}
+                    Last attempt failed:{' '}
+                    <span className="mono">{session.error}</span>
+                  </>
+                ) : null}
+              </p>
+              <TaskActions taskId={task.id} mode="start" />
+            </div>
+          </div>
+        );
+      }
       const summary =
         requiredMissing > 0
           ? `${requiredMissing} required question${requiredMissing === 1 ? '' : 's'} need${requiredMissing === 1 ? 's' : ''} your answer` +
@@ -327,6 +378,20 @@ export default async function TaskPage({
 
   const spec = task.jobSpec;
   const resolution = task.resolution;
+  // Workday parks account-required until a browser session is captured; that
+  // NEEDS_INPUT is a "capture a session" state, not an "answer questions" one.
+  const needsSession =
+    job?.platform === 'workday' && spec?.formAccess === 'account-required';
+  const sessionRow =
+    needsSession && job?.tenant
+      ? (
+          await db
+            .select()
+            .from(workdaySessions)
+            .where(eq(workdaySessions.tenant, job.tenant))
+            .limit(1)
+        )[0]
+      : undefined;
   const docByPath = new Map(documentRows.map((d) => [d.storagePath, d]));
   const views = spec
     ? buildQuestionViews(
@@ -491,6 +556,9 @@ export default async function TaskPage({
         task={task}
         requiredMissing={requiredMissing}
         optionalMissing={optionalMissing}
+        needsSession={needsSession}
+        session={sessionRow}
+        tenant={job?.tenant}
       />
 
       {/* ---- form & answers ---- */}

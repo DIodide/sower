@@ -338,6 +338,21 @@ export async function approveTask(taskId: string): Promise<ActionResult> {
 }
 
 /**
+ * Request a headful Workday session capture for a parked task's tenant. The api
+ * provisions the candidate account and flags the request; the local capture
+ * agent (on the user's machine) opens the browser. Workday-only on the api side.
+ */
+export async function startSessionCapture(
+  taskId: string,
+): Promise<ActionResult> {
+  const idParse = uuidSchema.safeParse(taskId);
+  if (!idParse.success) return { ok: false, message: 'invalid task id.' };
+  const result = await callApi(idParse.data, 'start');
+  revalidatePath(`/tasks/${idParse.data}`);
+  return result;
+}
+
+/**
  * Deliver a one-time code to an AWAITING_OTP task via the api service, which
  * stores it and resumes the task (AWAITING_OTP -> FILLING). Mirrors the
  * Discord modal path; either can satisfy the same wait.
@@ -363,6 +378,8 @@ const apiResponseSchema = z.object({
   dryRun: z.boolean().optional(),
   mode: z.enum(['dry-run', 'workday-fill']).optional(),
   note: z.string().optional(),
+  tenant: z.string().optional(),
+  status: z.string().optional(),
   payloadSummary: z
     .object({
       fieldCount: z.number(),
@@ -379,7 +396,7 @@ const apiResponseSchema = z.object({
  */
 async function callApi(
   taskId: string,
-  action: 'requeue' | 'approve' | 'otp',
+  action: 'requeue' | 'approve' | 'otp' | 'start',
   jsonBody?: Record<string, unknown>,
 ): Promise<ActionResult> {
   const base = process.env.API_BASE_URL;
@@ -441,6 +458,13 @@ async function callApi(
     return {
       ok: true,
       message: `dry-run submit recorded${summary}; no real submission was made.${back}`,
+    };
+  }
+
+  if (action === 'start') {
+    return {
+      ok: true,
+      message: `Session capture requested for ${body.tenant ?? 'this tenant'} — the local agent will open a browser on your machine; sign in there. Once the session is captured the task advances automatically.`,
     };
   }
 
