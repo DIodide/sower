@@ -25,3 +25,7 @@ export {
   WorkdayJobUnavailableError,
   type WorkdayJobUrlParts,
 } from './workday/index.js';
+export {
+  parseQuestionnaireDefinition,
+  type WorkdayQuestionnaireField,
+} from './workday/questionnaire.js';

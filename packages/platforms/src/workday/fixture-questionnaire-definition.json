@@ -1,0 +1,63 @@
+{
+    "definitions": {
+        "primaryQuestionnaire": {
+            "required": [
+                "8bf28821933a1001f43b336b96670001",
+                "8bf28821933a1001f4750e0834210000",
+                "8bf28821933a1001f43b340531bc0009",
+                "8bf28821933a1001f43b340531bc0005",
+                "8bf28821933a1001f43b340531bc0002",
+                "8bf28821933a1001f43b340531bc0008"
+            ],
+            "properties": {
+                "8bf28821933a1001f43b336b96670001": {
+                    "hidden": false,
+                    "label": "Are you legally authorized to work in the country for which you have applied?",
+                    "order": "a",
+                    "readOnly": false,
+                    "type": "object"
+                },
+                "8bf28821933a1001f4750e0834210000": {
+                    "hidden": false,
+                    "label": "<p>What is your notice period?</p>",
+                    "order": "e",
+                    "readOnly": false,
+                    "type": "string"
+                },
+                "8bf28821933a1001f43b340531bc0009": {
+                    "hidden": false,
+                    "label": "<p><span>What are your salary expectations in the local currency you are applying?</span></p>",
+                    "order": "d",
+                    "readOnly": false,
+                    "type": "string"
+                },
+                "8bf28821933a1001f43b340531bc0005": {
+                    "hidden": false,
+                    "label": "<p>Do you have a non-compete or non-solicit clause that could impact your ability to work in the position for which you have applied?</p>",
+                    "order": "c",
+                    "readOnly": false,
+                    "type": "object"
+                },
+                "8bf28821933a1001f43b340531bc0002": {
+                    "hidden": false,
+                    "label": "<p>Will you now or in the future require sponsorship for employment visa status (e.g. H-1B status)?</p>",
+                    "order": "b",
+                    "readOnly": false,
+                    "type": "object"
+                },
+                "8bf28821933a1001f43b340531bc0008": {
+                    "hidden": true,
+                    "label": "<p>Please provide a copy of the document.</p>",
+                    "order": "c.a",
+                    "readOnly": false,
+                    "type": "upload"
+                }
+            }
+        }
+    },
+    "allOf": [
+        {
+            "$ref": "#/definitions/primaryQuestionnaire"
+        }
+    ]
+}
