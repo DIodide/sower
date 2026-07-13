@@ -175,6 +175,23 @@ export class CalypsoClient {
   }
 
   /**
+   * Cheap read-only probe that the session is still valid: GET the candidate
+   * home applications list. Returns true on 200, false on any error (including
+   * the HTTP 500 datasite returns for an expired session). This is the
+   * "verify before you trust" primitive the session broker runs before storing
+   * a freshly-captured session — a single capture is never assumed good.
+   */
+  async checkSession(): Promise<boolean> {
+    const url = `${this.base}/wday/calypso/cxs/candidatehome/${this.session.tenant}/${this.session.tenant}/applications`;
+    try {
+      await this.call('checksession', 'GET', url);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * SUBMIT the application (POST .../finalize). DOUBLE-GATED: throws unless
    * SOWER_SUBMIT_ENABLED === 'true'. This is the only method that submits;
    * callers must additionally have human approval before opening the gate.

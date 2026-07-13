@@ -60,3 +60,22 @@ export {
   type WorkdayPageSession,
   type WorkdayWorkerDeps,
 } from './workday/worker.js';
+export {
+  type BrowserCookie,
+  captureWorkdaySession,
+  isSessionFresh,
+  NotAuthenticatedSessionError,
+} from './workday/session-capture.js';
+export {
+  type BrowserLogin,
+  type BrowserLoginResult,
+  type CaptureInput,
+  SessionBroker,
+  type SessionBrokerDeps,
+  SessionVerificationFailedError,
+} from './workday/session-broker.js';
+export {
+  loadWorkdaySession,
+  saveWorkdaySession,
+  sessionStoragePath,
+} from './workday/session-store.js';

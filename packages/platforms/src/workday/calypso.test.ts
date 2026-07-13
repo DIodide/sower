@@ -150,6 +150,30 @@ describe('CalypsoClient.finalize — double gate', () => {
   });
 });
 
+describe('CalypsoClient.checkSession — verify primitive', () => {
+  it('returns true on a 200 read', async () => {
+    const fetchMock = vi.fn(async (_u: string, _i?: RequestInit) =>
+      jsonResponse({ total: 0, data: [] }),
+    );
+    const client = new CalypsoClient(session, {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+    expect(await client.checkSession()).toBe(true);
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(url).toContain('/candidatehome/datasite/datasite/applications');
+  });
+
+  it('returns false on an error (e.g. datasite 500 for an expired session)', async () => {
+    const fetchMock = vi.fn(async (_u: string, _i?: RequestInit) =>
+      jsonResponse({}, 500),
+    );
+    const client = new CalypsoClient(session, {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+    expect(await client.checkSession()).toBe(false);
+  });
+});
+
 describe('calypso section builders', () => {
   it('buildNameSection uses the US country GUID', () => {
     expect(buildNameSection('Ada', 'Lovelace')).toEqual({
