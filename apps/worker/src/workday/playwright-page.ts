@@ -154,8 +154,15 @@ export class PlaywrightWorkdayPage implements WorkdayPage {
       };
 
       const isVisible = (el: Element): boolean => {
-        const rect = (el as HTMLElement).getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
+        const html = el as HTMLElement;
+        const rect = html.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        // Honeypots hide via visibility/opacity while keeping layout size;
+        // an aria-hidden or hidden-typed input is never human-facing.
+        if (el.getAttribute('aria-hidden') === 'true') return false;
+        if (el.getAttribute('type') === 'hidden') return false;
+        const style = window.getComputedStyle(html);
+        return style.visibility !== 'hidden' && style.opacity !== '0';
       };
 
       const controls = Array.from(

@@ -70,6 +70,14 @@ describe('rawFieldToQuestion', () => {
     expect(rawFieldToQuestion(field({ automationId: '' }))).toBeNull();
   });
 
+  it('drops the Workday bot honeypot (beecatcher) outright', () => {
+    expect(
+      rawFieldToQuestion(
+        field({ automationId: 'beecatcher', control: 'text', label: 'x' }),
+      ),
+    ).toBeNull();
+  });
+
   it('drops a select/multiselect with no readable options', () => {
     expect(
       rawFieldToQuestion(field({ control: 'select', options: [] })),

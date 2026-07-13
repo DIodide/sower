@@ -32,6 +32,14 @@ const YES_NO_OPTIONS: QuestionOption[] = [
   { label: 'No', value: 'false' },
 ];
 
+/**
+ * Automation-ids that are NEVER answerable form fields: Workday's `beecatcher`
+ * is a bot honeypot (a hidden text input a human never fills). Scraping it and
+ * filling it would flag the application as a bot, so it is dropped outright —
+ * belt-and-suspenders alongside the resolver never producing a value for it.
+ */
+const HONEYPOT_IDS = new Set(['beecatcher']);
+
 function toOptions(
   raw: { label: string; value: string }[] | undefined,
 ): QuestionOption[] {
@@ -60,7 +68,11 @@ function toOptions(
  */
 export function rawFieldToQuestion(raw: RawField): Question | null {
   const label = raw.label.trim();
-  if (label.length === 0 || raw.automationId.length === 0) {
+  if (
+    label.length === 0 ||
+    raw.automationId.length === 0 ||
+    HONEYPOT_IDS.has(raw.automationId)
+  ) {
     return null;
   }
 

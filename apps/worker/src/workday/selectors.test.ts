@@ -14,8 +14,8 @@ describe('automationId / anyAutomationId', () => {
   });
 
   it('comma-joins a variant list', () => {
-    expect(anyAutomationId(WORKDAY_IDS.signInSubmit)).toBe(
-      '[data-automation-id="signInSubmitButton"], [data-automation-id="click_filter"]',
+    expect(anyAutomationId(WORKDAY_IDS.nextButton)).toBe(
+      '[data-automation-id="pageFooterNextButton"], [data-automation-id="bottom-navigation-next-button"]',
     );
   });
 });

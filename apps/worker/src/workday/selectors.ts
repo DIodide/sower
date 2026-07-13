@@ -33,7 +33,9 @@ export const WORKDAY_IDS = {
   /** Sign-in page. */
   email: ['email'],
   password: ['password'],
-  signInSubmit: ['signInSubmitButton', 'click_filter'],
+  // NB: NOT 'click_filter' — that is a noCaptcha wrapper div, not the button
+  // (confirmed via recon against a live tenant).
+  signInSubmit: ['signInSubmitButton'],
   signInLink: ['signInLink'],
 
   /** Create-account page. */

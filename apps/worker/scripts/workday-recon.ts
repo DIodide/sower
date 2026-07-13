@@ -20,14 +20,18 @@ import { anyAutomationId, WORKDAY_IDS } from '../src/workday/selectors.js';
 const urlArg = process.argv[2];
 if (!urlArg) {
   console.error(
-    'usage: tsx scripts/workday-recon.ts <job-url> [--after-login]',
+    'usage: tsx scripts/workday-recon.ts <job-url> [--after-login] [--headless]',
   );
   process.exit(1);
 }
 const afterLogin = process.argv.includes('--after-login');
+// Headless mode dumps the pre-login structure and exits — no display needed,
+// so it can run in CI / a sandbox. (--after-login implies headful, since it
+// waits for a human to sign in.)
+const headless = process.argv.includes('--headless') && !afterLogin;
 
 async function main(url: string): Promise<void> {
-  const browser = await chromium.launch({ headless: false });
+  const browser = await chromium.launch({ headless });
   const context = await browser.newContext({
     userAgent:
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -100,6 +104,10 @@ async function main(url: string): Promise<void> {
   console.log(
     '\nRecon complete. NO account was created and NOTHING was submitted.',
   );
+  if (headless) {
+    await browser.close();
+    return;
+  }
   console.log('Close the browser window (or Ctrl-C) when done inspecting.');
   // Leave the browser open for inspection; exit on SIGINT.
   await new Promise<void>((resolve) => {
