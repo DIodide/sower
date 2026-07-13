@@ -8,13 +8,19 @@
   },
   "scripts": {
     "start": "tsx src/main.ts",
+    "recon": "tsx scripts/workday-recon.ts",
+    "fill": "tsx scripts/workday-fill.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@sower/accounts": "workspace:*",
+    "@sower/answers": "workspace:*",
     "@sower/core": "workspace:*",
     "@sower/db": "workspace:*",
     "@sower/platforms": "workspace:*",
+    "@sower/storage": "workspace:*",
+    "drizzle-orm": "^0.44.0",
     "playwright": "^1.49.0"
   },
   "devDependencies": {
