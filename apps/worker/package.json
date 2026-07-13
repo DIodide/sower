@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "tsx src/main.ts",
+    "agent": "tsx scripts/agent.ts",
     "recon": "tsx scripts/workday-recon.ts",
     "fill": "tsx scripts/workday-fill.ts",
     "capture-session": "tsx scripts/workday-session-capture.ts",
