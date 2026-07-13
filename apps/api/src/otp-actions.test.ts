@@ -177,6 +177,9 @@ function createNotify(): Notifier {
     updateApprovalCard: vi.fn(async () => {}),
     verifyInteraction: vi.fn(() => true),
     applyVerdict: vi.fn(() => ({ embeds: [], components: [] })),
+    fetchChannelMessages: vi.fn(async () => []),
+    addReaction: vi.fn(async () => {}),
+    postChannelMessage: vi.fn(async () => {}),
   };
 }
 

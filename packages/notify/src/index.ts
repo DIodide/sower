@@ -27,10 +27,13 @@ export {
   redactToken,
   resolveChannelId,
 } from './config.js';
-export type { ApprovalCardRef } from './discord.js';
+export type { ApprovalCardRef, DiscordChannelMessage } from './discord.js';
 export {
+  addReaction,
+  fetchChannelMessages,
   notifyText,
   postApprovalCard,
+  postChannelMessage,
   postOtpRequestCard,
   updateApprovalCard,
 } from './discord.js';

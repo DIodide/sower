@@ -5,6 +5,7 @@ import type {
   ApprovalCardRef,
   ApprovalMessagePayload,
   ApprovalVerdict,
+  DiscordChannelMessage,
   OtpRequestCard,
 } from '@sower/notify';
 import type { Storage } from '@sower/storage';
@@ -45,6 +46,19 @@ export interface Notifier {
     verdict: ApprovalVerdict,
     detail?: string,
   ): ApprovalMessagePayload;
+  /** Read recent channel messages (Discord ingest poll). */
+  fetchChannelMessages(
+    channelId: string,
+    opts?: { limit?: number; after?: string },
+  ): Promise<DiscordChannelMessage[]>;
+  /** React to a message — the ingest poll's processed marker + status. */
+  addReaction(
+    channelId: string,
+    messageId: string,
+    emoji: string,
+  ): Promise<void>;
+  /** Post a plain-text message to a specific channel id. */
+  postChannelMessage(channelId: string, text: string): Promise<void>;
 }
 
 export interface Deps {

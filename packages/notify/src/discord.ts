@@ -29,7 +29,7 @@ interface DiscordMessageResponse extends Partial<ApprovalMessagePayload> {
  * DISCORD_BOT_TOKEN env var and is redacted from any thrown error.
  */
 async function discordRequest(
-  method: 'GET' | 'POST' | 'PATCH',
+  method: 'GET' | 'POST' | 'PATCH' | 'PUT',
   path: string,
   body?: unknown,
 ): Promise<unknown> {
@@ -55,7 +55,9 @@ async function discordRequest(
       ),
     );
   }
-  return response.json();
+  // Some endpoints (e.g. adding a reaction) return 204 No Content.
+  const text = await response.text();
+  return text ? JSON.parse(text) : undefined;
 }
 
 function requireChannel(platform: string): string {
@@ -135,6 +137,59 @@ export async function notifyText(
   text: string,
 ): Promise<void> {
   const channelId = requireChannel(platform);
+  await discordRequest('POST', `/channels/${channelId}/messages`, {
+    content: text,
+  });
+}
+
+/** A channel message, trimmed to the fields the ingest poll consults. */
+export interface DiscordChannelMessage {
+  id: string;
+  content: string;
+  author?: { id: string; bot?: boolean };
+  reactions?: { me: boolean; emoji: { name: string | null } }[];
+}
+
+/**
+ * Fetch recent messages from a channel (Discord returns newest-first). Reading
+ * message `content` for other users' messages requires the Message Content
+ * privileged intent to be enabled for the bot.
+ */
+export async function fetchChannelMessages(
+  channelId: string,
+  opts: { limit?: number; after?: string } = {},
+): Promise<DiscordChannelMessage[]> {
+  const params = new URLSearchParams({ limit: String(opts.limit ?? 50) });
+  if (opts.after) {
+    params.set('after', opts.after);
+  }
+  const result = await discordRequest(
+    'GET',
+    `/channels/${channelId}/messages?${params.toString()}`,
+  );
+  return (result ?? []) as DiscordChannelMessage[];
+}
+
+/**
+ * Add a unicode-emoji reaction to a message (the ingest poll's "processed"
+ * marker + user-facing status). Returns 204, so no body is parsed.
+ */
+export async function addReaction(
+  channelId: string,
+  messageId: string,
+  emoji: string,
+): Promise<void> {
+  await discordRequest(
+    'PUT',
+    `/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}/@me`,
+  );
+}
+
+/** Post a plain-text message to a specific channel id (not platform-keyed). */
+export async function postChannelMessage(
+  channelId: string,
+  text: string,
+): Promise<void> {
   await discordRequest('POST', `/channels/${channelId}/messages`, {
     content: text,
   });

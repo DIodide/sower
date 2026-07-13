@@ -1,8 +1,11 @@
 import { type AnswerBank, loadAnswerBank } from '@sower/answers';
 import { createDb } from '@sower/db';
 import {
+  addReaction,
   applyVerdict,
+  fetchChannelMessages,
   postApprovalCard,
+  postChannelMessage,
   postOtpRequestCard,
   updateApprovalCard,
   verifyInteraction,
@@ -27,6 +30,9 @@ async function main(): Promise<void> {
     updateApprovalCard,
     verifyInteraction,
     applyVerdict,
+    fetchChannelMessages,
+    addReaction,
+    postChannelMessage,
   };
 
   // Curated answer bank, loaded ONCE at startup and reused per request. A

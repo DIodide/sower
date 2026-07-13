@@ -68,6 +68,8 @@ const envSchema = z
         },
         { message: 'must be a JSON object of platform -> channel id' },
       ),
+    /** Channel the Discord ingest poll reads job links from (opt-in). */
+    DISCORD_INGEST_CHANNEL_ID: z.string().optional(),
   })
   .transform((env) => ({
     ...env,

@@ -5,6 +5,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { registerAnswerLibraryRoutes } from './answer-library.js';
 import { markApprovalCardSubmitted, registerDiscordRoutes } from './discord.js';
+import { runDiscordIngestPoll } from './discord-ingest.js';
 import { ingestJob } from './ingest.js';
 import { runIngestionPoll } from './ingest-poll.js';
 import { requestOtp, submitOtp } from './otp-actions.js';
@@ -334,6 +335,12 @@ export function buildServer(deps: Deps): FastifyInstance {
   // this path so the existing Cloud Scheduler job needs no re-point.
   app.post('/sources/simplify/poll', async () => {
     return runIngestionPoll(deps);
+  });
+
+  // Poll the Discord #ingest channel: classify + ingest any job links pasted
+  // there, react + reply. No-op when Discord / the ingest channel is unset.
+  app.post('/sources/discord/poll', async () => {
+    return runDiscordIngestPoll(deps);
   });
 
   // --- Workday session bridge (dashboard <-> local headful capture agent) ---
