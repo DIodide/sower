@@ -61,3 +61,5 @@ export type Document = typeof schema.documents.$inferSelect;
 export type NewDocument = typeof schema.documents.$inferInsert;
 export type JobDescription = typeof schema.jobDescriptions.$inferSelect;
 export type NewJobDescription = typeof schema.jobDescriptions.$inferInsert;
+export type IngestionRun = typeof schema.ingestionRuns.$inferSelect;
+export type NewIngestionRun = typeof schema.ingestionRuns.$inferInsert;

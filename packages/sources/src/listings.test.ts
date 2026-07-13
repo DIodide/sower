@@ -108,14 +108,11 @@ describe('fetchListings', () => {
     vi.unstubAllGlobals();
   });
 
-  it('exposes vanshb03 plus the two SimplifyJobs repos as default sources', () => {
-    expect(SOURCES.map((s) => s.name)).toEqual([
-      'vanshb03',
-      'simplify-internships',
-      'simplify-newgrad',
-    ]);
+  it('polls the live Summer 2027 internship source (vanshb03/Summer2027)', () => {
+    expect(SOURCES.map((s) => s.name)).toEqual(['vanshb03']);
     for (const source of SOURCES) {
       expect(source.url).toMatch(/^https:\/\/raw\.githubusercontent\.com\//);
+      expect(source.url).toContain('Summer2027');
     }
   });
 

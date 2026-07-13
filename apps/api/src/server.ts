@@ -1,17 +1,12 @@
 import { timingSafeEqual } from 'node:crypto';
 import { apiCalls, applicationTasks, events, jobs } from '@sower/db';
-import { detectPlatform } from '@sower/platforms';
-import {
-  fetchListings,
-  filterListings,
-  type NormalizedListing,
-} from '@sower/sources';
 import { asc, desc, eq } from 'drizzle-orm';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { registerAnswerLibraryRoutes } from './answer-library.js';
 import { markApprovalCardSubmitted, registerDiscordRoutes } from './discord.js';
 import { ingestJob } from './ingest.js';
+import { runIngestionPoll } from './ingest-poll.js';
 import { requestOtp, submitOtp } from './otp-actions.js';
 import { processTask } from './process.js';
 import { approveTask, requeueTask } from './task-actions.js';
@@ -295,58 +290,12 @@ export function buildServer(deps: Deps): FastifyInstance {
     });
   });
 
-  // Poll every configured listing source (SimplifyJobs repos + vanshb03),
-  // normalize both raw schemas, filter by term/season, and auto-ingest.
+  // Poll the configured Summer 2027 source(s), normalize + filter by term, and
+  // auto-ingest listings on any supported platform (greenhouse/ashby/lever/
+  // workday) with a resolvable tenant. Records one ingestion_runs row. Kept at
+  // this path so the existing Cloud Scheduler job needs no re-point.
   app.post('/sources/simplify/poll', async () => {
-    const { config } = deps;
-    const terms = config.SIMPLIFY_TERMS.split(',')
-      .map((term) => term.trim())
-      .filter((term) => term.length > 0);
-
-    const listings = await fetchListings();
-    const filtered = filterListings(listings, { terms, activeOnly: true });
-
-    // Auto-ingest is restricted to greenhouse with a known tenant (gh_jid on
-    // custom domains cannot be discovered); ashby/lever arrive via /ingest.
-    const byPlatform: Record<string, number> = {};
-    const greenhouse: NormalizedListing[] = [];
-    let skippedNoAdapter = 0;
-    for (const listing of filtered) {
-      const ref = detectPlatform(listing.url);
-      byPlatform[ref.platform] = (byPlatform[ref.platform] ?? 0) + 1;
-      if (ref.platform === 'greenhouse' && ref.tenant !== null) {
-        greenhouse.push(listing);
-      } else {
-        skippedNoAdapter += 1;
-      }
-    }
-    const batch = greenhouse.slice(0, config.SIMPLIFY_MAX_PER_RUN);
-
-    let ingested = 0;
-    let duplicates = 0;
-    for (const listing of batch) {
-      const result = await ingestJob(deps, {
-        url: listing.url,
-        source: listing.source,
-        company: listing.company ?? undefined,
-        title: listing.title,
-        terms: listing.term ? [listing.term] : undefined,
-      });
-      if (result.duplicate) {
-        duplicates += 1;
-      } else {
-        ingested += 1;
-      }
-    }
-
-    return {
-      scanned: filtered.length,
-      byPlatform,
-      matchedGreenhouse: greenhouse.length,
-      ingested,
-      duplicates,
-      skippedNoAdapter,
-    };
+    return runIngestionPoll(deps);
   });
 
   // /answer-library CRUD (company-scoped answer library; x-api-key like all

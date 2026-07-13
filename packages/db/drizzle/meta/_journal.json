@@ -57,6 +57,13 @@
       "when": 1783904724493,
       "tag": "0007_strong_shooting_star",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1783953048403,
+      "tag": "0008_outstanding_princess_powerful",
+      "breakpoints": true
     }
   ]
 }

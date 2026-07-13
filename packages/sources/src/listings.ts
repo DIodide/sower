@@ -1,8 +1,8 @@
 /**
  * Generalized listing-source pipeline.
  *
- * Several GitHub repos publish a machine-readable listings.json on their
- * `dev` branch. Two raw schemas exist in the wild:
+ * GitHub repos publish a machine-readable listings.json on their `dev` branch.
+ * Two raw schemas exist in the wild:
  *
  * - SimplifyJobs repos: term info as `terms: string[]` (e.g. ["Summer 2026"]);
  *   the New-Grad repo carries no term info at all.
@@ -19,19 +19,20 @@ export interface Source {
   url: string;
 }
 
-/** Default listing sources (all verified to serve listings.json on `dev`). */
+/**
+ * Default listing sources for the Summer 2027 recruiting cycle.
+ *
+ * Scoped to Summer 2027 INTERNSHIP repos. vanshb03/Summer2027 is the only
+ * live 2027 internship listings.json today; SimplifyJobs/cvrve have not
+ * published a Summer 2027 repo yet, and their Summer 2026 / New-Grad repos are
+ * off-cycle (filtered out by the term filter) and ~11 MB each per fetch, so
+ * they are deliberately not polled. Add a source here (name + raw listings.json
+ * URL) to widen coverage — normalizeListing handles both raw schemas.
+ */
 export const SOURCES: Source[] = [
   {
     name: 'vanshb03',
     url: 'https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/dev/.github/scripts/listings.json',
-  },
-  {
-    name: 'simplify-internships',
-    url: 'https://raw.githubusercontent.com/SimplifyJobs/Summer2026-Internships/dev/.github/scripts/listings.json',
-  },
-  {
-    name: 'simplify-newgrad',
-    url: 'https://raw.githubusercontent.com/SimplifyJobs/New-Grad-Positions/dev/.github/scripts/listings.json',
   },
 ];
 

@@ -33,6 +33,37 @@ export const jobs = pgTable('jobs', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
 
+/**
+ * One row per source poll (the hourly ingestion run). Records the funnel so the
+ * dashboard can show ingestion history without re-deriving it from jobs/events.
+ * Fire-and-forget audit: a failed write never blocks the poll.
+ */
+export const ingestionRuns = pgTable('ingestion_runs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  /** Term filters applied this run (config SIMPLIFY_TERMS). */
+  terms: jsonb('terms').$type<string[]>().notNull(),
+  /** Source repo names polled (SOURCES[].name). */
+  sources: jsonb('sources').$type<string[]>().notNull(),
+  /** Listings matching the term filter after activeOnly. */
+  scanned: integer('scanned').notNull(),
+  /** Auto-ingestable candidates (supported platform + resolvable tenant). */
+  matched: integer('matched').notNull(),
+  /** New jobs created this run. */
+  ingested: integer('ingested').notNull(),
+  /** Candidates already known (dedupe hits). */
+  duplicates: integer('duplicates').notNull(),
+  /** Listings not auto-ingested (no adapter / no tenant). */
+  skipped: integer('skipped').notNull(),
+  /** Per-platform counts across all scanned listings. */
+  byPlatform: jsonb('by_platform').$type<Record<string, number>>().notNull(),
+  /** Wall-clock time the poll took. */
+  durationMs: integer('duration_ms').notNull(),
+  /** False when the poll threw before completing (see `error`). */
+  ok: boolean('ok').notNull().default(true),
+  error: text('error'),
+});
+
 export const applicationTasks = pgTable('application_tasks', {
   id: uuid('id').primaryKey().defaultRandom(),
   jobId: uuid('job_id')

@@ -495,13 +495,15 @@ describe('buildServer', () => {
       headers: { 'x-api-key': 'test-key' },
     });
     expect(res.statusCode).toBe(200);
+    // Only greenhouse has an adapter in this mock, so lever is skipped here;
+    // the multi-platform expansion is proven in ingest-poll.test.ts.
     expect(res.json()).toEqual({
       scanned: 4,
       byPlatform: { greenhouse: 3, lever: 1 },
-      matchedGreenhouse: 2,
+      matched: 2,
       ingested: 2,
       duplicates: 0,
-      skippedNoAdapter: 2,
+      skipped: 2,
     });
     expect(enqueueProcess).toHaveBeenCalledTimes(2);
     expect(enqueueProcess).toHaveBeenNthCalledWith(1, 'task-1');

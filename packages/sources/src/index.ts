@@ -12,5 +12,3 @@ export {
   normalizeListing,
   SOURCES,
 } from './listings.js';
-export type { SimplifyListing } from './simplify.js';
-export { fetchSimplifyListings, SIMPLIFY_LISTING_URLS } from './simplify.js';
