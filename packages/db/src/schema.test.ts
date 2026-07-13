@@ -54,6 +54,11 @@ describe('schema', () => {
       'job_id',
       'job_spec',
       'last_error',
+      'otp_channel_id',
+      'otp_message_id',
+      'otp_requested_at',
+      'otp_submitted_at',
+      'pending_otp',
       'resolution',
       'state',
       'updated_at',
@@ -63,6 +68,8 @@ describe('schema', () => {
     // Both nullable: Discord may be disabled or the card post may fail.
     expect(applicationTasks.approvalChannelId.notNull).toBe(false);
     expect(applicationTasks.approvalMessageId.notNull).toBe(false);
+    // OTP relay columns are all nullable (only set while awaiting a code).
+    expect(applicationTasks.pendingOtp.notNull).toBe(false);
   });
 
   it('defines the events table', () => {
@@ -204,9 +211,25 @@ describe('schema', () => {
       'id',
       'platform',
       'secret_ref',
+      'site',
+      'status',
       'tenant',
+      'updated_at',
     ]);
     expect(accounts.platform.notNull).toBe(true);
     expect(accounts.tenant.notNull).toBe(true);
+    expect(accounts.status.notNull).toBe(true);
+  });
+
+  it('enforces one account per (platform, tenant)', () => {
+    const config = getTableConfig(accounts);
+    const unique = config.indexes.find(
+      (idx) => idx.config.name === 'accounts_platform_tenant_uq',
+    );
+    expect(unique).toBeDefined();
+    expect(unique?.config.unique).toBe(true);
+    expect(
+      unique?.config.columns.map((c) => ('name' in c ? c.name : null)),
+    ).toEqual(['platform', 'tenant']);
   });
 });

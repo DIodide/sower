@@ -103,12 +103,18 @@ function createFakeDb(state: FakeState): Deps['db'] {
               if (!task) {
                 return [];
               }
+              // submitOtp's resume claim also carries pendingOtp; approve's
+              // REVIEW claim never does — that key tells the two apart.
               const claimable =
                 setArg.state === 'QUEUED'
                   ? task.state === 'NEEDS_INPUT' || task.state === 'FAILED'
                   : setArg.state === 'FILLING'
-                    ? task.state === 'REVIEW'
-                    : false;
+                    ? 'pendingOtp' in setArg
+                      ? task.state === 'AWAITING_OTP'
+                      : task.state === 'REVIEW'
+                    : setArg.state === 'AWAITING_OTP'
+                      ? task.state === 'FILLING'
+                      : false;
               if (!claimable) {
                 return [];
               }
@@ -261,6 +267,10 @@ function createNotify(options: { verified?: boolean } = {}) {
     postApprovalCard: vi.fn(async () => ({
       channelId: 'chan-1',
       messageId: 'msg-1',
+    })),
+    postOtpRequestCard: vi.fn(async () => ({
+      channelId: 'chan-1',
+      messageId: 'otp-msg-1',
     })),
     updateApprovalCard: vi.fn(async () => {}),
     applyVerdict: vi.fn(
@@ -561,6 +571,119 @@ describe('POST /discord/interactions', () => {
     const app = buildServer(deps);
 
     const res = await postInteraction(app, { type: 2 });
+
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('otp button: opens a modal (type 9) with a single code input, no state change', async () => {
+    const notify = createNotify();
+    const state = createState({ state: 'AWAITING_OTP' });
+    const { deps } = createDeps(state, { notify });
+    const app = buildServer(deps);
+
+    const res = await postInteraction(app, {
+      type: 3,
+      data: { custom_id: `otp:${TASK_ID}` },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      type: number;
+      data: { custom_id: string; components: unknown[] };
+    };
+    expect(body.type).toBe(9);
+    expect(body.data.custom_id).toBe(`otp-modal:${TASK_ID}`);
+    expect(body.data.components).toHaveLength(1);
+    expect(state.task?.state).toBe('AWAITING_OTP');
+    expect(state.events).toHaveLength(0);
+  });
+
+  it('otp modal submit: stores the code, resumes FILLING (RETRY), type-7 card edit', async () => {
+    const notify = createNotify();
+    const state = createState({ state: 'AWAITING_OTP' });
+    const { deps } = createDeps(state, { notify });
+    const app = buildServer(deps);
+
+    const res = await postInteraction(app, {
+      type: 5,
+      data: {
+        custom_id: `otp-modal:${TASK_ID}`,
+        components: [
+          { components: [{ custom_id: 'otp_code', value: '482 913' }] },
+        ],
+      },
+      message: cardMessage(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { type: number }).type).toBe(7);
+    expect(state.task?.state).toBe('FILLING');
+    expect(state.task?.pendingOtp).toBe('482913');
+    expect(state.events).toEqual([
+      expect.objectContaining({
+        type: 'RETRY',
+        fromState: 'AWAITING_OTP',
+        toState: 'FILLING',
+      }),
+    ]);
+    const [, verdict] = notify.applyVerdict.mock.calls[0] ?? [];
+    expect(verdict).toBe('otp-received');
+  });
+
+  it('otp modal submit with a garbage code: ephemeral notice, task untouched', async () => {
+    const notify = createNotify();
+    const state = createState({ state: 'AWAITING_OTP' });
+    const { deps } = createDeps(state, { notify });
+    const app = buildServer(deps);
+
+    const res = await postInteraction(app, {
+      type: 5,
+      data: {
+        custom_id: `otp-modal:${TASK_ID}`,
+        components: [
+          { components: [{ custom_id: 'otp_code', value: 'nope!!' }] },
+        ],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { type: number; data: { flags: number } };
+    expect(body.type).toBe(4);
+    expect(body.data.flags).toBe(64);
+    expect(state.task?.state).toBe('AWAITING_OTP');
+    expect(state.events).toHaveLength(0);
+  });
+
+  it('otp modal submit on a non-AWAITING_OTP task: ephemeral notice', async () => {
+    const notify = createNotify();
+    const state = createState({ state: 'REVIEW' });
+    const { deps } = createDeps(state, { notify });
+    const app = buildServer(deps);
+
+    const res = await postInteraction(app, {
+      type: 5,
+      data: {
+        custom_id: `otp-modal:${TASK_ID}`,
+        components: [
+          { components: [{ custom_id: 'otp_code', value: '482913' }] },
+        ],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { type: number }).type).toBe(4);
+    expect(state.task?.state).toBe('REVIEW');
+  });
+
+  it('rejects a modal submit with an unknown custom_id with 400', async () => {
+    const notify = createNotify();
+    const { deps } = createDeps(createState(), { notify });
+    const app = buildServer(deps);
+
+    const res = await postInteraction(app, {
+      type: 5,
+      data: { custom_id: 'evil-modal:whatever' },
+    });
 
     expect(res.statusCode).toBe(400);
   });

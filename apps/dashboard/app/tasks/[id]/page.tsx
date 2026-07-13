@@ -22,6 +22,7 @@ import {
 } from '../../../lib/ui';
 import { JobDescriptionPanel } from './job-description-panel';
 import { NeedsInputForm } from './needs-input-form';
+import { OtpForm } from './otp-form';
 import { documentKind } from './question-kind';
 import type { DocumentOption, QuestionView } from './questions-panel';
 import { QuestionsPanel } from './questions-panel';
@@ -239,7 +240,11 @@ function NextStep({
           <p>
             <strong>Waiting on a one-time passcode.</strong> The platform sent a
             verification code that has to be entered before this can move on.
+            Enter it here or via the Discord card.
           </p>
+          <div style={{ marginTop: '0.75rem' }}>
+            <OtpForm taskId={task.id} />
+          </div>
         </div>
       );
     case 'SUBMITTED':

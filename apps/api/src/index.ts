@@ -3,6 +3,7 @@ import { createDb } from '@sower/db';
 import {
   applyVerdict,
   postApprovalCard,
+  postOtpRequestCard,
   updateApprovalCard,
   verifyInteraction,
 } from '@sower/notify';
@@ -21,6 +22,7 @@ async function main(): Promise<void> {
   // token present) and the token itself never leaves @sower/notify.
   const notify: Notifier = {
     postApprovalCard,
+    postOtpRequestCard,
     updateApprovalCard,
     verifyInteraction,
     applyVerdict,

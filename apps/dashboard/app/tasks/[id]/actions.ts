@@ -336,6 +336,26 @@ export async function approveTask(taskId: string): Promise<ActionResult> {
   return result;
 }
 
+/**
+ * Deliver a one-time code to an AWAITING_OTP task via the api service, which
+ * stores it and resumes the task (AWAITING_OTP -> FILLING). Mirrors the
+ * Discord modal path; either can satisfy the same wait.
+ */
+export async function submitOtp(
+  taskId: string,
+  code: string,
+): Promise<ActionResult> {
+  const idParse = uuidSchema.safeParse(taskId);
+  if (!idParse.success) return { ok: false, message: 'invalid task id.' };
+  const trimmed = code.trim();
+  if (trimmed.length < 4) {
+    return { ok: false, message: 'enter the code from the email.' };
+  }
+  const result = await callApi(idParse.data, 'otp', { code: trimmed });
+  revalidatePath(`/tasks/${idParse.data}`);
+  return result;
+}
+
 const apiResponseSchema = z.object({
   state: z.string().optional(),
   skipped: z.boolean().optional(),
@@ -356,7 +376,8 @@ const apiResponseSchema = z.object({
  */
 async function callApi(
   taskId: string,
-  action: 'requeue' | 'approve',
+  action: 'requeue' | 'approve' | 'otp',
+  jsonBody?: Record<string, unknown>,
 ): Promise<ActionResult> {
   const base = process.env.API_BASE_URL;
   const apiKey = process.env.INGEST_API_KEY;
@@ -374,7 +395,11 @@ async function callApi(
       `${base.replace(/\/$/, '')}/tasks/${taskId}/${action}`,
       {
         method: 'POST',
-        headers: { 'x-api-key': apiKey },
+        headers: {
+          'x-api-key': apiKey,
+          ...(jsonBody ? { 'content-type': 'application/json' } : {}),
+        },
+        body: jsonBody ? JSON.stringify(jsonBody) : undefined,
         cache: 'no-store',
         signal: AbortSignal.timeout(30_000),
       },
@@ -407,6 +432,19 @@ async function callApi(
     return {
       ok: true,
       message: `dry-run submit recorded${summary}; no real submission was made. task is back in ${body.state ?? 'REVIEW'}.`,
+    };
+  }
+
+  if (action === 'otp') {
+    if (body.skipped) {
+      return {
+        ok: true,
+        message: 'code not applied — the task is no longer waiting on a code.',
+      };
+    }
+    return {
+      ok: true,
+      message: `code accepted; task resumed (state: ${body.state ?? 'FILLING'}).`,
     };
   }
 

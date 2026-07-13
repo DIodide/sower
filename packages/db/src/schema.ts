@@ -50,6 +50,20 @@ export const applicationTasks = pgTable('application_tasks', {
    */
   approvalChannelId: text('approval_channel_id'),
   approvalMessageId: text('approval_message_id'),
+  /**
+   * OTP relay for account-based platforms (whitepaper AWAITING_OTP): when a
+   * browser tier hits an email-verification wall it parks the task and an OTP
+   * request card is posted; the user's code lands here (via Discord modal,
+   * dashboard, or the Gmail reader) and the resumed FILLING tier consumes it.
+   * OTPs are short-lived single-use codes — storing one briefly is safe; the
+   * consumer clears it after use.
+   */
+  pendingOtp: text('pending_otp'),
+  otpRequestedAt: timestamp('otp_requested_at', { withTimezone: true }),
+  otpSubmittedAt: timestamp('otp_submitted_at', { withTimezone: true }),
+  /** Discord OTP-request card location, so the card can be edited on submit. */
+  otpChannelId: text('otp_channel_id'),
+  otpMessageId: text('otp_message_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
@@ -168,11 +182,44 @@ export const jobDescriptions = pgTable(
   ],
 );
 
-export const accounts = pgTable('accounts', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  platform: text('platform').notNull(),
-  tenant: text('tenant').notNull(),
-  emailAlias: text('email_alias'),
-  secretRef: text('secret_ref'),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
-});
+/**
+ * Lifecycle of a per-tenant candidate account (Workday etc.):
+ * - 'provisioned': credential generated and stored in the vault; no account
+ *   exists on the tenant yet.
+ * - 'registered': the browser tier created the account on the tenant.
+ * - 'verified': the tenant's email verification/OTP completed.
+ */
+export type AccountStatus = 'provisioned' | 'registered' | 'verified';
+
+export const accounts = pgTable(
+  'accounts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    platform: text('platform').notNull(),
+    tenant: text('tenant').notNull(),
+    /**
+     * Career-site path segment (e.g. 'External_Careers') captured at
+     * provisioning so the browser tier can reach the sign-in page without
+     * re-deriving it from a job URL.
+     */
+    site: text('site'),
+    /** The account's email address (the application email must match it). */
+    emailAlias: text('email_alias'),
+    /**
+     * Vault storage key of the credential JSON (password NEVER lives in the
+     * DB) — see credentialStoragePath in @sower/accounts.
+     */
+    secretRef: text('secret_ref'),
+    status: text('status')
+      .$type<AccountStatus>()
+      .notNull()
+      .default('provisioned'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+  },
+  (table) => [
+    // One candidate account per (platform, tenant): a concurrent double
+    // provision cannot create two accounts for the same tenant.
+    uniqueIndex('accounts_platform_tenant_uq').on(table.platform, table.tenant),
+  ],
+);

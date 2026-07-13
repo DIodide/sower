@@ -1,0 +1,22 @@
+{
+  "name": "@sower/accounts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@sower/db": "workspace:*",
+    "@sower/storage": "workspace:*",
+    "drizzle-orm": "^0.44.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

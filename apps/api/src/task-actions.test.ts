@@ -262,6 +262,10 @@ function createNotify(): Notifier {
       channelId: 'chan-1',
       messageId: 'msg-1',
     })),
+    postOtpRequestCard: vi.fn(async () => ({
+      channelId: 'chan-1',
+      messageId: 'otp-msg-1',
+    })),
     updateApprovalCard: vi.fn(async () => {}),
     verifyInteraction: vi.fn(() => true),
     applyVerdict: vi.fn(() => ({ embeds: [], components: [] })),

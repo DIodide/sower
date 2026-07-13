@@ -13,6 +13,7 @@ const adapterState = vi.hoisted(() => ({
   company: undefined as string | undefined,
   title: undefined as string | undefined,
   description: undefined as string | undefined,
+  formAccess: undefined as 'public' | 'account-required' | undefined,
 }));
 
 const answersState = vi.hoisted(() => ({
@@ -48,6 +49,9 @@ vi.mock('@sower/platforms', () => ({
                 : {}),
               ...(adapterState.description !== undefined
                 ? { description: adapterState.description }
+                : {}),
+              ...(adapterState.formAccess !== undefined
+                ? { formAccess: adapterState.formAccess }
                 : {}),
             };
           },
@@ -304,6 +308,10 @@ function createNotify() {
       channelId: 'chan-1',
       messageId: 'msg-1',
     })),
+    postOtpRequestCard: vi.fn(async () => ({
+      channelId: 'chan-1',
+      messageId: 'otp-msg-1',
+    })),
     updateApprovalCard: vi.fn(async () => {}),
     verifyInteraction: vi.fn(() => true),
     applyVerdict: vi.fn(() => ({ embeds: [], components: [] })),
@@ -324,6 +332,7 @@ beforeEach(() => {
   adapterState.company = undefined;
   adapterState.title = undefined;
   adapterState.description = undefined;
+  adapterState.formAccess = undefined;
   answersState.result = { resolved: [], missing: [] };
   answersState.lastOpts = undefined;
 });
@@ -375,6 +384,25 @@ describe('processTask', () => {
       documents: [],
       company: '',
     });
+  });
+
+  it('parks an account-required spec (workday) in NEEDS_INPUT, never REVIEW', async () => {
+    const { db, task, eventRows } = createFakeTaskDb({ state: 'QUEUED' });
+    // Workday-shaped discover: no discoverable questions and nothing missing,
+    // which would normally resolve to REVIEW — but formAccess forces parking.
+    adapterState.formAccess = 'account-required';
+    answersState.result = { resolved: [], missing: [] };
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'NEEDS_INPUT' });
+    expect(task.state).toBe('NEEDS_INPUT');
+    // The resolution explains WHY it parked (surfaced on the dashboard).
+    expect((task.resolution as { note?: string }).note).toMatch(/Workday/);
+    expect(eventRows.map((e) => [e.type, e.fromState, e.toState])).toEqual([
+      ['PROCESS_START', 'QUEUED', 'PREPARING'],
+      ['RESOLVED_PARTIAL', 'PREPARING', 'NEEDS_INPUT'],
+    ]);
   });
 
   it('passes the startup-loaded curated answer bank through to resolveAnswers', async () => {

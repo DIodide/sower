@@ -115,6 +115,12 @@ importers:
 
   apps/worker:
     dependencies:
+      '@sower/accounts':
+        specifier: workspace:*
+        version: link:../../packages/accounts
+      '@sower/answers':
+        specifier: workspace:*
+        version: link:../../packages/answers
       '@sower/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -124,6 +130,12 @@ importers:
       '@sower/platforms':
         specifier: workspace:*
         version: link:../../packages/platforms
+      '@sower/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
+      drizzle-orm:
+        specifier: ^0.44.0
+        version: 0.44.7(postgres@3.4.9)
       playwright:
         specifier: ^1.49.0
         version: 1.61.1
@@ -134,6 +146,25 @@ importers:
       tsx:
         specifier: ^4.20.3
         version: 4.23.0
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@22.20.1)(tsx@4.23.0)(yaml@2.9.0)
+
+  packages/accounts:
+    dependencies:
+      '@sower/db':
+        specifier: workspace:*
+        version: link:../db
+      '@sower/storage':
+        specifier: workspace:*
+        version: link:../storage
+      drizzle-orm:
+        specifier: ^0.44.0
+        version: 0.44.7(postgres@3.4.9)
+    devDependencies:
       typescript:
         specifier: ^5.8.3
         version: 5.9.3
@@ -195,6 +226,21 @@ importers:
         version: 5.9.3
       vitest:
         specifier: ^3.2.0
+        version: 3.2.7(@types/node@22.20.1)(tsx@4.23.0)(yaml@2.9.0)
+
+  packages/inbox:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.2
+        version: 22.20.1
+      tsx:
+        specifier: ^4.20.3
+        version: 4.23.0
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
         version: 3.2.7(@types/node@22.20.1)(tsx@4.23.0)(yaml@2.9.0)
 
   packages/notify:

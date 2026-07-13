@@ -16,7 +16,11 @@ export interface ApprovalCard {
   missingRequired: number;
 }
 
-export type ApprovalVerdict = 'approved' | 'rejected' | 'submitted-dryrun';
+export type ApprovalVerdict =
+  | 'approved'
+  | 'rejected'
+  | 'submitted-dryrun'
+  | 'otp-received';
 
 export interface DiscordEmbedField {
   name: string;
@@ -59,12 +63,14 @@ export const CARD_COLORS: Readonly<
   approved: 0x57f287,
   rejected: 0xed4245,
   'submitted-dryrun': 0x5865f2,
+  'otp-received': 0x57f287,
 };
 
 const VERDICT_LABELS: Readonly<Record<ApprovalVerdict, string>> = {
   approved: 'Approved',
   rejected: 'Rejected',
   'submitted-dryrun': 'Submitted (dry run — no real application was sent)',
+  'otp-received': 'Code received',
 };
 
 /** Button style constants (Discord API): 3 = green/success, 4 = red/danger. */
@@ -150,4 +156,57 @@ export function applyVerdict(
     components: row.components.map((button) => ({ ...button, disabled: true })),
   }));
   return { embeds: [embed, ...rest], components };
+}
+
+/** An OTP request: a task is parked in AWAITING_OTP until a code arrives. */
+export interface OtpRequestCard {
+  taskId: string;
+  platform: string;
+  company: string;
+  title: string;
+  /** Platform tenant the verification email belongs to (e.g. 'cadence'). */
+  tenant: string;
+}
+
+/** Button style constant (Discord API): 1 = blurple/primary. */
+const BUTTON_STYLE_PRIMARY = 1;
+
+/**
+ * Build the OTP-request card: an embed naming the tenant whose verification
+ * email to check, plus an "Enter code" button that opens a modal (handled by
+ * the interactions endpoint in apps/api). Same edit lifecycle as approval
+ * cards: applyVerdict(…, 'otp-received') recolors and disables the button.
+ */
+export function buildOtpRequestMessage(
+  card: OtpRequestCard,
+): ApprovalMessagePayload {
+  return {
+    embeds: [
+      {
+        title: clampTitle(
+          `One-time code needed — ${card.company} — ${card.title}`,
+        ),
+        color: CARD_COLORS.pending,
+        description: `Task \`${card.taskId}\` is waiting on the verification code emailed by **${card.tenant}**. Check the inbox, then click below to enter it.`,
+        fields: [
+          { name: 'Platform', value: card.platform, inline: true },
+          { name: 'Tenant', value: card.tenant, inline: true },
+        ],
+        footer: { text: `task:${card.taskId}` },
+      },
+    ],
+    components: [
+      {
+        type: 1,
+        components: [
+          {
+            type: 2,
+            style: BUTTON_STYLE_PRIMARY,
+            label: 'Enter code',
+            custom_id: `otp:${card.taskId}`,
+          },
+        ],
+      },
+    ],
+  };
 }

@@ -5,6 +5,7 @@ import type {
   ApprovalCardRef,
   ApprovalMessagePayload,
   ApprovalVerdict,
+  OtpRequestCard,
 } from '@sower/notify';
 import type { Config } from './config.js';
 
@@ -25,6 +26,7 @@ export interface Queue {
  */
 export interface Notifier {
   postApprovalCard(card: ApprovalCard): Promise<ApprovalCardRef>;
+  postOtpRequestCard(card: OtpRequestCard): Promise<ApprovalCardRef>;
   updateApprovalCard(
     channelId: string,
     messageId: string,

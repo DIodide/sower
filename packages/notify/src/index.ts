@@ -6,8 +6,14 @@ export type {
   DiscordButton,
   DiscordEmbed,
   DiscordEmbedField,
+  OtpRequestCard,
 } from './cards.js';
-export { applyVerdict, buildApprovalMessage, CARD_COLORS } from './cards.js';
+export {
+  applyVerdict,
+  buildApprovalMessage,
+  buildOtpRequestMessage,
+  CARD_COLORS,
+} from './cards.js';
 export {
   createChannelMapFromEnv,
   DEFAULT_DISCORD_APP_ID,
@@ -22,5 +28,10 @@ export {
   resolveChannelId,
 } from './config.js';
 export type { ApprovalCardRef } from './discord.js';
-export { notifyText, postApprovalCard, updateApprovalCard } from './discord.js';
+export {
+  notifyText,
+  postApprovalCard,
+  postOtpRequestCard,
+  updateApprovalCard,
+} from './discord.js';
 export { verifyInteraction } from './verify.js';

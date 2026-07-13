@@ -3,6 +3,7 @@ import {
   type ApprovalCard,
   applyVerdict,
   buildApprovalMessage,
+  buildOtpRequestMessage,
   CARD_COLORS,
 } from './cards.js';
 import { notifyText, postApprovalCard, updateApprovalCard } from './discord.js';
@@ -240,5 +241,35 @@ describe('card payload builders (pure)', () => {
     // original untouched
     expect(original.embeds[0]?.color).toBe(CARD_COLORS.pending);
     expect(original.components[0]?.components[0]?.disabled).toBeUndefined();
+  });
+
+  it('buildOtpRequestMessage names the tenant and wires the otp: button', () => {
+    const payload = buildOtpRequestMessage({
+      taskId: 'task-123',
+      platform: 'workday',
+      company: 'Cadence',
+      title: 'Software Intern',
+      tenant: 'cadence',
+    });
+    expect(payload.embeds[0]?.description).toContain('cadence');
+    expect(payload.embeds[0]?.footer).toEqual({ text: 'task:task-123' });
+    expect(payload.components[0]?.components[0]).toMatchObject({
+      label: 'Enter code',
+      custom_id: 'otp:task-123',
+    });
+  });
+
+  it('applyVerdict covers otp-received (recolors + disables the button)', () => {
+    const original = buildOtpRequestMessage({
+      taskId: 'task-123',
+      platform: 'workday',
+      company: 'Cadence',
+      title: 'Software Intern',
+      tenant: 'cadence',
+    });
+    const updated = applyVerdict(original, 'otp-received', 'task resumed');
+    expect(updated.embeds[0]?.color).toBe(CARD_COLORS['otp-received']);
+    expect(updated.embeds[0]?.description).toContain('Code received');
+    expect(updated.components[0]?.components[0]?.disabled).toBe(true);
   });
 });

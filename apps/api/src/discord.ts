@@ -3,6 +3,7 @@ import { applicationTasks, events } from '@sower/db';
 import type { ApprovalCard, ApprovalMessagePayload } from '@sower/notify';
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
+import { submitOtp } from './otp-actions.js';
 import { approveTask } from './task-actions.js';
 import type { Db, Deps } from './types.js';
 
@@ -24,11 +25,19 @@ import type { Db, Deps } from './types.js';
 /** Discord interaction request types (subset handled here). */
 const INTERACTION_PING = 1;
 const INTERACTION_MESSAGE_COMPONENT = 3;
+const INTERACTION_MODAL_SUBMIT = 5;
 
 /** Discord interaction response types. */
 const RESPONSE_PONG = 1;
 const RESPONSE_CHANNEL_MESSAGE = 4;
 const RESPONSE_UPDATE_MESSAGE = 7;
+const RESPONSE_MODAL = 9;
+
+/** Discord component types. */
+const COMPONENT_ACTION_ROW = 1;
+const COMPONENT_TEXT_INPUT = 4;
+/** Text input style: 1 = short single line. */
+const TEXT_INPUT_SHORT = 1;
 
 /** Message flag: response is visible only to the user who clicked. */
 const FLAG_EPHEMERAL = 64;
@@ -36,10 +45,20 @@ const FLAG_EPHEMERAL = 64;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** A submitted modal field (nested inside action rows, like buttons). */
+interface DiscordModalField {
+  custom_id?: string;
+  value?: string;
+}
+
 /** The subset of a Discord interaction payload this handler reads. */
 interface DiscordInteraction {
   type: number;
-  data?: { custom_id?: string };
+  data?: {
+    custom_id?: string;
+    /** MODAL_SUBMIT only: action rows wrapping the submitted inputs. */
+    components?: Array<{ components?: DiscordModalField[] }>;
+  };
   /** The message the clicked component is attached to (the approval card). */
   message?: Partial<ApprovalMessagePayload>;
 }
@@ -104,6 +123,9 @@ export function buildInteractionsHandler(
     if (interaction.type === INTERACTION_MESSAGE_COMPONENT) {
       return handleComponent(deps, interaction);
     }
+    if (interaction.type === INTERACTION_MODAL_SUBMIT) {
+      return handleModalSubmit(deps, interaction);
+    }
     return {
       status: 400,
       body: { error: `unsupported interaction type ${interaction.type}` },
@@ -111,7 +133,7 @@ export function buildInteractionsHandler(
   };
 }
 
-/** Dispatch an approve:/reject: button click. */
+/** Dispatch an approve:/reject:/otp: button click. */
 async function handleComponent(
   deps: Deps,
   interaction: DiscordInteraction,
@@ -120,7 +142,10 @@ async function handleComponent(
   const separator = customId.indexOf(':');
   const action = separator === -1 ? customId : customId.slice(0, separator);
   const taskId = separator === -1 ? '' : customId.slice(separator + 1);
-  if ((action !== 'approve' && action !== 'reject') || !UUID_RE.test(taskId)) {
+  if (
+    (action !== 'approve' && action !== 'reject' && action !== 'otp') ||
+    !UUID_RE.test(taskId)
+  ) {
     return {
       status: 400,
       body: { error: `unsupported component custom_id '${customId}'` },
@@ -128,6 +153,9 @@ async function handleComponent(
   }
   if (action === 'approve') {
     return approveInteraction(deps, taskId, interaction);
+  }
+  if (action === 'otp') {
+    return otpModal(taskId);
   }
   return rejectInteraction(deps, taskId, interaction);
 }
@@ -192,6 +220,89 @@ async function rejectInteraction(
       existingMessage(interaction),
       'rejected',
       `task left in ${state}`,
+    ),
+  );
+}
+
+/**
+ * "Enter code" button: open a modal with a single short text input. No state
+ * changes here — the code is handled on MODAL_SUBMIT.
+ */
+function otpModal(taskId: string): InteractionReply {
+  return {
+    status: 200,
+    body: {
+      type: RESPONSE_MODAL,
+      data: {
+        custom_id: `otp-modal:${taskId}`,
+        title: 'Enter one-time code',
+        components: [
+          {
+            type: COMPONENT_ACTION_ROW,
+            components: [
+              {
+                type: COMPONENT_TEXT_INPUT,
+                custom_id: 'otp_code',
+                style: TEXT_INPUT_SHORT,
+                label: 'Code from the verification email',
+                placeholder: 'e.g. 482913',
+                min_length: 4,
+                max_length: 12,
+                required: true,
+              },
+            ],
+          },
+        ],
+      },
+    },
+  };
+}
+
+/**
+ * OTP modal submit: store the code and resume the task (submitOtp claims
+ * AWAITING_OTP -> FILLING). Responds type-7 to edit the OTP card in place —
+ * a modal opened from a message component carries that message, so the same
+ * in-window edit path as the approve/reject buttons applies.
+ */
+async function handleModalSubmit(
+  deps: Deps,
+  interaction: DiscordInteraction,
+): Promise<InteractionReply> {
+  const notify = requireNotify(deps);
+  const customId = interaction.data?.custom_id ?? '';
+  const [prefix, taskId = ''] = customId.split(':', 2);
+  if (prefix !== 'otp-modal' || !UUID_RE.test(taskId)) {
+    return {
+      status: 400,
+      body: { error: `unsupported modal custom_id '${customId}'` },
+    };
+  }
+  const code = (interaction.data?.components ?? [])
+    .flatMap((row) => row.components ?? [])
+    .find((field) => field.custom_id === 'otp_code')?.value;
+  if (!code) {
+    return ephemeral('The modal carried no code — try again.');
+  }
+
+  const outcome = await submitOtp(deps, taskId, code);
+  if (outcome.kind === 'not_found') {
+    return ephemeral(`Task ${taskId} was not found.`);
+  }
+  if (outcome.kind === 'invalid_code') {
+    return ephemeral(
+      'That does not look like a one-time code (4-10 letters/digits) — check the email and try again.',
+    );
+  }
+  if (outcome.kind === 'skipped') {
+    return ephemeral(
+      `Task is in state ${outcome.state}; only an AWAITING_OTP task accepts a code.`,
+    );
+  }
+  return updateMessage(
+    notify.applyVerdict(
+      existingMessage(interaction),
+      'otp-received',
+      'task resumed',
     ),
   );
 }

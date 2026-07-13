@@ -4,6 +4,8 @@ import {
   type ApprovalVerdict,
   applyVerdict,
   buildApprovalMessage,
+  buildOtpRequestMessage,
+  type OtpRequestCard,
 } from './cards.js';
 import {
   DISCORD_API_BASE,
@@ -79,6 +81,22 @@ export async function postApprovalCard(
     'POST',
     `/channels/${channelId}/messages`,
     buildApprovalMessage(card),
+  )) as DiscordMessageResponse;
+  return { channelId: message.channel_id ?? channelId, messageId: message.id };
+}
+
+/**
+ * Post an OTP-request card ("Enter code" button) to the platform's channel.
+ * Same channel routing and edit lifecycle as approval cards.
+ */
+export async function postOtpRequestCard(
+  card: OtpRequestCard,
+): Promise<ApprovalCardRef> {
+  const channelId = requireChannel(card.platform);
+  const message = (await discordRequest(
+    'POST',
+    `/channels/${channelId}/messages`,
+    buildOtpRequestMessage(card),
   )) as DiscordMessageResponse;
   return { channelId: message.channel_id ?? channelId, messageId: message.id };
 }
