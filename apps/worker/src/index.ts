@@ -24,6 +24,12 @@ export {
   submitVerificationCode,
 } from './workday/account.js';
 export {
+  type ApplyClient,
+  applyViaCalypso,
+  type CalypsoApplyInput,
+  type CalypsoApplyResult,
+} from './workday/calypso-applier.js';
+export {
   type RawField,
   rawFieldsToQuestions,
   rawFieldToQuestion,

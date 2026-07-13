@@ -162,13 +162,32 @@ export class CalypsoClient {
     return { jobApplicationId: body.id };
   }
 
-  /** Read + parse a questionnaire definition into fields. */
+  /** Read + parse a questionnaire definition into fields (no options). */
   async getQuestionnaire(
     questionnaireId: string,
   ): Promise<WorkdayQuestionnaireField[]> {
     const url = `${this.base}/wday/calypso/cxs/common/${this.session.tenant}/questionnaire/${questionnaireId}/definition`;
     const schema = await this.call('questionnaire', 'POST', url, {});
     return parseQuestionnaireDefinition(schema as Record<string, unknown>);
+  }
+
+  /**
+   * Fetch the questionnaire fields WITH choice options attached, in the
+   * application context. The definition schema is shallow (no options), so the
+   * options come from the live in-context call. `attachOptions` is injected by
+   * the caller that knows the (tenant-specific, live-discovered) option source;
+   * when omitted, fields come back without options (choice questions then fall
+   * to the human).
+   */
+  async getQuestionnaireFields(
+    _jobApplicationId: string,
+    questionnaireId: string,
+    attachOptions?: (
+      fields: WorkdayQuestionnaireField[],
+    ) => Promise<WorkdayQuestionnaireField[]>,
+  ): Promise<WorkdayQuestionnaireField[]> {
+    const fields = await this.getQuestionnaire(questionnaireId);
+    return attachOptions ? attachOptions(fields) : fields;
   }
 
   /**
