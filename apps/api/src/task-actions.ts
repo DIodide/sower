@@ -1,8 +1,20 @@
-import type { Platform, ResolutionResult, TaskState } from '@sower/core';
+import { loadProfile } from '@sower/answers';
+import type {
+  JobSpec,
+  Platform,
+  ResolutionResult,
+  TaskState,
+} from '@sower/core';
 import { transition } from '@sower/core';
 import { applicationTasks, documents, events, jobs } from '@sower/db';
-import type { SubmitFile } from '@sower/platforms';
-import { getAdapter } from '@sower/platforms';
+import type { CalypsoFillResult, SubmitFile } from '@sower/platforms';
+import {
+  CalypsoClient,
+  fillViaCalypso,
+  getAdapter,
+  loadWorkdaySession,
+  workdayJobSlug,
+} from '@sower/platforms';
 import { and, eq, inArray } from 'drizzle-orm';
 import { createTaskRecorder } from './recorder.js';
 import { transitionTask } from './transitions.js';
@@ -74,8 +86,18 @@ export type ApproveOutcome =
   | {
       kind: 'approved';
       state: TaskState;
-      dryRun: true;
+      /**
+       * 'dry-run': greenhouse/lever/ashby — the payload was built and recorded
+       * with ZERO network I/O. 'workday-fill': a real draft application was
+       * created and filled over HTTP via the captured session, then STOPPED
+       * before finalize — nothing was submitted (finalize is separately gated).
+       */
+      mode: 'dry-run' | 'workday-fill';
+      /** True only for the zero-I/O dry-run. Kept for existing consumers. */
+      dryRun: boolean;
       payloadSummary: { fieldCount: number; fileCount: number };
+      /** Honest one-line summary of what approve did, for cards/UI. */
+      note: string;
       /**
        * Discord approval-card ref stored on the task when the card was
        * posted (null when Discord was disabled / no card exists). Internal —
@@ -86,15 +108,20 @@ export type ApproveOutcome =
   | { kind: 'failed'; error: string };
 
 /**
- * Approve a REVIEW task and perform a DRY-RUN submit: atomically claim
- * REVIEW -> FILLING (APPROVED event), build the file attachment metadata from
- * resolution entries with source 'document', have the adapter construct and
- * record the submission payload REPRESENTATION, then move FILLING -> REVIEW
- * (FILLED event, data { dryRun: true }).
+ * Approve a REVIEW task: atomically claim REVIEW -> FILLING (APPROVED event),
+ * run the platform's fill, then move FILLING -> REVIEW (FILLED event). Two
+ * platform behaviours, one spine:
  *
- * SAFETY: this path performs ZERO external HTTP requests. dryRunSubmit only
- * builds the payload and hands one { phase: 'submit_dryrun', dryRun: true }
- * record to the recorder — tests assert fetch is never called.
+ * - greenhouse/lever/ashby: a DRY-RUN — the adapter builds and records the
+ *   submission payload REPRESENTATION with ZERO external HTTP (tests assert
+ *   fetch is never called).
+ * - workday: a real calypso FILL over HTTP with the captured session (start ->
+ *   name/email/phone -> questionnaire from the REVIEWED answers -> validate),
+ *   STOPPING before finalize. It fills exactly what the human reviewed (the
+ *   stored resolution) and never submits — finalize stays separately gated.
+ *
+ * Either way the task returns to REVIEW so the human can inspect the recorded
+ * artifacts before any (separately-gated) submission.
  */
 export async function approveTask(
   deps: Deps,
@@ -140,6 +167,14 @@ export async function approveTask(
     data: null,
   });
 
+  const approval =
+    claimed.approvalChannelId != null && claimed.approvalMessageId != null
+      ? {
+          channelId: claimed.approvalChannelId,
+          messageId: claimed.approvalMessageId,
+        }
+      : null;
+
   try {
     const jobSpec = claimed.jobSpec;
     if (!jobSpec) {
@@ -149,7 +184,41 @@ export async function approveTask(
     if (!resolution) {
       throw new Error('task has no resolution (was it ever processed?)');
     }
-    const adapter = getAdapter(row.job.platform as Platform);
+    const platform = row.job.platform as Platform;
+
+    // Workday: a real calypso fill over HTTP (fill-then-stop), driven by the
+    // answers the human just reviewed. Every other platform: the zero-I/O
+    // dry-run. Both return to REVIEW with recorded artifacts.
+    if (platform === 'workday') {
+      const fill = await fillWorkdayOnApprove(
+        deps,
+        taskId,
+        jobSpec,
+        resolution,
+      );
+      const answered = fill.questionnaire?.answered ?? 0;
+      currentState = await transitionTask(db, taskId, currentState, 'FILLED', {
+        dryRun: false,
+        workday: {
+          jobApplicationId: fill.jobApplicationId,
+          sectionsFilled: fill.sectionsFilled,
+          sectionErrors: fill.sectionErrors,
+          answered,
+          skippedRequired: fill.questionnaire?.skippedRequired ?? 0,
+        },
+      });
+      return {
+        kind: 'approved',
+        state: currentState,
+        mode: 'workday-fill',
+        dryRun: false,
+        payloadSummary: { fieldCount: answered, fileCount: 0 },
+        note: `Workday draft filled: ${fill.sectionsFilled.length} info section(s), ${answered} question(s) answered — stopped before submit (finalize is separately gated).`,
+        approval,
+      };
+    }
+
+    const adapter = getAdapter(platform);
     if (!adapter) {
       throw new Error(`no adapter for platform '${row.job.platform}'`);
     }
@@ -166,21 +235,15 @@ export async function approveTask(
     currentState = await transitionTask(db, taskId, currentState, 'FILLED', {
       dryRun: true,
     });
+    const fieldCount = Object.keys(payload).length;
     return {
       kind: 'approved',
       state: currentState,
+      mode: 'dry-run',
       dryRun: true,
-      payloadSummary: {
-        fieldCount: Object.keys(payload).length,
-        fileCount: files.length,
-      },
-      approval:
-        claimed.approvalChannelId != null && claimed.approvalMessageId != null
-          ? {
-              channelId: claimed.approvalChannelId,
-              messageId: claimed.approvalMessageId,
-            }
-          : null,
+      payloadSummary: { fieldCount, fileCount: files.length },
+      note: `Dry-run submit recorded (${fieldCount} field(s), ${files.length} file(s)); no real application was sent.`,
+      approval,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -194,6 +257,70 @@ export async function approveTask(
     );
     return { kind: 'failed', error: message };
   }
+}
+
+/**
+ * Run the Workday calypso fill for an approved task and return the result. The
+ * answers are the ones the human REVIEWED (the stored resolution), keyed by
+ * question id (== the questionnaire field id) — so the fill submits exactly
+ * what was approved, never a live re-resolution. Loads the per-tenant session
+ * from the vault (throws with a clear "capture a session" message when absent)
+ * and records every calypso call as an api_calls row. Never finalizes — the
+ * shared `fillViaCalypso` has no finalize in its client surface.
+ */
+async function fillWorkdayOnApprove(
+  deps: Deps,
+  taskId: string,
+  jobSpec: JobSpec,
+  resolution: ResolutionResult,
+): Promise<CalypsoFillResult> {
+  if (!deps.storage) {
+    throw new Error(
+      'workday fill needs vault storage, but no session store is configured',
+    );
+  }
+  const session = await loadWorkdaySession(deps.storage, jobSpec.tenant);
+  if (!session) {
+    throw new Error(
+      `no captured Workday session for tenant '${jobSpec.tenant}' — capture one via the session broker, then approve again`,
+    );
+  }
+
+  const externalPath = jobSpec.meta?.externalPath;
+  if (typeof externalPath !== 'string' || externalPath.length === 0) {
+    throw new Error('workday job spec is missing meta.externalPath (job slug)');
+  }
+  const questionnaireId =
+    typeof jobSpec.meta?.questionnaireId === 'string'
+      ? jobSpec.meta.questionnaireId
+      : undefined;
+
+  const profile = await loadProfile(deps.config.PROFILE_PATH);
+
+  // The reviewed answers, keyed by question id. Workday questionnaire fields
+  // never map to multiselect, so values are strings; arrays (if any) are
+  // dropped rather than guessed.
+  const valueById: Record<string, string> = {};
+  for (const answer of resolution.resolved) {
+    if (typeof answer.value === 'string') {
+      valueById[answer.questionId] = answer.value;
+    }
+  }
+
+  const recorder = createTaskRecorder(deps.db, taskId);
+  const client = new CalypsoClient(session, { recorder });
+  return fillViaCalypso(client, {
+    jobSlug: workdayJobSlug(externalPath),
+    questionnaireId,
+    applicant: {
+      firstName: profile.name.first,
+      lastName: profile.name.last,
+      email: profile.email,
+      phone: profile.phone,
+    },
+    // Fill exactly what was reviewed — no live re-resolution.
+    resolveQuestionnaireAnswers: () => valueById,
+  });
 }
 
 /**

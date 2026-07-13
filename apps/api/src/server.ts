@@ -154,8 +154,9 @@ export function buildServer(deps: Deps): FastifyInstance {
     return reply.code(200).send({ state: outcome.state });
   });
 
-  // Approve a REVIEW task: DRY-RUN submit only. The payload is constructed
-  // and recorded (api_calls, phase 'submit_dryrun') — never sent anywhere.
+  // Approve a REVIEW task: fill but never SUBMIT. Greenhouse/lever/ashby build
+  // and record the payload with zero network I/O (dry-run); Workday drives a
+  // real calypso fill via the captured session and STOPS before finalize.
   app.post('/tasks/:id/approve', async (request, reply) => {
     const parsed = taskParamsSchema.safeParse(request.params);
     if (!parsed.success) {
@@ -173,16 +174,17 @@ export function buildServer(deps: Deps): FastifyInstance {
     if (outcome.kind === 'failed') {
       return reply.code(500).send({ error: outcome.error });
     }
-    // Best-effort: reflect the dry-run approval on the task's Discord card
-    // (no-op when Discord is disabled or the task has no stored card).
-    await markApprovalCardSubmitted(
-      deps,
-      outcome.approval,
-      outcome.payloadSummary,
-    );
+    // Best-effort: reflect the approval on the task's Discord card with the
+    // honest per-mode verdict (no-op when Discord is disabled or no card).
+    await markApprovalCardSubmitted(deps, outcome.approval, {
+      mode: outcome.mode,
+      note: outcome.note,
+    });
     return reply.code(200).send({
       state: outcome.state,
+      mode: outcome.mode,
       dryRun: outcome.dryRun,
+      note: outcome.note,
       payloadSummary: outcome.payloadSummary,
     });
   });

@@ -27,6 +27,13 @@ export {
   type WorkdaySessionFingerprint,
 } from './workday/calypso.js';
 export {
+  type CalypsoApplicant,
+  type CalypsoFillClient,
+  type CalypsoFillInput,
+  type CalypsoFillResult,
+  fillViaCalypso,
+} from './workday/calypso-fill.js';
+export {
   buildEmailSection,
   buildNameSection,
   buildPhoneSection,
@@ -47,6 +54,7 @@ export {
   WorkdayBrowserTierRequiredError,
   WorkdayJobUnavailableError,
   type WorkdayJobUrlParts,
+  workdayJobSlug,
 } from './workday/index.js';
 export {
   type BranchTrigger,

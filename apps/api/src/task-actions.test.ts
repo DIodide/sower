@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { apiCalls, applicationTasks, documents, events, jobs } from '@sower/db';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
@@ -399,7 +400,9 @@ describe('POST /tasks/:id/approve', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
       state: 'REVIEW',
+      mode: 'dry-run',
       dryRun: true,
+      note: 'Dry-run submit recorded (2 field(s), 1 file(s)); no real application was sent.',
       payloadSummary: { fieldCount: 2, fileCount: 1 },
     });
 
@@ -463,10 +466,12 @@ describe('POST /tasks/:id/approve', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    // Response shape is unchanged: the card ref never leaks to clients.
+    // The card ref never leaks to clients; the honest per-mode note does.
     expect(res.json()).toEqual({
       state: 'REVIEW',
+      mode: 'dry-run',
       dryRun: true,
+      note: 'Dry-run submit recorded (2 field(s), 1 file(s)); no real application was sent.',
       payloadSummary: { fieldCount: 2, fileCount: 1 },
     });
     expect(notify.updateApprovalCard).toHaveBeenCalledTimes(1);
@@ -474,7 +479,7 @@ describe('POST /tasks/:id/approve', () => {
       'chan-1',
       'msg-1',
       'submitted-dryrun',
-      'dry-run submit recorded (2 field(s), 1 file(s))',
+      'Dry-run submit recorded (2 field(s), 1 file(s)); no real application was sent.',
     );
     // The notifier is the only Discord surface; no direct fetch happened.
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -558,6 +563,216 @@ describe('POST /tasks/:id/approve', () => {
     });
 
     expect(res.statusCode).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Workday approve -> real calypso fill (fill-then-stop), the spine completion.
+// Uses the REAL CalypsoClient + fillViaCalypso against a mocked fetch, so the
+// "never finalize" and "fills exactly what was reviewed" guarantees are
+// exercised end-to-end through the approve route.
+// ---------------------------------------------------------------------------
+
+describe('POST /tasks/:id/approve (workday calypso fill)', () => {
+  const SAMPLE_PROFILE_PATH = fileURLToPath(
+    new URL('../../../config/profile.sample.yaml', import.meta.url),
+  );
+  const WORKDAY_HOST = 'caci.wd1.myworkdayjobs.com';
+  const SLUG = 'Software-Engineering-Intern---Fall-2026_328740';
+  const SESSION = {
+    host: WORKDAY_HOST,
+    tenant: 'caci',
+    cookie: 'PLAY_SESSION=redacted',
+    csrfToken: 'csrf-1',
+  };
+
+  const workdayJobSpec = {
+    platform: 'workday',
+    tenant: 'caci',
+    externalId: '328740',
+    title: 'Software Engineering Intern - Fall 2026',
+    company: 'CACI',
+    applyUrl: `https://${WORKDAY_HOST}/external/job/Jessup-MD-US/${SLUG}`,
+    questions: [
+      { id: 'Q1', label: 'Favorite color?', type: 'text', required: true },
+    ],
+    formAccess: 'public',
+    meta: {
+      site: 'external',
+      externalPath: `/job/Jessup-MD-US/${SLUG}`,
+      questionnaireId: 'QID-1',
+    },
+  };
+  const workdayResolution = {
+    resolved: [{ questionId: 'Q1', source: 'profile', value: 'Blue' }],
+    missing: [],
+    requiredMissingCount: 0,
+    optionalMissingCount: 0,
+  };
+
+  function workdayState(taskOverrides: Partial<FakeRow> = {}): FakeState {
+    return {
+      task: {
+        id: TASK_ID,
+        jobId: 'job-wd',
+        state: 'REVIEW',
+        attempt: 1,
+        jobSpec: workdayJobSpec,
+        resolution: workdayResolution,
+        lastError: null,
+        createdAt: '2026-07-11T00:00:00.000Z',
+        updatedAt: '2026-07-11T00:00:00.000Z',
+        ...taskOverrides,
+      },
+      job: {
+        id: 'job-wd',
+        url: workdayJobSpec.applyUrl,
+        company: 'CACI',
+        title: workdayJobSpec.title,
+        platform: 'workday',
+        tenant: 'caci',
+        externalId: '328740',
+      },
+      events: [],
+      apiCalls: [],
+      documents: [],
+    };
+  }
+
+  /** A vault whose session read is present (or absent when session === null). */
+  function sessionVault(session: unknown | null) {
+    const buf = Buffer.from(session === null ? '' : JSON.stringify(session));
+    return {
+      exists: vi.fn(async () => session !== null),
+      get: vi.fn(async () => buf),
+      put: vi.fn(async () => {}),
+    } as unknown as NonNullable<Deps['storage']>;
+  }
+
+  /** Mock fetch returning canned calypso responses; records every call URL. */
+  function mockCalypsoFetch() {
+    const calls: { method: string; url: string }[] = [];
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation((async (
+      input: unknown,
+      init?: RequestInit,
+    ) => {
+      const url = String(input);
+      calls.push({ method: init?.method ?? 'GET', url });
+      if (url.includes('/questionnaire/QID-1')) {
+        return new Response(
+          JSON.stringify({
+            questions: [
+              {
+                id: 'Q1',
+                body: 'Favorite color?',
+                required: true,
+                type: [{ descriptor: 'Text - Single Line' }],
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith('/jobapplications')) {
+        return new Response(JSON.stringify({ id: 'JA-99' }), { status: 200 });
+      }
+      return new Response('{}', { status: 200 });
+    }) as unknown as typeof fetch);
+    return { calls, spy };
+  }
+
+  const workdayConfig: Config = {
+    ...config,
+    PROFILE_PATH: SAMPLE_PROFILE_PATH,
+  };
+
+  it('fills the Workday draft over HTTP and STOPS before finalize', async () => {
+    const state = workdayState();
+    const { calls } = mockCalypsoFetch();
+    const { deps } = createDeps(state, {
+      config: workdayConfig,
+      storage: sessionVault(SESSION),
+    });
+    const app = buildServer(deps);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/tasks/${TASK_ID}/approve`,
+      headers: { 'x-api-key': 'test-key' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.mode).toBe('workday-fill');
+    expect(body.dryRun).toBe(false);
+    expect(body.state).toBe('REVIEW');
+    expect(body.note).toMatch(/Workday draft filled/);
+    expect(body.note).toMatch(/stopped before submit/i);
+
+    // GUARDRAIL: the fill NEVER hit finalize.
+    expect(calls.some((c) => c.url.includes('/finalize'))).toBe(false);
+    // It started the application at the derived job slug...
+    expect(
+      calls.some((c) => c.url.includes(`/jobpostings/${SLUG}/jobapplications`)),
+    ).toBe(true);
+    // ...and posted the questionnaire responses (the reviewed answer).
+    expect(calls.some((c) => c.url.includes('/questionnaireresponses'))).toBe(
+      true,
+    );
+
+    // Same spine as every platform: REVIEW -> FILLING -> REVIEW.
+    expect(state.task?.state).toBe('REVIEW');
+    expect(state.events.map((e) => [e.type, e.fromState, e.toState])).toEqual([
+      ['APPROVED', 'REVIEW', 'FILLING'],
+      ['FILLED', 'FILLING', 'REVIEW'],
+    ]);
+    const filled = state.events[1] as { data?: Record<string, unknown> };
+    expect(filled.data).toMatchObject({
+      dryRun: false,
+      workday: { jobApplicationId: 'JA-99', answered: 1 },
+    });
+  });
+
+  it('fails cleanly (FILLING -> FAILED) when no session is captured', async () => {
+    const state = workdayState();
+    const { calls } = mockCalypsoFetch();
+    const { deps } = createDeps(state, {
+      config: workdayConfig,
+      storage: sessionVault(null), // nothing in the vault for this tenant
+    });
+    const app = buildServer(deps);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/tasks/${TASK_ID}/approve`,
+      headers: { 'x-api-key': 'test-key' },
+    });
+
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toMatch(/no captured Workday session/);
+    expect(state.task?.state).toBe('FAILED');
+    expect(state.events.map((e) => [e.type, e.fromState, e.toState])).toEqual([
+      ['APPROVED', 'REVIEW', 'FILLING'],
+      ['FAIL', 'FILLING', 'FAILED'],
+    ]);
+    // No calypso HTTP happened — it bailed before constructing the client.
+    expect(calls.some((c) => c.url.includes(WORKDAY_HOST))).toBe(false);
+  });
+
+  it('fails cleanly when no vault storage is configured', async () => {
+    const state = workdayState();
+    const { deps } = createDeps(state, { config: workdayConfig }); // no storage
+    const app = buildServer(deps);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/tasks/${TASK_ID}/approve`,
+      headers: { 'x-api-key': 'test-key' },
+    });
+
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toMatch(/needs vault storage/);
+    expect(state.task?.state).toBe('FAILED');
   });
 });
 

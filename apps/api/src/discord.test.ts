@@ -476,7 +476,8 @@ describe('POST /discord/interactions', () => {
     expect(notify.applyVerdict).toHaveBeenCalledTimes(1);
     const [existing, verdict, detail] = notify.applyVerdict.mock.calls[0] ?? [];
     expect(verdict).toBe('approved');
-    expect(detail).toContain('dry-run submit recorded (2 field(s), 1 file(s))');
+    expect(detail).toContain('Dry-run submit recorded (2 field(s), 1 file(s))');
+    expect(detail).toContain('no real application was sent');
     expect(existing).toEqual(cardMessage());
     // Every button in the edited message is disabled.
     const buttons = body.data.components.flatMap(

@@ -135,6 +135,26 @@ export function parseWorkdayJobUrl(url: string): WorkdayJobUrlParts {
   return { host, tenant, site, externalPath, cxsDetailUrl };
 }
 
+/**
+ * The calypso job posting slug: the `{title-slug}_{reqId}` LAST segment of a
+ * job's cxs externalPath (e.g. '/job/Jessup-MD-US/Software-Engineering-Intern
+ * ---Fall-2026_328740' -> 'Software-Engineering-Intern---Fall-2026_328740').
+ * This is what `CalypsoClient.startApplication` posts to. Throws when the path
+ * has no usable last segment (a malformed spec, never a valid live posting).
+ */
+export function workdayJobSlug(externalPath: string): string {
+  const slug = externalPath
+    .split('/')
+    .filter((s) => s.length > 0)
+    .at(-1);
+  if (!slug) {
+    throw new Error(
+      `cannot derive workday job slug from externalPath ${JSON.stringify(externalPath)}`,
+    );
+  }
+  return slug;
+}
+
 export class WorkdayAdapter implements PlatformAdapter {
   readonly platform = 'workday' as const;
 

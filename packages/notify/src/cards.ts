@@ -20,6 +20,7 @@ export type ApprovalVerdict =
   | 'approved'
   | 'rejected'
   | 'submitted-dryrun'
+  | 'filled'
   | 'otp-received';
 
 export interface DiscordEmbedField {
@@ -63,6 +64,7 @@ export const CARD_COLORS: Readonly<
   approved: 0x57f287,
   rejected: 0xed4245,
   'submitted-dryrun': 0x5865f2,
+  filled: 0x5865f2,
   'otp-received': 0x57f287,
 };
 
@@ -70,6 +72,7 @@ const VERDICT_LABELS: Readonly<Record<ApprovalVerdict, string>> = {
   approved: 'Approved',
   rejected: 'Rejected',
   'submitted-dryrun': 'Submitted (dry run — no real application was sent)',
+  filled: 'Filled (draft saved on the platform — stopped before submit)',
   'otp-received': 'Code received',
 };
 

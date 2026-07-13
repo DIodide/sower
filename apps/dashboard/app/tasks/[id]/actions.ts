@@ -4,10 +4,11 @@
 // IAP-protected; these actions additionally validate every input with zod
 // and only accept question ids present in the task's own job_spec.
 //
-// SAFETY: nothing here talks to any external job platform. Requeue/approve
-// go through OUR api service (API_BASE_URL, x-api-key auth), and the
-// approve route performs a dry-run only — payloads are constructed and
-// recorded, never sent to a real apply endpoint.
+// SAFETY: nothing here talks to any external job platform directly. Requeue/
+// approve go through OUR api service (API_BASE_URL, x-api-key auth). On the api
+// side, approve is a dry-run for greenhouse/lever/ashby (payload built and
+// recorded, never sent) and, for Workday, a real calypso fill that STOPS
+// before finalize — it never submits (finalize is separately gated).
 
 import { randomUUID } from 'node:crypto';
 import { normalizeLabel } from '@sower/answers';
@@ -360,6 +361,8 @@ const apiResponseSchema = z.object({
   state: z.string().optional(),
   skipped: z.boolean().optional(),
   dryRun: z.boolean().optional(),
+  mode: z.enum(['dry-run', 'workday-fill']).optional(),
+  note: z.string().optional(),
   payloadSummary: z
     .object({
       fieldCount: z.number(),
@@ -426,12 +429,18 @@ async function callApi(
   }
 
   if (action === 'approve') {
+    // The api returns an honest per-mode summary (dry-run vs a real Workday
+    // draft that stopped before submit). Prefer it; fall back for older apis.
+    const back = ` task is back in ${body.state ?? 'REVIEW'}.`;
+    if (body.note) {
+      return { ok: true, message: `${body.note}${back}` };
+    }
     const summary = body.payloadSummary
       ? ` — payload: ${body.payloadSummary.fieldCount} fields, ${body.payloadSummary.fileCount} files`
       : '';
     return {
       ok: true,
-      message: `dry-run submit recorded${summary}; no real submission was made. task is back in ${body.state ?? 'REVIEW'}.`,
+      message: `dry-run submit recorded${summary}; no real submission was made.${back}`,
     };
   }
 

@@ -162,7 +162,9 @@ async function handleComponent(
 
 /**
  * Approve button: run the exact same service fn as POST /tasks/:id/approve.
- * SAFETY: approveTask performs a DRY-RUN submit only (zero network I/O); the
+ * SAFETY: approveTask fills but never SUBMITS — a dry-run (zero network I/O)
+ * for greenhouse/lever/ashby, or a real Workday draft filled-then-STOPPED
+ * before finalize. The honest per-mode summary is in `outcome.note`; the
  * type-7 response edits the card in place, so no bot-token call is needed.
  */
 async function approveInteraction(
@@ -183,13 +185,8 @@ async function approveInteraction(
   if (outcome.kind === 'failed') {
     return ephemeral(`Approve failed: ${outcome.error}`);
   }
-  const { fieldCount, fileCount } = outcome.payloadSummary;
   return updateMessage(
-    notify.applyVerdict(
-      existingMessage(interaction),
-      'approved',
-      `dry-run submit recorded (${fieldCount} field(s), ${fileCount} file(s)); no real application was sent`,
-    ),
+    notify.applyVerdict(existingMessage(interaction), 'approved', outcome.note),
   );
 }
 
@@ -407,18 +404,22 @@ export async function postReviewApprovalCard(
 export async function markApprovalCardSubmitted(
   deps: Deps,
   approval: { channelId: string; messageId: string } | null,
-  summary: { fieldCount: number; fileCount: number },
+  outcome: { mode: 'dry-run' | 'workday-fill'; note: string },
 ): Promise<void> {
   const { config, notify } = deps;
   if (!config.DISCORD_ENABLED || !notify || !approval) {
     return;
   }
+  // Honest verdict per mode: a zero-I/O dry-run vs a real Workday draft that
+  // stopped before submit. The detail is the approve outcome's own summary.
+  const verdict =
+    outcome.mode === 'workday-fill' ? 'filled' : 'submitted-dryrun';
   try {
     await notify.updateApprovalCard(
       approval.channelId,
       approval.messageId,
-      'submitted-dryrun',
-      `dry-run submit recorded (${summary.fieldCount} field(s), ${summary.fileCount} file(s))`,
+      verdict,
+      outcome.note,
     );
   } catch (error) {
     console.warn('[sower] failed to update Discord approval card:', error);
