@@ -254,3 +254,53 @@ export const accounts = pgTable(
     uniqueIndex('accounts_platform_tenant_uq').on(table.platform, table.tenant),
   ],
 );
+
+/**
+ * Lifecycle of a per-tenant Workday browser session (the headful capture is the
+ * one local, human-in-the-loop step Workday needs):
+ * - 'requested': the dashboard asked for a session; waiting for the local agent.
+ * - 'capturing': the agent claimed it and opened a headful browser.
+ * - 'active': a session was captured, verified from the home IP, and vaulted at
+ *   accounts/workday/{tenant}/session.json.
+ * - 'failed': the capture verify failed / timed out (see `error`).
+ */
+export type WorkdaySessionStatus =
+  | 'requested'
+  | 'capturing'
+  | 'active'
+  | 'failed';
+
+/**
+ * Per-tenant Workday session state + the dashboard→agent request signal. The
+ * session cookies themselves live ONLY in the vault; this table is the
+ * DB-visible mirror the dashboard reads to show status and the agent claims work
+ * from. One row per tenant (upserted).
+ */
+export const workdaySessions = pgTable('workday_sessions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  tenant: text('tenant').notNull().unique(),
+  host: text('host').notNull(),
+  /** Careers/login URL the agent opens for the headful capture. */
+  loginUrl: text('login_url').notNull(),
+  status: text('status').$type<WorkdaySessionStatus>().notNull(),
+  requestedAt: timestamp('requested_at', { withTimezone: true }).defaultNow(),
+  capturedAt: timestamp('captured_at', { withTimezone: true }),
+  /** Conservative freshness horizon (~20 min) for the UI + re-capture prompts. */
+  expiresAt: timestamp('expires_at', { withTimezone: true }),
+  /** Populated on a failed capture. */
+  error: text('error'),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+});
+
+/**
+ * Liveness heartbeat for the always-on local capture agent(s). The agent pings
+ * periodically so the dashboard can show "agent last seen" — a dead daemon is
+ * then visible instead of silently never servicing a Start click. One row per
+ * named agent (upserted).
+ */
+export const agentHeartbeats = pgTable('agent_heartbeats', {
+  name: text('name').primaryKey(),
+  lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).defaultNow(),
+  /** Free-form status detail (e.g. 'idle', 'capturing caci'). */
+  detail: text('detail'),
+});

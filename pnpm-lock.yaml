@@ -23,6 +23,9 @@ importers:
 
   apps/api:
     dependencies:
+      '@sower/accounts':
+        specifier: workspace:*
+        version: link:../../packages/accounts
       '@sower/answers':
         specifier: workspace:*
         version: link:../../packages/answers

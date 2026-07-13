@@ -64,6 +64,13 @@
       "when": 1783953048403,
       "tag": "0008_outstanding_princess_powerful",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1783967216008,
+      "tag": "0009_narrow_boomerang",
+      "breakpoints": true
     }
   ]
 }

@@ -9,6 +9,13 @@ import { ingestJob } from './ingest.js';
 import { runIngestionPoll } from './ingest-poll.js';
 import { requestOtp, submitOtp } from './otp-actions.js';
 import { processTask } from './process.js';
+import {
+  claimSessionRequest,
+  completeSessionCapture,
+  failSessionCapture,
+  recordAgentHeartbeat,
+  startSessionCapture,
+} from './sessions-actions.js';
 import { approveTask, requeueTask } from './task-actions.js';
 import type { Deps } from './types.js';
 
@@ -27,6 +34,37 @@ const taskParamsSchema = z.object({
 
 const otpBodySchema = z.object({
   code: z.string().min(4).max(20),
+});
+
+const tenantParamsSchema = z.object({
+  tenant: z.string().min(1).max(120),
+});
+
+// The captured session the local agent reports back (cookies/CSRF are secrets —
+// stored ONLY in the vault by completeSessionCapture, never in the DB or logs).
+const sessionPayloadSchema = z.object({
+  host: z.string().min(1),
+  tenant: z.string().min(1),
+  cookie: z.string().min(1),
+  csrfToken: z.string().min(1),
+  capturedAt: z.string().optional(),
+  fingerprint: z
+    .object({
+      userAgent: z.string().optional(),
+      chromeMajor: z.number().optional(),
+      acceptLanguage: z.string().optional(),
+      secChUa: z.string().optional(),
+    })
+    .optional(),
+});
+
+const sessionFailBodySchema = z.object({
+  error: z.string().min(1).max(4000),
+});
+
+const heartbeatBodySchema = z.object({
+  name: z.string().min(1).max(120),
+  detail: z.string().max(200).optional(),
 });
 
 /** Constant-time string comparison (length-guarded). */
@@ -296,6 +334,107 @@ export function buildServer(deps: Deps): FastifyInstance {
   // this path so the existing Cloud Scheduler job needs no re-point.
   app.post('/sources/simplify/poll', async () => {
     return runIngestionPoll(deps);
+  });
+
+  // --- Workday session bridge (dashboard <-> local headful capture agent) ---
+
+  // Request a headful browser-session capture for a parked Workday task's
+  // tenant. The local agent picks it up; nothing headful runs in the cloud.
+  app.post('/tasks/:id/start', async (request, reply) => {
+    const params = taskParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid task id', issues: params.error.issues });
+    }
+    const outcome = await startSessionCapture(deps, params.data.id);
+    if (outcome.kind === 'not_found') {
+      return reply.code(404).send({ error: 'task not found' });
+    }
+    if (outcome.kind === 'unsupported') {
+      return reply.code(400).send({
+        error: `start is Workday-only; task platform is '${outcome.platform}'`,
+      });
+    }
+    if (outcome.kind === 'no_storage') {
+      return reply.code(503).send({
+        error: 'vault storage not configured; cannot provision account',
+      });
+    }
+    return reply
+      .code(200)
+      .send({ tenant: outcome.tenant, status: outcome.status });
+  });
+
+  // Local agent: claim one pending capture request (returns the credential to
+  // pre-fill). Empty when nothing is pending.
+  app.post('/sessions/claim', async (_request, reply) => {
+    const outcome = await claimSessionRequest(deps);
+    if (outcome.kind === 'empty') {
+      return reply.code(200).send({ empty: true });
+    }
+    return reply.code(200).send({
+      tenant: outcome.tenant,
+      host: outcome.host,
+      loginUrl: outcome.loginUrl,
+      email: outcome.email,
+      password: outcome.password,
+    });
+  });
+
+  // Local agent: report a captured+verified session. Stored in the vault and the
+  // tenant's parked tasks are re-enqueued.
+  app.post('/sessions/:tenant/complete', async (request, reply) => {
+    const params = tenantParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid tenant', issues: params.error.issues });
+    }
+    const body = sessionPayloadSchema.safeParse(request.body);
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid session', issues: body.error.issues });
+    }
+    const result = await completeSessionCapture(
+      deps,
+      params.data.tenant,
+      body.data,
+    );
+    return reply
+      .code(200)
+      .send({ status: 'active', requeued: result.requeued });
+  });
+
+  // Local agent: report a failed capture (verify failed / timed out).
+  app.post('/sessions/:tenant/fail', async (request, reply) => {
+    const params = tenantParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid tenant', issues: params.error.issues });
+    }
+    const body = sessionFailBodySchema.safeParse(request.body);
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid body', issues: body.error.issues });
+    }
+    await failSessionCapture(deps, params.data.tenant, body.data.error);
+    return reply.code(200).send({ status: 'failed' });
+  });
+
+  // Local agent liveness ping (dashboard shows "agent last seen").
+  app.post('/sessions/heartbeat', async (request, reply) => {
+    const body = heartbeatBodySchema.safeParse(request.body);
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid body', issues: body.error.issues });
+    }
+    await recordAgentHeartbeat(deps, body.data.name, body.data.detail);
+    return reply.code(200).send({ ok: true });
   });
 
   // /answer-library CRUD (company-scoped answer library; x-api-key like all
