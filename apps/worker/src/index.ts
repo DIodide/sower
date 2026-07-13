@@ -55,18 +55,6 @@ export {
   type WorkdayStep,
 } from './workday/selectors.js';
 export {
-  createWorkdayWorker,
-  type OpenWorkdayPage,
-  type WorkdayPageSession,
-  type WorkdayWorkerDeps,
-} from './workday/worker.js';
-export {
-  type BrowserCookie,
-  captureWorkdaySession,
-  isSessionFresh,
-  NotAuthenticatedSessionError,
-} from './workday/session-capture.js';
-export {
   type BrowserLogin,
   type BrowserLoginResult,
   type CaptureInput,
@@ -75,7 +63,19 @@ export {
   SessionVerificationFailedError,
 } from './workday/session-broker.js';
 export {
+  type BrowserCookie,
+  captureWorkdaySession,
+  isSessionFresh,
+  NotAuthenticatedSessionError,
+} from './workday/session-capture.js';
+export {
   loadWorkdaySession,
   saveWorkdaySession,
   sessionStoragePath,
 } from './workday/session-store.js';
+export {
+  createWorkdayWorker,
+  type OpenWorkdayPage,
+  type WorkdayPageSession,
+  type WorkdayWorkerDeps,
+} from './workday/worker.js';
