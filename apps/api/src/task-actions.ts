@@ -7,7 +7,11 @@ import type {
 } from '@sower/core';
 import { transition } from '@sower/core';
 import { applicationTasks, documents, events, jobs } from '@sower/db';
-import type { CalypsoFillResult, SubmitFile } from '@sower/platforms';
+import type {
+  CalypsoFillResult,
+  CalypsoResume,
+  SubmitFile,
+} from '@sower/platforms';
 import {
   CalypsoClient,
   fillViaCalypso,
@@ -15,7 +19,7 @@ import {
   loadWorkdaySession,
   workdayJobSlug,
 } from '@sower/platforms';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import { createTaskRecorder } from './recorder.js';
 import { transitionTask } from './transitions.js';
 import type { Db, Deps } from './types.js';
@@ -197,12 +201,14 @@ export async function approveTask(
         resolution,
       );
       const answered = fill.questionnaire?.answered ?? 0;
+      const resumeAttached = fill.sectionsFilled.includes('resume');
       currentState = await transitionTask(db, taskId, currentState, 'FILLED', {
         dryRun: false,
         workday: {
           jobApplicationId: fill.jobApplicationId,
           sectionsFilled: fill.sectionsFilled,
           sectionErrors: fill.sectionErrors,
+          resumeAttached,
           answered,
           skippedRequired: fill.questionnaire?.skippedRequired ?? 0,
         },
@@ -212,8 +218,11 @@ export async function approveTask(
         state: currentState,
         mode: 'workday-fill',
         dryRun: false,
-        payloadSummary: { fieldCount: answered, fileCount: 0 },
-        note: `Workday draft filled: ${fill.sectionsFilled.length} info section(s), ${answered} question(s) answered — stopped before submit (finalize is separately gated).`,
+        payloadSummary: {
+          fieldCount: answered,
+          fileCount: resumeAttached ? 1 : 0,
+        },
+        note: `Workday draft filled: ${fill.sectionsFilled.length} info section(s)${resumeAttached ? ' incl. résumé' : ''}, ${answered} question(s) answered — stopped before submit (finalize is separately gated).`,
         approval,
       };
     }
@@ -307,6 +316,10 @@ async function fillWorkdayOnApprove(
     }
   }
 
+  // The résumé is a Workday "My Information" attachment, NOT a questionnaire
+  // question, so it isn't in the resolution — load the stored résumé directly.
+  const resume = await loadResumeForUpload(deps.db, deps.storage);
+
   const recorder = createTaskRecorder(deps.db, taskId);
   const client = new CalypsoClient(session, { recorder });
   return fillViaCalypso(client, {
@@ -318,9 +331,41 @@ async function fillWorkdayOnApprove(
       email: profile.email,
       phone: profile.phone,
     },
+    resume,
     // Fill exactly what was reviewed — no live re-resolution.
     resolveQuestionnaireAnswers: () => valueById,
   });
+}
+
+/**
+ * Load the user's most recent stored résumé (bytes from the vault) for a
+ * Workday attachment, or undefined when none is stored (the fill then skips the
+ * résumé section). Single-user system: the newest kind='resume' document wins.
+ */
+async function loadResumeForUpload(
+  db: Db,
+  storage: NonNullable<Deps['storage']>,
+): Promise<CalypsoResume | undefined> {
+  const rows = await db
+    .select({
+      filename: documents.filename,
+      storagePath: documents.storagePath,
+      contentType: documents.contentType,
+    })
+    .from(documents)
+    .where(eq(documents.kind, 'resume'))
+    .orderBy(desc(documents.createdAt))
+    .limit(1);
+  const doc = rows[0];
+  if (!doc) {
+    return undefined;
+  }
+  const bytes = await storage.get(doc.storagePath);
+  return {
+    fileName: doc.filename,
+    contentType: doc.contentType ?? 'application/pdf',
+    bytes,
+  };
 }
 
 /**

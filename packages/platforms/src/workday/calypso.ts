@@ -141,6 +141,96 @@ export class CalypsoClient {
   }
 
   /**
+   * POST a multipart body (file upload). Unlike `call`, it does NOT set a
+   * content-type header — fetch derives `multipart/form-data; boundary=…` from
+   * the FormData itself. Same session auth + dead-session handling as `call`.
+   */
+  private async callMultipart(
+    phase: string,
+    url: string,
+    form: FormData,
+  ): Promise<unknown> {
+    const response = await recordedFetch(
+      this.recorder,
+      phase,
+      url,
+      {
+        method: 'POST',
+        headers: {
+          cookie: this.session.cookie,
+          'x-calypso-csrf-token': this.session.csrfToken,
+          accept: 'application/json',
+        },
+        body: form,
+        signal: AbortSignal.timeout(30_000),
+      },
+      this.fetchImpl,
+    );
+    if (response.status === 401 || response.status === 403) {
+      throw new WorkdaySessionExpiredError(response.status, url);
+    }
+    if (!response.ok) {
+      throw new Error(
+        `calypso multipart POST ${url} failed with status ${response.status}`,
+      );
+    }
+    const text = await response.text();
+    return text ? JSON.parse(text) : {};
+  }
+
+  /**
+   * Attach a résumé to the application, in the two-step calypso flow observed
+   * live (datasite HAR):
+   *   1. multipart POST the bytes to `common/{tenant}/attachments` (field
+   *      `file`) -> the attachment descriptor `{ file: "oms-attachments/{uuid}",
+   *      … }`;
+   *   2. JSON POST `{ attachments: [<descriptor>] }` to the application's
+   *      `resumeattachments` section, referencing the uploaded file.
+   * Never submits. Throws WorkdaySessionExpiredError on a dead session; a
+   * missing file ref in the step-1 response throws a clear error.
+   */
+  async uploadResume(
+    jobApplicationId: string,
+    resume: { fileName: string; contentType: string; bytes: Uint8Array },
+  ): Promise<void> {
+    // Step 1: upload the bytes; the response carries the oms attachment ref.
+    const uploadUrl = `${this.base}/wday/calypso/cxs/common/${this.session.tenant}/attachments`;
+    const form = new FormData();
+    // Copy into a fresh ArrayBuffer-backed view so the Blob part is typed
+    // ArrayBuffer (not the generic ArrayBufferLike) — resume-sized copy is
+    // negligible.
+    form.append(
+      'file',
+      new Blob([Uint8Array.from(resume.bytes)], { type: resume.contentType }),
+      resume.fileName,
+    );
+    const descriptor = (await this.callMultipart(
+      'resume:upload',
+      uploadUrl,
+      form,
+    )) as { file?: string; descriptor?: string; id?: string };
+    const fileRef = descriptor.file ?? descriptor.descriptor ?? descriptor.id;
+    if (typeof fileRef !== 'string' || fileRef.length === 0) {
+      throw new Error(
+        'calypso resume upload returned no attachment file reference',
+      );
+    }
+
+    // Step 2: associate the uploaded file with the application's resume section.
+    const attachUrl = `${this.base}/wday/calypso/cxs/jobapplication/${this.session.tenant}/jobapplication/${jobApplicationId}/resumeattachments`;
+    await this.call('resume:attach', 'POST', attachUrl, {
+      attachments: [
+        {
+          fileName: resume.fileName,
+          fileLength: resume.bytes.byteLength,
+          contentType: { id: `Content_Type_ID=${resume.contentType}` },
+          file: fileRef,
+        },
+      ],
+    });
+  }
+
+  /**
    * Start a draft application for a job posting slug (the
    * `{title-slug}_{reqId}` last segment of the job's externalPath). Returns the
    * new jobApplicationId. Does NOT submit.

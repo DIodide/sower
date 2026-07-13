@@ -43,6 +43,15 @@ export interface CalypsoFillClient {
     jobApplicationId: string,
     questionnaireId: string,
   ): Promise<WorkdayQuestionnaireField[]>;
+  /** Upload + attach a résumé (two-step calypso attachments flow). */
+  uploadResume(jobApplicationId: string, resume: CalypsoResume): Promise<void>;
+}
+
+/** A résumé to attach: filename, MIME type, and the raw bytes from the vault. */
+export interface CalypsoResume {
+  fileName: string;
+  contentType: string;
+  bytes: Uint8Array;
 }
 
 /** The "My Information" fields built from the applicant's profile. */
@@ -58,6 +67,8 @@ export interface CalypsoFillInput {
   /** From the public cxs job detail; when absent the questionnaire is skipped. */
   questionnaireId?: string | null;
   applicant: CalypsoApplicant;
+  /** The résumé to attach; when absent the résumé section is skipped. */
+  resume?: CalypsoResume;
   /**
    * Produce the answer for each questionnaire field id, given the fetched
    * fields (which carry the option GUIDs). Only string answers feed the
@@ -121,6 +132,21 @@ export async function fillViaCalypso(
   await fill('emailaddress', buildEmailSection(input.applicant.email));
   await fill('phonenumber', buildPhoneSection(input.applicant.phone));
   await client.validate(jobApplicationId).catch(() => {});
+
+  // --- Résumé (My Information attachment). Best-effort like the sections. ---
+  if (input.resume) {
+    const resume = input.resume;
+    try {
+      await client.uploadResume(jobApplicationId, resume);
+      sectionsFilled.push('resume');
+      await client.validate(jobApplicationId).catch(() => {});
+    } catch (error) {
+      sectionErrors.push({
+        section: 'resume',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 
   // --- Application Questions. ---
   let questionnaire: CalypsoFillResult['questionnaire'] = null;

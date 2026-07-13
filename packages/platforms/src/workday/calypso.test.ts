@@ -121,6 +121,92 @@ describe('CalypsoClient — transport', () => {
   });
 });
 
+describe('CalypsoClient.uploadResume — two-step attachment flow', () => {
+  it('multipart-uploads the bytes then JSON-attaches with the returned file ref', async () => {
+    const fetchMock = vi.fn(async (u: string, _i?: RequestInit) => {
+      if (u.endsWith('/common/datasite/attachments')) {
+        return jsonResponse({
+          file: 'oms-attachments/ref-1',
+          fileName: 'r.pdf',
+          fileLength: 3,
+          contentType: { id: 'Content_Type_ID=application/pdf' },
+        });
+      }
+      return jsonResponse('', 200); // resumeattachments echoes empty
+    });
+    const client = new CalypsoClient(session, {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.uploadResume('JAID-9', {
+      fileName: 'r.pdf',
+      contentType: 'application/pdf',
+      bytes: new Uint8Array([1, 2, 3]),
+    });
+
+    // Step 1: multipart POST to common/{tenant}/attachments — NO json
+    // content-type (fetch derives the boundary), FormData body, session auth.
+    const [u1, i1] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(u1).toBe(
+      'https://datasite.wd1.myworkdayjobs.com/wday/calypso/cxs/common/datasite/attachments',
+    );
+    expect(i1.method).toBe('POST');
+    const h1 = i1.headers as Record<string, string>;
+    expect(h1['content-type']).toBeUndefined();
+    expect(h1['x-calypso-csrf-token']).toBe('tok');
+    expect(i1.body).toBeInstanceOf(FormData);
+
+    // Step 2: JSON attach to the application's resumeattachments, referencing
+    // the oms file ref returned by step 1 (verbatim body shape from the HAR).
+    const [u2, i2] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(u2).toBe(
+      'https://datasite.wd1.myworkdayjobs.com/wday/calypso/cxs/jobapplication/datasite/jobapplication/JAID-9/resumeattachments',
+    );
+    expect(JSON.parse(i2.body as string)).toEqual({
+      attachments: [
+        {
+          fileName: 'r.pdf',
+          fileLength: 3,
+          contentType: { id: 'Content_Type_ID=application/pdf' },
+          file: 'oms-attachments/ref-1',
+        },
+      ],
+    });
+  });
+
+  it('throws when the upload response carries no file reference', async () => {
+    const fetchMock = vi.fn(async (_u: string, _i?: RequestInit) =>
+      jsonResponse({ nope: true }),
+    );
+    const client = new CalypsoClient(session, {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+    await expect(
+      client.uploadResume('JAID-9', {
+        fileName: 'r.pdf',
+        contentType: 'application/pdf',
+        bytes: new Uint8Array([1]),
+      }),
+    ).rejects.toThrow(/no attachment file reference/);
+  });
+
+  it('throws WorkdaySessionExpiredError on a 401 upload', async () => {
+    const fetchMock = vi.fn(async (_u: string, _i?: RequestInit) =>
+      jsonResponse('', 401),
+    );
+    const client = new CalypsoClient(session, {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+    });
+    await expect(
+      client.uploadResume('JAID-9', {
+        fileName: 'r.pdf',
+        contentType: 'application/pdf',
+        bytes: new Uint8Array([1]),
+      }),
+    ).rejects.toBeInstanceOf(WorkdaySessionExpiredError);
+  });
+});
+
 describe('CalypsoClient.finalize — double gate', () => {
   it('throws (and never calls fetch) when SOWER_SUBMIT_ENABLED is not "true"', async () => {
     const fetchMock = vi.fn(async (_u: string, _i?: RequestInit) =>

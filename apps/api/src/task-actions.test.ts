@@ -639,12 +639,20 @@ describe('POST /tasks/:id/approve (workday calypso fill)', () => {
     };
   }
 
-  /** A vault whose session read is present (or absent when session === null). */
-  function sessionVault(session: unknown | null) {
-    const buf = Buffer.from(session === null ? '' : JSON.stringify(session));
+  /**
+   * A path-aware vault: the session.json read is present (or absent when
+   * session === null); any other path (the résumé) returns resumeBytes.
+   */
+  function sessionVault(session: unknown | null, resumeBytes?: Uint8Array) {
     return {
-      exists: vi.fn(async () => session !== null),
-      get: vi.fn(async () => buf),
+      exists: vi.fn(async (path: string) =>
+        path.includes('session.json') ? session !== null : true,
+      ),
+      get: vi.fn(async (path: string) =>
+        path.includes('session.json')
+          ? Buffer.from(session === null ? '' : JSON.stringify(session))
+          : Buffer.from(resumeBytes ?? new Uint8Array()),
+      ),
       put: vi.fn(async () => {}),
     } as unknown as NonNullable<Deps['storage']>;
   }
@@ -675,6 +683,17 @@ describe('POST /tasks/:id/approve (workday calypso fill)', () => {
       }
       if (url.endsWith('/jobapplications')) {
         return new Response(JSON.stringify({ id: 'JA-99' }), { status: 200 });
+      }
+      if (url.endsWith('/attachments')) {
+        return new Response(
+          JSON.stringify({
+            file: 'oms-attachments/ref-9',
+            fileName: 'resume.pdf',
+            fileLength: 4,
+            contentType: { id: 'Content_Type_ID=application/pdf' },
+          }),
+          { status: 200 },
+        );
       }
       return new Response('{}', { status: 200 });
     }) as unknown as typeof fetch);
@@ -730,6 +749,52 @@ describe('POST /tasks/:id/approve (workday calypso fill)', () => {
     expect(filled.data).toMatchObject({
       dryRun: false,
       workday: { jobApplicationId: 'JA-99', answered: 1 },
+    });
+  });
+
+  it('attaches the stored résumé via the two-step calypso attachments flow', async () => {
+    const state = workdayState();
+    // The user's stored résumé (kind='resume') — not a questionnaire question.
+    state.documents = [
+      {
+        id: 'doc-r',
+        kind: 'resume',
+        filename: 'resume.pdf',
+        storagePath: 'documents/doc-r/resume.pdf',
+        contentType: 'application/pdf',
+        createdAt: '2026-07-11T00:00:00.000Z',
+      },
+    ];
+    const { calls } = mockCalypsoFetch();
+    const { deps } = createDeps(state, {
+      config: workdayConfig,
+      storage: sessionVault(SESSION, new Uint8Array([1, 2, 3, 4])),
+    });
+    const app = buildServer(deps);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/tasks/${TASK_ID}/approve`,
+      headers: { 'x-api-key': 'test-key' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.mode).toBe('workday-fill');
+    expect(body.note).toMatch(/incl\. résumé/);
+    expect(body.payloadSummary.fileCount).toBe(1);
+
+    // Both attachment steps ran (multipart upload + JSON attach)...
+    expect(calls.some((c) => c.url.endsWith('/common/caci/attachments'))).toBe(
+      true,
+    );
+    expect(calls.some((c) => c.url.endsWith('/resumeattachments'))).toBe(true);
+    // ...still never finalize.
+    expect(calls.some((c) => c.url.includes('/finalize'))).toBe(false);
+
+    const filled = state.events[1] as { data?: Record<string, unknown> };
+    expect(filled.data).toMatchObject({
+      workday: { resumeAttached: true },
     });
   });
 

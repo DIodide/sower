@@ -31,6 +31,7 @@ export {
   type CalypsoFillClient,
   type CalypsoFillInput,
   type CalypsoFillResult,
+  type CalypsoResume,
   fillViaCalypso,
 } from './workday/calypso-fill.js';
 export {

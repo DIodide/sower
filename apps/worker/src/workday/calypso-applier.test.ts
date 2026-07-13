@@ -54,6 +54,7 @@ function fakeClient(
     }),
     validate: vi.fn(async () => {}),
     getQuestionnaireFields: vi.fn(async () => over.fields ?? []),
+    uploadResume: vi.fn(async () => {}),
     ...over,
   };
 }
