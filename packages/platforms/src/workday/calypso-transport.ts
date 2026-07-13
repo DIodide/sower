@@ -29,6 +29,38 @@ export interface ImpersonateOptions {
 
 const DEFAULT_IMPERSONATE = 'chrome131';
 const DEFAULT_BINARY = 'curl-impersonate-chrome';
+
+/** Chrome majors curl-impersonate ships presets for (ascending). */
+const SUPPORTED_CHROME_TARGETS = [
+  99, 100, 101, 104, 107, 110, 116, 119, 120, 123, 124, 131, 133,
+] as const;
+
+/** Extract the Chrome major version from a User-Agent, or undefined. */
+export function chromeMajorFromUserAgent(
+  userAgent: string | undefined,
+): number | undefined {
+  const match = userAgent?.match(/Chrome\/(\d+)\./);
+  return match?.[1] ? Number.parseInt(match[1], 10) : undefined;
+}
+
+/**
+ * Pick the curl-impersonate target for a captured Chrome major: the newest
+ * supported preset that is <= the captured version (so the impersonated
+ * fingerprint never claims to be newer than the browser we captured), falling
+ * back to the newest preset when the version is unknown or older than all.
+ */
+export function chromeImpersonateTarget(chromeMajor?: number): string {
+  if (chromeMajor === undefined) {
+    return DEFAULT_IMPERSONATE;
+  }
+  let best: number = SUPPORTED_CHROME_TARGETS[0];
+  for (const target of SUPPORTED_CHROME_TARGETS) {
+    if (target <= chromeMajor) {
+      best = target;
+    }
+  }
+  return `chrome${best}`;
+}
 /** Marker separating the body from the trailing status curl -w appends. */
 const STATUS_MARKER = '\n__SOWER_HTTP_STATUS__';
 

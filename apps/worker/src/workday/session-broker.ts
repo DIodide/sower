@@ -1,4 +1,8 @@
-import { CalypsoClient, type WorkdaySession } from '@sower/platforms';
+import {
+  CalypsoClient,
+  type WorkdaySession,
+  type WorkdaySessionFingerprint,
+} from '@sower/platforms';
 import {
   type BrowserCookie,
   captureWorkdaySession,
@@ -21,6 +25,8 @@ import {
 /** What the residential-browser login returns after a completed sign-in. */
 export interface BrowserLoginResult {
   cookies: BrowserCookie[];
+  /** The capturing browser's fingerprint, for HTTP-replay impersonation. */
+  fingerprint?: WorkdaySessionFingerprint;
 }
 
 /** Drives the login in a residential browser and returns its cookies. */
@@ -76,7 +82,7 @@ export class SessionBroker {
    * (SessionVerificationFailedError).
    */
   async capture(input: CaptureInput): Promise<WorkdaySession> {
-    const { cookies } = await this.deps.login(input);
+    const { cookies, fingerprint } = await this.deps.login(input);
 
     const now = this.deps.now ?? (() => new Date().toISOString());
     // Throws NotAuthenticatedSessionError if the login did not complete.
@@ -85,6 +91,7 @@ export class SessionBroker {
       input.tenant,
       cookies,
       now(),
+      fingerprint,
     );
 
     const verify =

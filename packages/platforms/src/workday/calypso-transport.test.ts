@@ -2,9 +2,38 @@ import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildCurlImpersonateArgs,
+  chromeImpersonateTarget,
+  chromeMajorFromUserAgent,
   createCurlImpersonateFetch,
   parseCurlOutput,
 } from './calypso-transport.js';
+
+describe('chromeMajorFromUserAgent', () => {
+  it('extracts the Chrome major version', () => {
+    expect(
+      chromeMajorFromUserAgent(
+        'Mozilla/5.0 (Macintosh) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      ),
+    ).toBe(131);
+  });
+  it('returns undefined for a non-Chrome / missing UA', () => {
+    expect(chromeMajorFromUserAgent(undefined)).toBeUndefined();
+    expect(chromeMajorFromUserAgent('Firefox/128.0')).toBeUndefined();
+  });
+});
+
+describe('chromeImpersonateTarget', () => {
+  it('picks the newest supported preset <= the captured major', () => {
+    expect(chromeImpersonateTarget(131)).toBe('chrome131');
+    expect(chromeImpersonateTarget(132)).toBe('chrome131'); // never claim newer than a preset
+    expect(chromeImpersonateTarget(121)).toBe('chrome120');
+    expect(chromeImpersonateTarget(140)).toBe('chrome133');
+  });
+  it('falls back to the default when unknown or ancient', () => {
+    expect(chromeImpersonateTarget(undefined)).toBe('chrome131');
+    expect(chromeImpersonateTarget(50)).toBe('chrome99');
+  });
+});
 
 describe('buildCurlImpersonateArgs', () => {
   it('defaults to chrome131, GET, and appends the status writeout + url last', () => {

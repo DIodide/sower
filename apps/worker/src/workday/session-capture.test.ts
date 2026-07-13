@@ -50,6 +50,32 @@ describe('captureWorkdaySession', () => {
       captureWorkdaySession('h', 't', cookies, '2026-07-13T00:00:00Z'),
     ).toThrow(/PLAY_SESSION or CALYPSO_SESSION/);
   });
+
+  it('attaches the browser fingerprint when provided (for replay impersonation)', () => {
+    const s = captureWorkdaySession(
+      'h',
+      't',
+      authedCookies,
+      '2026-07-13T00:00:00.000Z',
+      { userAgent: 'Chrome/131', chromeMajor: 131, acceptLanguage: 'en-US' },
+    );
+    expect(s.fingerprint).toEqual({
+      userAgent: 'Chrome/131',
+      chromeMajor: 131,
+      acceptLanguage: 'en-US',
+    });
+  });
+
+  it('omits an empty fingerprint object', () => {
+    const s = captureWorkdaySession(
+      'h',
+      't',
+      authedCookies,
+      '2026-07-13T00:00:00.000Z',
+      {},
+    );
+    expect(s.fingerprint).toBeUndefined();
+  });
 });
 
 describe('isSessionFresh', () => {

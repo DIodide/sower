@@ -24,6 +24,7 @@ export {
   WorkdayFinalizeGateError,
   type WorkdaySession,
   WorkdaySessionExpiredError,
+  type WorkdaySessionFingerprint,
 } from './workday/calypso.js';
 export {
   buildEmailSection,
@@ -33,6 +34,8 @@ export {
 } from './workday/calypso-sections.js';
 export {
   buildCurlImpersonateArgs,
+  chromeImpersonateTarget,
+  chromeMajorFromUserAgent,
   createCurlImpersonateFetch,
   type ImpersonateOptions,
   parseCurlOutput,

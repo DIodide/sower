@@ -74,6 +74,10 @@ export {
   sessionStoragePath,
 } from './workday/session-store.js';
 export {
+  createStealthBrowserLogin,
+  type StealthLoginDeps,
+} from './workday/stealth-login.js';
+export {
   createWorkdayWorker,
   type OpenWorkdayPage,
   type WorkdayPageSession,

@@ -10,6 +10,7 @@
     "start": "tsx src/main.ts",
     "recon": "tsx scripts/workday-recon.ts",
     "fill": "tsx scripts/workday-fill.ts",
+    "capture-session": "tsx scripts/workday-session-capture.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

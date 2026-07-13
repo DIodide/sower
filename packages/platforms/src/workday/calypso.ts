@@ -25,6 +25,23 @@ export interface WorkdaySession {
   csrfToken: string;
   /** ISO timestamp the session was captured (optional; for expiry heuristics). */
   capturedAt?: string;
+  /**
+   * The capturing browser's fingerprint, so the HTTP replay can impersonate the
+   * SAME Chrome (TLS target + UA/client-hint headers) — a UA/JA3 contradiction
+   * is itself a bot signal. Absent on sessions captured before this existed.
+   */
+  fingerprint?: WorkdaySessionFingerprint;
+}
+
+export interface WorkdaySessionFingerprint {
+  /** navigator.userAgent from the capturing browser. */
+  userAgent?: string;
+  /** Chrome major version (drives the curl-impersonate target). */
+  chromeMajor?: number;
+  /** Accept-Language the browser sent. */
+  acceptLanguage?: string;
+  /** The sec-ch-ua client hint string. */
+  secChUa?: string;
 }
 
 /** Thrown when a calypso call comes back unauthenticated (session expired). */

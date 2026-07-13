@@ -1,4 +1,7 @@
-import type { WorkdaySession } from '@sower/platforms';
+import type {
+  WorkdaySession,
+  WorkdaySessionFingerprint,
+} from '@sower/platforms';
 
 /**
  * Turning a browser's cookies into a replayable Workday session.
@@ -45,6 +48,7 @@ export function captureWorkdaySession(
   tenant: string,
   cookies: BrowserCookie[],
   capturedAt: string,
+  fingerprint?: WorkdaySessionFingerprint,
 ): WorkdaySession {
   const byName = new Map(cookies.map((c) => [c.name, c.value] as const));
 
@@ -64,7 +68,17 @@ export function captureWorkdaySession(
     .map((c) => `${c.name}=${c.value}`)
     .join('; ');
 
-  return { host, tenant, cookie, csrfToken: csrf, capturedAt };
+  const session: WorkdaySession = {
+    host,
+    tenant,
+    cookie,
+    csrfToken: csrf,
+    capturedAt,
+  };
+  if (fingerprint && Object.keys(fingerprint).length > 0) {
+    session.fingerprint = fingerprint;
+  }
+  return session;
 }
 
 /**
