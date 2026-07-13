@@ -110,9 +110,32 @@ export function buildQuestionnaireResolution(
   fields: WorkdayQuestionnaireField[],
   valueByQuestionId: Record<string, string | undefined>,
 ): QuestionnaireResolution {
+  // Which option GUID each choice field resolved to — used to decide whether a
+  // conditional (branch) field is actually revealed.
+  const chosenOptionId = new Map<string, string>();
+  for (const field of fields) {
+    if (field.control === 'select' && field.options) {
+      const value = valueByQuestionId[field.id];
+      const option =
+        value === undefined ? undefined : matchOption(field.options, value);
+      if (option) {
+        chosenOptionId.set(field.id, option.id);
+      }
+    }
+  }
+
   const answers: QuestionnaireAnswer[] = [];
   const skipped: WorkdayQuestionnaireField[] = [];
   for (const field of fields) {
+    // A conditional field whose trigger answer was NOT chosen is not
+    // applicable — neither answered nor counted as a skip.
+    if (
+      field.branchTrigger &&
+      chosenOptionId.get(field.branchTrigger.questionId) !==
+        field.branchTrigger.answerId
+    ) {
+      continue;
+    }
     const value = valueByQuestionId[field.id];
     const answer =
       value === undefined ? null : resolveQuestionnaireAnswer(field, value);

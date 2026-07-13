@@ -49,7 +49,9 @@ export {
   type WorkdayJobUrlParts,
 } from './workday/index.js';
 export {
+  type BranchTrigger,
   parseQuestionnaireDefinition,
+  parseWorkdayQuestionnaire,
   type WorkdayQuestionnaireField,
   type WorkdayQuestionOption,
 } from './workday/questionnaire.js';

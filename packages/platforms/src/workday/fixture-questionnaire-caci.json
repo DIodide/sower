@@ -1,0 +1,375 @@
+{
+    "id": "cabee52113e4100107ab21f4851f0000",
+    "questions": [
+        {
+            "id": "cabee52113e4100107ab2328610e0002",
+            "body": "Are you a U.S. Person?  This includes a U.S. Citizen.  It also includes a lawful permanent resident as defined by 8 U.S.C. 1101(a)(20) or who is a protected individual as defined by 8 U.S.C. 324b(a)(3). It does not include any foreign person as defined in 22 CFR 120.16.",
+            "order": "c",
+            "possibleAnswers": [
+                {
+                    "id": "ca4e30f2955901bb987d6239f6013691",
+                    "branchingQuestion": {
+                        "id": "cabee52113e4100107ab2328610e0005",
+                        "body": "For purposes of obtaining a U.S. security clearance, are you a U.S. citizen?",
+                        "order": "c.a",
+                        "possibleAnswers": [
+                            {
+                                "id": "41acee1d0fa701dd5c2a35ad535ce924",
+                                "answerText": "Yes",
+                                "order": "a"
+                            },
+                            {
+                                "id": "41acee1d0fa701e860a335ad535cea24",
+                                "answerText": "No",
+                                "order": "b"
+                            },
+                            {
+                                "id": "41acee1d0fa7010722af35ad535ceb24",
+                                "answerText": "I choose not to disclose",
+                                "order": "c"
+                            }
+                        ],
+                        "required": true,
+                        "type": {
+                            "id": "c4d9bd57996c10002583f04b9fc30042",
+                            "descriptor": "Multiple Choice - Single Select"
+                        }
+                    },
+                    "answerText": "Yes",
+                    "order": "a"
+                },
+                {
+                    "id": "ca4e30f29559012ea9946239f6013791",
+                    "answerText": "No",
+                    "order": "b"
+                },
+                {
+                    "id": "ca4e30f2955901e431aa6239f6013891",
+                    "answerText": "I choose not to disclose",
+                    "order": "c"
+                }
+            ],
+            "required": true,
+            "type": {
+                "id": "c4d9bd57996c10002583f04b9fc30042",
+                "descriptor": "Multiple Choice - Single Select"
+            }
+        },
+        {
+            "id": "cabee52113e4100107ab228e7d000003",
+            "body": "Have you previously worked for CACI (including subsidiaries or affiliates)?",
+            "order": "b",
+            "possibleAnswers": [
+                {
+                    "id": "f6c90068b151019460c4d4b0d566a828",
+                    "answerText": "Yes",
+                    "order": "a"
+                },
+                {
+                    "id": "f6c90068b15101304ed6d4b0d566a928",
+                    "answerText": "No",
+                    "order": "b"
+                }
+            ],
+            "required": true,
+            "type": {
+                "id": "c4d9bd57996c10002583f04b9fc30042",
+                "descriptor": "Multiple Choice - Single Select"
+            }
+        },
+        {
+            "id": "cabee52113e4100109523f5ebb050000",
+            "body": "<p>Are you a current employee at CACI?  <span style=\"color:#000000\">If yes, do not apply here. Instead, apply through CACI\u2019s Internal Career Hub.</span></p>",
+            "order": "a",
+            "possibleAnswers": [
+                {
+                    "id": "dfdabfef208a100107e3ae8118e60000",
+                    "answerText": "Yes",
+                    "order": "a"
+                },
+                {
+                    "id": "dfdabfef208a100107e3af1acd4d0000",
+                    "answerText": "No",
+                    "order": "b"
+                }
+            ],
+            "required": true,
+            "type": {
+                "id": "c4d9bd57996c10002583f04b9fc30042",
+                "descriptor": "Multiple Choice - Single Select"
+            }
+        },
+        {
+            "id": "cabee52113e4100107ab26c349aa0001",
+            "body": "The below survey requests information from you so that CACI can fulfill its obligations to mitigate, avoid or eliminate any conflict before assigning you to support one of CACI's federal government projects.  Please select the appropriate value regarding your employment history with the U.S. Government:",
+            "order": "h",
+            "possibleAnswers": [
+                {
+                    "id": "f6c90068b15101a51dcedcb0d566eb28",
+                    "answerText": "I am currently employed by the U.S. Government.",
+                    "order": "a"
+                },
+                {
+                    "id": "f6c90068b151019fb3f3dcb0d566ec28",
+                    "answerText": "I am a former U.S. Government officer or employee who left Government service within the last year.",
+                    "order": "b"
+                },
+                {
+                    "id": "f6c90068b1510133c602ddb0d566ed28",
+                    "answerText": "I am a former U.S. Government officer or employee who left Government service more than one year ago.",
+                    "order": "c"
+                },
+                {
+                    "id": "f6c90068b15101cd6a12ddb0d566ee28",
+                    "answerText": "I have never been employed by the U.S. Government.",
+                    "order": "d"
+                }
+            ],
+            "required": true,
+            "type": {
+                "id": "c4d9bd57996c10002583f04b9fc30042",
+                "descriptor": "Multiple Choice - Single Select"
+            }
+        },
+        {
+            "id": "cabee52113e4100107ab2629aa7d0004",
+            "body": "Have you ever served or are you currently serving in the United States Military?",
+            "order": "g",
+            "possibleAnswers": [
+                {
+                    "id": "f6c90068b151019de0e5d9b0d566d428",
+                    "answerText": "Yes",
+                    "order": "a"
+                },
+                {
+                    "id": "f6c90068b151014ec6f6d9b0d566d528",
+                    "answerText": "No",
+                    "order": "b"
+                },
+                {
+                    "id": "f6c90068b151012c1907dab0d566d628",
+                    "answerText": "I prefer not to answer",
+                    "order": "c"
+                }
+            ],
+            "required": true,
+            "type": {
+                "id": "c4d9bd57996c10002583f04b9fc30042",
+                "descriptor": "Multiple Choice - Single Select"
+            }
+        },
+        {
+            "id": "cabee52113e4100107ab258fd3f10001",
+            "body": "What is your desired salary?",
+            "order": "f",
+            "possibleAnswers": [
+                {
+                    "id": "f6c90068b15101e974bdd8b0d566c828",
+                    "answerText": "Up to $40,000",
+                    "order": "a"
+                },
+                {
+                    "id": "f6c90068b15101e99dced8b0d566c928",
+                    "answerText": "$40,000-$60,000",
+                    "order": "b"
+                },
+                {
+                    "id": "f6c90068b151015d93ded8b0d566ca28",
+                    "answerText": "$60,000-$80,000",
+                    "order": "c"
+                },
+                {
+                    "id": "f6c90068b15101b647eed8b0d566cb28",
+                    "answerText": "$80,000-$100,000",
+                    "order": "d"
+                },
+                {
+                    "id": "f6c90068b15101ecacfed8b0d566cc28",
+                    "answerText": "$100,000-$120,000",
+                    "order": "e"
+                },
+                {
+                    "id": "f6c90068b15101a1d90ed9b0d566cd28",
+                    "answerText": "$120,000-$140,000",
+                    "order": "f"
+                },
+                {
+                    "id": "f6c90068b15101fd714ed9b0d566ce28",
+                    "answerText": "$140,000-$160,000",
+                    "order": "g"
+                },
+                {
+                    "id": "f6c90068b15101597c60d9b0d566cf28",
+                    "answerText": "$160,000-$180,000",
+                    "order": "h"
+                },
+                {
+                    "id": "f6c90068b15101a45d70d9b0d566d028",
+                    "answerText": "$180,000-$200,000",
+                    "order": "i"
+                },
+                {
+                    "id": "f6c90068b1510101d180d9b0d566d128",
+                    "answerText": "$200,000+",
+                    "order": "j"
+                }
+            ],
+            "required": true,
+            "type": {
+                "id": "c4d9bd57996c10002583f04b9fc30042",
+                "descriptor": "Multiple Choice - Single Select"
+            }
+        },
+        {
+            "id": "cabee52113e4100107ab245bf69b0006",
+            "body": "If you currently possess an active security clearance, which agency sponsored the clearance?",
+            "order": "e",
+            "possibleAnswers": [
+                {
+                    "id": "f6c90068b15101c5fa45d7b0d566bc28",
+                    "answerText": "I do not possess an active security clearance.",
+                    "order": "a"
+                },
+                {
+                    "id": "f6c90068b15101e70e56d7b0d566bd28",
+                    "answerText": "DOD",
+                    "order": "b"
+                },
+                {
+                    "id": "f6c90068b15101f86365d7b0d566be28",
+                    "answerText": "CIA",
+                    "order": "c"
+                },
+                {
+                    "id": "f6c90068b15101d1e673d7b0d566bf28",
+                    "answerText": "DIA",
+                    "order": "d"
+                },
+                {
+                    "id": "f6c90068b15101acdc84d7b0d566c028",
+                    "answerText": "DOJ",
+                    "order": "e"
+                },
+                {
+                    "id": "f6c90068b151019b8da3d7b0d566c128",
+                    "answerText": "NRO",
+                    "order": "f"
+                },
+                {
+                    "id": "f6c90068b151013291f5d7b0d566c228",
+                    "answerText": "NSA",
+                    "order": "g"
+                },
+                {
+                    "id": "f6c90068b15101e09606d8b0d566c328",
+                    "answerText": "OPM",
+                    "order": "h"
+                },
+                {
+                    "id": "f6c90068b15101e1df16d8b0d566c428",
+                    "answerText": "State",
+                    "order": "i"
+                },
+                {
+                    "id": "f6c90068b15101584127d8b0d566c528",
+                    "answerText": "Other",
+                    "order": "j"
+                }
+            ],
+            "required": true,
+            "type": {
+                "id": "c4d9bd57996c10002583f04b9fc30042",
+                "descriptor": "Multiple Choice - Single Select"
+            }
+        },
+        {
+            "id": "cabee52113e4100107ab23c205c70002",
+            "body": "Do you currently possess an active security clearance?",
+            "order": "d",
+            "possibleAnswers": [
+                {
+                    "id": "f6c90068b15101d55f07d6b0d566b028",
+                    "answerText": "No, I do not possess an active security clearance.",
+                    "order": "a"
+                },
+                {
+                    "id": "f6c90068b15101c41717d6b0d566b128",
+                    "answerText": "Secret",
+                    "order": "b"
+                },
+                {
+                    "id": "f6c90068b15101d8cb26d6b0d566b228",
+                    "answerText": "Top Secret",
+                    "order": "c"
+                },
+                {
+                    "id": "f6c90068b15101342b3cd6b0d566b328",
+                    "answerText": "Top Secret/SCI",
+                    "order": "d"
+                },
+                {
+                    "id": "f6c90068b15101753f4dd6b0d566b428",
+                    "answerText": "Top Secret/SCI with CI Poly",
+                    "order": "e"
+                },
+                {
+                    "id": "f6c90068b15101e3835ed6b0d566b528",
+                    "answerText": "Top Secret/SCI with Full Scope Poly",
+                    "order": "f"
+                },
+                {
+                    "id": "f6c90068b151015f9096d6b0d566b628",
+                    "answerText": "Confidential",
+                    "order": "g"
+                },
+                {
+                    "id": "f6c90068b15101a9c9a4d6b0d566b728",
+                    "answerText": "MBI",
+                    "order": "h"
+                },
+                {
+                    "id": "f6c90068b151014ea3b2d6b0d566b828",
+                    "answerText": "NACI",
+                    "order": "i"
+                },
+                {
+                    "id": "f6c90068b151018a6ac0d6b0d566b928",
+                    "answerText": "Other (DEA, DOE - Q, Yankee White, etc.)",
+                    "order": "j"
+                }
+            ],
+            "required": true,
+            "type": {
+                "id": "c4d9bd57996c10002583f04b9fc30042",
+                "descriptor": "Multiple Choice - Single Select"
+            }
+        },
+        {
+            "id": "cabee52113e4100107ab2328610e0005",
+            "body": "For purposes of obtaining a U.S. security clearance, are you a U.S. citizen?",
+            "order": "c.a",
+            "possibleAnswers": [
+                {
+                    "id": "41acee1d0fa701dd5c2a35ad535ce924",
+                    "answerText": "Yes",
+                    "order": "a"
+                },
+                {
+                    "id": "41acee1d0fa701e860a335ad535cea24",
+                    "answerText": "No",
+                    "order": "b"
+                },
+                {
+                    "id": "41acee1d0fa7010722af35ad535ceb24",
+                    "answerText": "I choose not to disclose",
+                    "order": "c"
+                }
+            ],
+            "required": true,
+            "type": {
+                "id": "c4d9bd57996c10002583f04b9fc30042",
+                "descriptor": "Multiple Choice - Single Select"
+            }
+        }
+    ]
+}

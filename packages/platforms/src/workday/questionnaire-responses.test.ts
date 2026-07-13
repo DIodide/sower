@@ -173,3 +173,51 @@ describe('buildQuestionnaireResolution', () => {
     });
   });
 });
+
+describe('buildQuestionnaireResolution — branch/conditional handling', () => {
+  const parent: WorkdayQuestionnaireField = {
+    id: 'q-usperson',
+    label: 'Are you a U.S. Person?',
+    control: 'select',
+    required: true,
+    conditional: false,
+    order: 'a',
+    needsOptions: false,
+    options: [
+      { id: 'opt-yes', descriptor: 'Yes' },
+      { id: 'opt-no', descriptor: 'No' },
+    ],
+  };
+  const branch: WorkdayQuestionnaireField = {
+    id: 'q-citizen',
+    label: 'Are you a U.S. citizen?',
+    control: 'select',
+    required: false,
+    conditional: true,
+    order: 'a.a',
+    needsOptions: false,
+    options: [
+      { id: 'c-yes', descriptor: 'Yes' },
+      { id: 'c-no', descriptor: 'No' },
+    ],
+    branchTrigger: { questionId: 'q-usperson', answerId: 'opt-yes' },
+  };
+
+  it('answers the branch when its trigger option is chosen', () => {
+    const { payload } = buildQuestionnaireResolution([parent, branch], {
+      'q-usperson': 'Yes',
+      'q-citizen': 'Yes',
+    });
+    expect(payload.questionnaireAnswers).toHaveLength(2);
+  });
+
+  it('skips the branch entirely when the trigger option is NOT chosen', () => {
+    const result = buildQuestionnaireResolution([parent, branch], {
+      'q-usperson': 'No',
+      'q-citizen': 'Yes', // value present, but branch not revealed
+    });
+    // Only the parent is answered; the branch is neither answered nor a skip.
+    expect(result.payload.questionnaireAnswers).toHaveLength(1);
+    expect(result.skipped).toHaveLength(0);
+  });
+});

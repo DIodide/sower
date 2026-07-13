@@ -44,12 +44,16 @@ export interface WorkdayQuestionnaireField {
   /** True when a 'select'/choice control still needs its options fetched. */
   needsOptions: boolean;
   /**
-   * Choice options {id, descriptor} for a 'select' control. NOT present in the
-   * shallow definition schema — the orchestrator fetches them live (from the
-   * in-context definition) and attaches them so answers can be matched to the
-   * option GUID the questionnaireResponses payload requires.
+   * Choice options {id, descriptor} for a 'select' control. Populated by
+   * parseWorkdayQuestionnaire (the GET .../questionnaire/{id} response carries
+   * `possibleAnswers`); absent on the shallow definition-schema parse.
    */
   options?: WorkdayQuestionOption[];
+  /**
+   * Set on a conditional (branch) field: which parent answer reveals it. The
+   * orchestrator only answers this field when that parent option was chosen.
+   */
+  branchTrigger?: BranchTrigger;
 }
 
 export interface WorkdayQuestionOption {
@@ -57,6 +61,16 @@ export interface WorkdayQuestionOption {
   id: string;
   /** Human label, e.g. 'Yes' / 'No'. */
   descriptor: string;
+}
+
+/**
+ * For a conditional (branch) field: the parent question + the answer option
+ * that reveals it. The field's answer is only submitted when the parent's
+ * chosen answer matches this trigger.
+ */
+export interface BranchTrigger {
+  questionId: string;
+  answerId: string;
 }
 
 interface DefinitionSchema {
@@ -96,6 +110,105 @@ function compareOrder(a: string, b: string): number {
     if (x !== y) return x < y ? -1 : 1;
   }
   return 0;
+}
+
+/**
+ * A question as returned by `GET /wday/calypso/cxs/common/{tenant}/
+ * questionnaire/{id}` — the endpoint that DOES carry options (unlike the
+ * shallow `/definition` POST). Reverse-engineered from a live CACI response.
+ */
+interface LiveQuestion {
+  id: string;
+  body?: string;
+  order?: string;
+  required?: boolean;
+  type?: { descriptor?: string }[];
+  possibleAnswers?: LiveAnswer[];
+}
+interface LiveAnswer {
+  id: string;
+  answerText?: string;
+  descriptor?: string;
+  /** The conditional sub-question revealed when THIS answer is chosen. */
+  branchingQuestion?: LiveQuestion;
+}
+
+/**
+ * Parse the live `GET .../questionnaire/{id}` response into a FLAT list of
+ * fields, WITH their option GUIDs and conditional branches:
+ * - each question -> a field; `possibleAnswers` -> options {id, descriptor};
+ * - a `type` mentioning "Text" -> a text control, else 'select' when it has
+ *   options;
+ * - a `branchingQuestion` under an answer -> a nested conditional field, flagged
+ *   `conditional: true` with a `branchTrigger` (parent question + answer id),
+ *   so the orchestrator only answers it when that option was chosen.
+ *
+ * This is the endpoint that unlocks Workday questionnaires over pure HTTP — no
+ * browser scrape needed.
+ */
+export function parseWorkdayQuestionnaire(response: {
+  questions?: unknown[];
+}): WorkdayQuestionnaireField[] {
+  const fields: WorkdayQuestionnaireField[] = [];
+  const topLevel = (response.questions ?? []) as LiveQuestion[];
+
+  const walk = (
+    question: LiveQuestion,
+    conditional: boolean,
+    trigger: BranchTrigger | undefined,
+  ): void => {
+    const label = htmlEntityEncodedToPlainText(question.body ?? '').trim();
+    const answers = question.possibleAnswers ?? [];
+    const typeDescriptor = question.type?.[0]?.descriptor ?? '';
+    const control: WorkdayQuestionnaireField['control'] = /text/i.test(
+      typeDescriptor,
+    )
+      ? 'text'
+      : answers.length > 0
+        ? 'select'
+        : 'text';
+
+    if (label.length > 0 && question.id) {
+      const options = answers
+        .map((a) => ({
+          id: a.id,
+          descriptor: (a.answerText ?? a.descriptor ?? '').trim(),
+        }))
+        .filter((o) => o.id && o.descriptor.length > 0);
+      const field: WorkdayQuestionnaireField = {
+        id: question.id,
+        label,
+        control,
+        // A conditional field is not enforced until its trigger is chosen.
+        required: question.required === true && !conditional,
+        conditional,
+        order: question.order ?? '',
+        needsOptions: false,
+      };
+      if (options.length > 0) {
+        field.options = options;
+      }
+      if (trigger) {
+        field.branchTrigger = trigger;
+      }
+      fields.push(field);
+    }
+
+    // Recurse into branch questions (conditional on the answer that reveals them).
+    for (const answer of answers) {
+      if (answer.branchingQuestion) {
+        walk(answer.branchingQuestion, true, {
+          questionId: question.id,
+          answerId: answer.id,
+        });
+      }
+    }
+  };
+
+  for (const question of topLevel) {
+    walk(question, false, undefined);
+  }
+  return fields;
 }
 
 /**

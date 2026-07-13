@@ -100,3 +100,56 @@ describe('parseQuestionnaireDefinition (real datasite fixture)', () => {
     expect(parsed.map((f) => f.id)).toEqual(['ok']);
   });
 });
+
+import { parseWorkdayQuestionnaire } from './questionnaire.js';
+
+const caciFixture = JSON.parse(
+  readFileSync(
+    new URL('./fixture-questionnaire-caci.json', import.meta.url),
+    'utf8',
+  ),
+) as { questions?: unknown[] };
+
+describe('parseWorkdayQuestionnaire (real CACI GET response, with options + branching)', () => {
+  const fields = parseWorkdayQuestionnaire(caciFixture);
+
+  it('extracts every question with its option GUIDs', () => {
+    const usPerson = fields.find((f) =>
+      f.label.startsWith('Are you a U.S. Person'),
+    );
+    expect(usPerson?.control).toBe('select');
+    expect(usPerson?.options).toEqual([
+      { id: 'ca4e30f2955901bb987d6239f6013691', descriptor: 'Yes' },
+      expect.objectContaining({ descriptor: 'No' }),
+      expect.objectContaining({ descriptor: 'I choose not to disclose' }),
+    ]);
+    expect(usPerson?.required).toBe(true);
+  });
+
+  it('flattens a branching question as a conditional field with its trigger', () => {
+    // "Are you a U.S. Person?" -> "Yes" reveals the clearance-citizen question.
+    const branch = fields.find((f) =>
+      f.label.startsWith('For purposes of obtaining a U.S. security clearance'),
+    );
+    expect(branch).toBeDefined();
+    expect(branch?.conditional).toBe(true);
+    expect(branch?.required).toBe(false); // not enforced until revealed
+    expect(branch?.branchTrigger).toEqual({
+      questionId: 'cabee52113e4100107ab2328610e0002',
+      answerId: 'ca4e30f2955901bb987d6239f6013691', // the 'Yes' option
+    });
+  });
+
+  it('captures multi-option questions (salary ranges, clearance agencies)', () => {
+    const salary = fields.find((f) => f.label.includes('desired salary'));
+    expect(salary?.options?.length).toBe(10);
+    expect(salary?.options?.map((o) => o.descriptor)).toContain(
+      '$100,000-$120,000',
+    );
+  });
+
+  it('has more fields than top-level questions (branches included)', () => {
+    // 9 top-level + at least the one branch.
+    expect(fields.length).toBeGreaterThanOrEqual(10);
+  });
+});

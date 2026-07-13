@@ -1,6 +1,6 @@
 import { type Recorder, recordedFetch } from '../recorder.js';
 import {
-  parseQuestionnaireDefinition,
+  parseWorkdayQuestionnaire,
   type WorkdayQuestionnaireField,
 } from './questionnaire.js';
 
@@ -162,13 +162,17 @@ export class CalypsoClient {
     return { jobApplicationId: body.id };
   }
 
-  /** Read + parse a questionnaire definition into fields (no options). */
+  /**
+   * Read the questionnaire fields WITH options + conditional branches. Uses
+   * `GET .../questionnaire/{id}` (NOT the shallow `/definition` POST, which
+   * omits options and 500s out of context) — validated live against CACI.
+   */
   async getQuestionnaire(
     questionnaireId: string,
   ): Promise<WorkdayQuestionnaireField[]> {
-    const url = `${this.base}/wday/calypso/cxs/common/${this.session.tenant}/questionnaire/${questionnaireId}/definition`;
-    const schema = await this.call('questionnaire', 'POST', url, {});
-    return parseQuestionnaireDefinition(schema as Record<string, unknown>);
+    const url = `${this.base}/wday/calypso/cxs/common/${this.session.tenant}/questionnaire/${questionnaireId}`;
+    const response = await this.call('questionnaire', 'GET', url);
+    return parseWorkdayQuestionnaire(response as { questions?: unknown[] });
   }
 
   /**

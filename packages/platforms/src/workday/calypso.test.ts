@@ -13,8 +13,9 @@ import {
   WORKDAY_REF,
 } from './calypso-sections.js';
 
+// The real CACI `GET .../questionnaire/{id}` response (questions + options).
 const questionnaireFixture = readFileSync(
-  new URL('./fixture-questionnaire-definition.json', import.meta.url),
+  new URL('./fixture-questionnaire-caci.json', import.meta.url),
   'utf8',
 );
 
@@ -54,7 +55,7 @@ describe('CalypsoClient — transport', () => {
     expect(headers['x-calypso-csrf-token']).toBe('tok');
   });
 
-  it('getQuestionnaire fetches the definition and parses it to fields', async () => {
+  it('getQuestionnaire GETs the questionnaire and parses fields WITH options', async () => {
     const fetchMock = vi.fn(async (_u: string, _i?: RequestInit) =>
       jsonResponse(questionnaireFixture),
     );
@@ -64,12 +65,14 @@ describe('CalypsoClient — transport', () => {
 
     const fields = await client.getQuestionnaire('Q1');
 
-    const [url] = fetchMock.mock.calls[0] as [string];
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    // GET (not the /definition POST), and options come back attached.
     expect(url).toBe(
-      'https://datasite.wd1.myworkdayjobs.com/wday/calypso/cxs/common/datasite/questionnaire/Q1/definition',
+      'https://datasite.wd1.myworkdayjobs.com/wday/calypso/cxs/common/datasite/questionnaire/Q1',
     );
-    expect(fields).toHaveLength(6);
-    expect(fields.map((f) => f.control)).toContain('select');
+    expect(init.method).toBe('GET');
+    expect(fields.length).toBeGreaterThanOrEqual(9);
+    expect(fields.some((f) => f.control === 'select' && f.options)).toBe(true);
   });
 
   it('fillSection POSTs the section body and never targets finalize', async () => {
