@@ -5,6 +5,7 @@ import {
   chromeImpersonateTarget,
   chromeMajorFromUserAgent,
   createCurlImpersonateFetch,
+  createSystemCurlFetch,
   parseCurlOutput,
 } from './calypso-transport.js';
 
@@ -36,14 +37,23 @@ describe('chromeImpersonateTarget', () => {
 });
 
 describe('buildCurlImpersonateArgs', () => {
-  it('defaults to chrome131, GET, and appends the status writeout + url last', () => {
+  it('GET by default; url last, writeout before it; NO --impersonate unless asked', () => {
     const args = buildCurlImpersonateArgs('https://x/y');
-    expect(args.slice(0, 2)).toEqual(['--impersonate', 'chrome131']);
-    expect(args).toContain('-X');
+    expect(args).not.toContain('--impersonate'); // plain system-curl compatible
     expect(args[args.indexOf('-X') + 1]).toBe('GET');
-    // url is the final arg; the -w writeout precedes it.
     expect(args.at(-1)).toBe('https://x/y');
     expect(args.at(-3)).toBe('-w');
+  });
+
+  it('adds --impersonate when a target is given', () => {
+    const args = buildCurlImpersonateArgs(
+      'https://x',
+      {},
+      {
+        impersonate: 'chrome131',
+      },
+    );
+    expect(args.slice(0, 2)).toEqual(['--impersonate', 'chrome131']);
   });
 
   it('adds --proxy only when a proxyUrl is given', () => {
@@ -151,5 +161,25 @@ describe('createCurlImpersonateFetch', () => {
     await expect(fetchImpl('https://x')).rejects.toThrow(
       /install curl-impersonate/,
     );
+  });
+});
+
+describe('createSystemCurlFetch', () => {
+  it('spawns plain system curl (no --impersonate), returns the Response', async () => {
+    const spawnMock = vi.fn((_bin: string, _args: string[]) =>
+      fakeChild(`{"total":0}\n__SOWER_HTTP_STATUS__200`),
+    );
+    const fetchImpl = createSystemCurlFetch(
+      { proxyUrl: 'http://p' },
+      spawnMock as never,
+    );
+
+    const res = await fetchImpl('https://x/applications');
+
+    expect(res.status).toBe(200);
+    const [binary, args] = spawnMock.mock.calls[0] as [string, string[]];
+    expect(binary).toBe('curl');
+    expect(args).not.toContain('--impersonate');
+    expect(args).toContain('--proxy');
   });
 });

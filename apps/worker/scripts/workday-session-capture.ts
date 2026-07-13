@@ -12,7 +12,6 @@
  * fingerprint, VERIFIES the session with a live calypso read, and stores it in
  * the vault. Nothing is submitted; this only establishes a session.
  */
-import { createInterface } from 'node:readline/promises';
 import { AccountManager } from '@sower/accounts';
 import { loadProfile } from '@sower/answers';
 import { createDb } from '@sower/db';
@@ -60,40 +59,31 @@ async function main(): Promise<void> {
     `Account for ${tenant}: ${credential.email} (password is in the vault).`,
   );
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  // Login completion is AUTO-DETECTED (poll for the session cookie) — the
+  // human only interacts with the browser window, not this terminal.
   const broker = new SessionBroker({
-    login: createStealthBrowserLogin({
-      waitForHuman: async (prompt) => {
-        await rl.question(prompt);
-      },
-    }),
+    login: createStealthBrowserLogin({}),
     storeSession: (s: WorkdaySession) => saveWorkdaySession(storage, s),
     verify: (s: WorkdaySession) => new CalypsoClient(s).checkSession(),
   });
 
-  try {
-    const session = await broker.capture({
-      host,
-      tenant,
-      loginUrl: url,
-      credential: { email: credential.email, password: credential.password },
-      proxyServer,
-    });
-    await accounts.setStatus('workday', tenant, 'verified');
-    console.log(
-      '\n✅ Session captured, VERIFIED with a live read, and stored.',
-    );
-    console.log(`   host:        ${session.host}`);
-    console.log(`   cookies:     ${session.cookie.split(';').length}`);
-    console.log(
-      `   fingerprint: Chrome ${session.fingerprint?.chromeMajor ?? '?'} (${session.fingerprint?.userAgent?.slice(0, 40) ?? 'n/a'}…)`,
-    );
-    console.log(
-      '   The calypso HTTP client can now drive applications for this tenant until the session expires (~30 min).',
-    );
-  } finally {
-    rl.close();
-  }
+  const session = await broker.capture({
+    host,
+    tenant,
+    loginUrl: url,
+    credential: { email: credential.email, password: credential.password },
+    proxyServer,
+  });
+  await accounts.setStatus('workday', tenant, 'verified');
+  console.log('\n✅ Session captured, VERIFIED with a live read, and stored.');
+  console.log(`   host:        ${session.host}`);
+  console.log(`   cookies:     ${session.cookie.split(';').length}`);
+  console.log(
+    `   fingerprint: Chrome ${session.fingerprint?.chromeMajor ?? '?'} (${session.fingerprint?.userAgent?.slice(0, 40) ?? 'n/a'}…)`,
+  );
+  console.log(
+    '   The calypso HTTP client can now drive applications for this tenant until the session expires (~30 min).',
+  );
   process.exit(0);
 }
 

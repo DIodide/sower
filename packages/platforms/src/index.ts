@@ -37,6 +37,7 @@ export {
   chromeImpersonateTarget,
   chromeMajorFromUserAgent,
   createCurlImpersonateFetch,
+  createSystemCurlFetch,
   type ImpersonateOptions,
   parseCurlOutput,
 } from './workday/calypso-transport.js';

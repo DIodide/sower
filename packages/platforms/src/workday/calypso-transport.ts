@@ -84,15 +84,18 @@ export function buildCurlImpersonateArgs(
   opts: ImpersonateOptions = {},
 ): string[] {
   const method = (init.method ?? 'GET').toUpperCase();
-  const args = [
-    '--impersonate',
-    opts.impersonate ?? DEFAULT_IMPERSONATE,
+  const args: string[] = [];
+  // Only curl-impersonate understands --impersonate; system curl omits it.
+  if (opts.impersonate) {
+    args.push('--impersonate', opts.impersonate);
+  }
+  args.push(
     '-s', // silent (no progress)
     '-S', // but still show errors
     '--compressed',
     '--max-time',
     String(opts.maxTimeSeconds ?? 30),
-  ];
+  );
   if (opts.proxyUrl) {
     args.push('--proxy', opts.proxyUrl);
   }
@@ -122,16 +125,43 @@ export function parseCurlOutput(stdout: string): {
   return { body, status: Number.isNaN(status) ? 0 : status };
 }
 
-/**
- * A `fetch`-compatible function that runs each request through
- * curl-impersonate (Chrome TLS + optional residential proxy) and returns a
- * standard Response. Drop it into `new CalypsoClient(session, { fetchImpl })`.
- */
-export function createCurlImpersonateFetch(
-  opts: ImpersonateOptions = {},
-  spawnImpl: typeof spawn = spawn,
+/** Spawn a curl-family binary with argv and return the parsed body+status. */
+function runCurl(
+  binary: string,
+  args: string[],
+  spawnImpl: typeof spawn,
+  installHint: string,
+): Promise<{ body: string; status: number }> {
+  return new Promise((resolve, reject) => {
+    const child = spawnImpl(binary, args);
+    let out = '';
+    let err = '';
+    child.stdout?.on('data', (d) => {
+      out += d;
+    });
+    child.stderr?.on('data', (d) => {
+      err += d;
+    });
+    child.on('error', (e: NodeJS.ErrnoException) => {
+      reject(e.code === 'ENOENT' ? new Error(installHint) : e);
+    });
+    child.on('close', (code) => {
+      if (code !== 0 && !out) {
+        reject(new Error(`${binary} exited ${code}: ${err.slice(0, 200)}`));
+        return;
+      }
+      resolve(parseCurlOutput(out));
+    });
+  });
+}
+
+/** Build a fetch-compatible function over a curl binary. */
+function curlFetch(
+  binary: string,
+  opts: ImpersonateOptions,
+  spawnImpl: typeof spawn,
+  installHint: string,
 ): typeof fetch {
-  const binary = opts.binaryPath ?? DEFAULT_BINARY;
   return (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     const args = buildCurlImpersonateArgs(
@@ -143,36 +173,48 @@ export function createCurlImpersonateFetch(
       },
       opts,
     );
-    const { body, status } = await new Promise<{
-      body: string;
-      status: number;
-    }>((resolve, reject) => {
-      const child = spawnImpl(binary, args);
-      let out = '';
-      let err = '';
-      child.stdout?.on('data', (d) => {
-        out += d;
-      });
-      child.stderr?.on('data', (d) => {
-        err += d;
-      });
-      child.on('error', (e: NodeJS.ErrnoException) => {
-        reject(
-          e.code === 'ENOENT'
-            ? new Error(
-                `${binary} not found — install curl-impersonate (e.g. brew install curl-impersonate) or set binaryPath`,
-              )
-            : e,
-        );
-      });
-      child.on('close', (code) => {
-        if (code !== 0 && !out) {
-          reject(new Error(`${binary} exited ${code}: ${err.slice(0, 200)}`));
-          return;
-        }
-        resolve(parseCurlOutput(out));
-      });
-    });
+    const { body, status } = await runCurl(
+      binary,
+      args,
+      spawnImpl,
+      installHint,
+    );
     return new Response(body, { status: status || 502 });
   }) as typeof fetch;
+}
+
+/**
+ * A `fetch` over curl-impersonate: a real Chrome TLS+HTTP-2 fingerprint (+
+ * optional residential proxy). The robustness path for datacenter IPs / hard
+ * tenants; requires the `curl-impersonate-chrome` binary.
+ */
+export function createCurlImpersonateFetch(
+  opts: ImpersonateOptions = {},
+  spawnImpl: typeof spawn = spawn,
+): typeof fetch {
+  return curlFetch(
+    opts.binaryPath ?? DEFAULT_BINARY,
+    { ...opts, impersonate: opts.impersonate ?? DEFAULT_IMPERSONATE },
+    spawnImpl,
+    `${opts.binaryPath ?? DEFAULT_BINARY} not found — install curl-impersonate (e.g. brew install curl-impersonate) or set binaryPath`,
+  );
+}
+
+/**
+ * A `fetch` over the SYSTEM curl binary (no TLS impersonation, optional proxy).
+ * curl's own fingerprint is not Chrome's but empirically passes Workday's
+ * Cloudflare from a residential IP — the zero-install path for the home-IP MVP
+ * (Node's `fetch` fingerprint, by contrast, gets challenged). Upgrade to
+ * createCurlImpersonateFetch for datacenter/hard-tenant robustness.
+ */
+export function createSystemCurlFetch(
+  opts: Omit<ImpersonateOptions, 'impersonate'> = {},
+  spawnImpl: typeof spawn = spawn,
+): typeof fetch {
+  return curlFetch(
+    opts.binaryPath ?? 'curl',
+    { ...opts, impersonate: undefined },
+    spawnImpl,
+    `${opts.binaryPath ?? 'curl'} not found on PATH`,
+  );
 }

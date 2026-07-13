@@ -2,7 +2,7 @@ import {
   chromeMajorFromUserAgent,
   type WorkdaySessionFingerprint,
 } from '@sower/platforms';
-import { type Browser, chromium } from 'playwright';
+import { type Browser, chromium, type Page } from 'playwright';
 import { anyAutomationId, automationId, WORKDAY_IDS } from './selectors.js';
 import type { BrowserLogin, BrowserLoginResult } from './session-broker.js';
 
@@ -28,20 +28,57 @@ import type { BrowserLogin, BrowserLoginResult } from './session-broker.js';
 
 export interface StealthLoginDeps {
   /**
-   * Blocks until the human signals login is complete (e.g. reads a line from
-   * the terminal). Required — this flow is attended.
+   * Optional attended confirm (e.g. read a line from the terminal). When
+   * omitted, login completion is AUTO-DETECTED by polling for the authenticated
+   * session cookie + the sign-in form clearing — so the flow works even when a
+   * program (not a person at this terminal) launched the browser and only a
+   * human at the SCREEN interacts with it.
    */
-  waitForHuman: (prompt: string) => Promise<void>;
+  waitForHuman?: (prompt: string) => Promise<void>;
   /** Launch a browser (default: headful Playwright chromium with stealth args). */
   launchBrowser?: (proxyServer?: string) => Promise<Browser>;
   /** Progress logger (default: console.log). */
   log?: (message: string) => void;
+  /** Max wait for login when auto-detecting (default 8 min). */
+  loginTimeoutMs?: number;
 }
+
+/** The cookie whose presence marks a completed candidate login. */
+const AUTH_SESSION_COOKIE = 'CALYPSO_SESSION';
 
 const STEALTH_ARGS = [
   '--disable-blink-features=AutomationControlled',
   '--disable-features=IsolateOrigins,site-per-process',
 ];
+
+/**
+ * Auto-detect a completed candidate login: poll until the authenticated
+ * session cookie is present AND the sign-in password field is gone. The
+ * verify-before-store step in SessionBroker is the safety net if this fires a
+ * touch early. Throws on timeout.
+ */
+async function waitForLogin(page: Page, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const context = page.context();
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(3_000).catch(() => {});
+    const cookies = await context.cookies().catch(() => []);
+    if (!cookies.some((c) => c.name === AUTH_SESSION_COOKIE)) {
+      continue;
+    }
+    const passwordVisible = await page
+      .locator(anyAutomationId(WORKDAY_IDS.password))
+      .first()
+      .isVisible({ timeout: 1_000 })
+      .catch(() => false);
+    if (!passwordVisible) {
+      return;
+    }
+  }
+  throw new Error(
+    `timed out after ~${Math.round(timeoutMs / 60_000)} min waiting for login (no ${AUTH_SESSION_COOKIE} + cleared sign-in form)`,
+  );
+}
 
 async function defaultLaunch(proxyServer?: string): Promise<Browser> {
   return chromium.launch({
@@ -99,10 +136,18 @@ export function createStealthBrowserLogin(
         await pwField.fill(input.credential.password).catch(() => {});
       }
 
-      // ATTENDED: hand control to the human for the captcha + submit.
-      await deps.waitForHuman(
-        `\n>>> In the browser: solve the captcha, complete sign-in (or create the account), reach the candidate home / application, THEN press Enter here to capture the session for '${input.tenant}'… `,
-      );
+      // Hand control to the human for the captcha + submit — either a terminal
+      // confirm, or (default) auto-detect that login completed.
+      if (deps.waitForHuman) {
+        await deps.waitForHuman(
+          `\n>>> Solve the captcha + sign in for '${input.tenant}', then press Enter here… `,
+        );
+      } else {
+        log(
+          `A browser window is open. Solve the captcha and sign in (or create the account) for '${input.tenant}' and reach the candidate home — I'll capture automatically once you're logged in.`,
+        );
+        await waitForLogin(page, deps.loginTimeoutMs ?? 8 * 60_000);
+      }
 
       // DEFENSIVE: the beecatcher honeypot must be empty — a filled one means
       // something scanned-and-filled the form; refuse to trust this capture.
