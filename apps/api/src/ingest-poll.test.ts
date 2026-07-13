@@ -76,10 +76,16 @@ const config = {
   SIMPLIFY_MAX_PER_RUN: 10,
 } as unknown as Config;
 
-/** Fake db that captures ingestion_runs inserts. */
-function fakeDb() {
+/**
+ * Fake db that captures ingestion_runs inserts and serves the "already
+ * ingested" canonical-URL pre-filter select (configurable via knownUrls).
+ */
+function fakeDb(knownUrls: string[] = []) {
   const runs: Record<string, unknown>[] = [];
   const db = {
+    select: () => ({
+      from: async () => knownUrls.map((canonicalUrl) => ({ canonicalUrl })),
+    }),
     insert: (table: unknown) => ({
       values: async (row: Record<string, unknown>) => {
         if (table === ingestionRuns) runs.push(row);
@@ -243,6 +249,52 @@ describe('runIngestionPoll', () => {
     expect(result.duplicates).toBe(1);
     expect(result.ingested).toBe(1);
     expect(runs[0]).toMatchObject({ matched: 3, ingested: 1, duplicates: 1 });
+  });
+
+  it('pre-skips candidates already in the jobs table so the cap covers fresh ones', async () => {
+    listingsState.raw = [
+      {
+        url: 'https://gh/1',
+        company_name: 'A',
+        title: 'SWE',
+        season: 'Summer',
+      },
+      {
+        url: 'https://gh/2',
+        company_name: 'B',
+        title: 'SWE',
+        season: 'Summer',
+      },
+      {
+        url: 'https://gh/3',
+        company_name: 'C',
+        title: 'SWE',
+        season: 'Summer',
+      },
+    ];
+    for (const [i, l] of listingsState.raw.entries()) {
+      platformState.byUrl[l.url] = {
+        platform: 'greenhouse',
+        tenant: 'a',
+        externalId: String(i),
+      };
+    }
+    // gh/1 + gh/2 are already ingested (in jobs) — even though they're the
+    // newest, they're pre-skipped so the cap covers the still-fresh gh/3.
+    // Without this the newest-N cap would re-attempt gh/1+gh/2 forever and
+    // gh/3 would never ingest.
+    const cappedConfig = {
+      ...config,
+      SIMPLIFY_MAX_PER_RUN: 2,
+    } as unknown as Config;
+    const { db, runs } = fakeDb(['https://gh/1', 'https://gh/2']);
+    const result = await runIngestionPoll({ db, config: cappedConfig } as Deps);
+
+    expect(ingestState.calls).toEqual(['https://gh/3']);
+    expect(result.matched).toBe(3); // matched still counts all auto-ingestable
+    expect(result.ingested).toBe(1);
+    expect(result.duplicates).toBe(0);
+    expect(runs[0]).toMatchObject({ matched: 3, ingested: 1 });
   });
 
   it('records a failed run and rethrows when the source fetch throws', async () => {

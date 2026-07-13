@@ -1,4 +1,5 @@
-import { ingestionRuns } from '@sower/db';
+import { canonicalizeUrl } from '@sower/core';
+import { ingestionRuns, jobs } from '@sower/db';
 import { detectPlatform, getAdapter } from '@sower/platforms';
 import {
   fetchListings,
@@ -65,7 +66,20 @@ export async function runIngestionPoll(
       }
     }
 
-    const batch = candidates.slice(0, config.SIMPLIFY_MAX_PER_RUN);
+    // Skip candidates already ingested (by canonical URL) BEFORE the per-run
+    // cap, so each poll makes progress on NEW listings. Without this the cap
+    // always slices the same newest N — once those are ingested every later run
+    // re-attempts the same duplicates and the rest of the matched set never
+    // ingests. ingestJob still dedups authoritatively; this only decides which
+    // candidates the cap covers.
+    const knownRows = await db
+      .select({ canonicalUrl: jobs.canonicalUrl })
+      .from(jobs);
+    const known = new Set(knownRows.map((row) => row.canonicalUrl));
+    const fresh = candidates.filter(
+      (listing) => !known.has(canonicalizeUrl(listing.url)),
+    );
+    const batch = fresh.slice(0, config.SIMPLIFY_MAX_PER_RUN);
     let ingested = 0;
     let duplicates = 0;
     for (const listing of batch) {
