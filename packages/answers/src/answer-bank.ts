@@ -51,6 +51,17 @@ const AnswerStrategySchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('choice'),
     prefer: z.array(z.string().min(1)).min(1),
+    /**
+     * Optional truthfulness guard (same shape as booleanYesNo's): the entry
+     * only resolves when the boolean at `guard.source` equals `guard.equals`.
+     * Used for "pick the safe negative option" answers that are only truthful
+     * for a committed profile fact — e.g. "I do not possess an active security
+     * clearance" resolves ONLY when authorization.hasActiveSecurityClearance is
+     * explicitly false; anyone who leaves it unset (or true) goes to a human.
+     */
+    guard: z
+      .object({ source: z.string().min(1), equals: z.boolean() })
+      .optional(),
   }),
   /**
    * A strictly-boolean profile fact rendered as 'Yes'/'No'. The option match
@@ -618,6 +629,13 @@ function applyStrategy(
     case 'choice': {
       if (question.type !== 'select' && question.type !== 'multiselect') {
         return null;
+      }
+      // Optional guard: refuse unless the guarded boolean matches (e.g. a
+      // "no security clearance" answer only resolves when the profile commits
+      // hasActiveSecurityClearance === false).
+      if (strategy.guard) {
+        const guardValue = booleanAtPath(profile, strategy.guard.source);
+        if (guardValue !== strategy.guard.equals) return null;
       }
       for (const label of strategy.prefer) {
         const option = matchOption(label, options);

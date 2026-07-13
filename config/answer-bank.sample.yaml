@@ -154,6 +154,70 @@ entries:
       source: "authorization.usWorkAuthorized"
       guard: { source: "authorization.requiresSponsorship", equals: false }
 
+  # ─────────── US citizenship / US Person / clearance / gov employment ────────
+  # Defense & federal-contractor Workday postings (e.g. CACI) require these.
+  # They are answered ONLY from EXPLICIT opt-in profile booleans distinct from
+  # usWorkAuthorized (which does not distinguish citizen / green-card / visa).
+  # Any unset field resolves NOTHING -> the question goes to a human. The two
+  # negative-case entries (clearance, gov employment) are GUARDED: they only
+  # pick the safe "No / never" option when the profile explicitly committed the
+  # matching false boolean.
+
+  # "For purposes of obtaining a U.S. security clearance, are you a U.S.
+  # citizen?" and plain "are you a U.S. citizen?" — Yes/No from usCitizen.
+  - key: us_citizen
+    aliases:
+      - "for purposes of obtaining a u s security clearance are you a u s citizen"
+      - "are you a u s citizen"
+      - "are you a united states citizen"
+    strategy: { type: booleanYesNo, source: "authorization.usCitizen" }
+
+  # "Are you a U.S. Person?" (ITAR/EAR: citizen OR green-card OR protected
+  # individual). SEPARATE opt-in from usCitizen — a green-card holder is a US
+  # person but not a citizen. The long CACI body normalizes to this alias.
+  - key: us_person
+    aliases:
+      - "are you a u s person this includes a u s citizen it also includes a lawful permanent resident as defined by 8 u s c 1101 a 20 or who is a protected individual as defined by 8 u s c 324b a 3 it does not include any foreign person as defined in 22 cfr 120 16"
+      - "are you a u s person"
+    strategy: { type: booleanYesNo, source: "authorization.usPerson" }
+
+  # "Do you currently possess an active security clearance?" and "If you
+  # currently possess an active security clearance, which agency sponsored the
+  # clearance?" — GUARDED: resolves the "I do not possess" option ONLY when the
+  # profile explicitly sets hasActiveSecurityClearance: false. If you actually
+  # hold a clearance (true) or left it unset, the specific level/agency goes to
+  # a human — the bank never guesses a clearance level.
+  - key: security_clearance_none
+    aliases:
+      - "do you currently possess an active security clearance"
+      - "if you currently possess an active security clearance which agency sponsored the clearance"
+    strategy:
+      type: choice
+      guard:
+        source: "authorization.hasActiveSecurityClearance"
+        equals: false
+      prefer:
+        - "No, I do not possess an active security clearance."
+        - "I do not possess an active security clearance."
+        - "No"
+        - "None"
+
+  # US-Government employment conflict survey — GUARDED: resolves "never" ONLY
+  # when everEmployedByUSGovernment is explicitly false. If you have been a
+  # government employee (true) or left it unset, the specific status (current /
+  # former within a year / former over a year) goes to a human.
+  - key: us_government_employment_never
+    aliases:
+      - "the below survey requests information from you so that caci can fulfill its obligations to mitigate avoid or eliminate any conflict before assigning you to support one of caci s federal government projects please select the appropriate value regarding your employment history with the u s government"
+      - "please select the appropriate value regarding your employment history with the u s government"
+    strategy:
+      type: choice
+      guard:
+        source: "authorization.everEmployedByUSGovernment"
+        equals: false
+      prefer:
+        - "I have never been employed by the U.S. Government."
+
   - key: requires_sponsorship
     aliases:
       - "will you now or in the future require sponsorship for employment visa status to work in the united states"
@@ -245,6 +309,8 @@ entries:
       - "veteranstatus"
       - "are you a military veteran with one of the united states armed forces"
       - "are you a veteran or active member of the united states armed forces"
+      # Workday (CACI) phrasing; its decline option is "I prefer not to answer".
+      - "have you ever served or are you currently serving in the united states military"
     strategy: { type: decline }
 
   - key: eeo_disability
@@ -336,11 +402,15 @@ entries:
 #   - "have you applied to this role or another role imc within the last
 #     12 18 months..." / "have you applied to marshall wace before" /
 #     "have you worked at accenture in the past" / referred-by-an-employee
+#   - company-history questions: "have you previously worked for CACI" /
+#     "are you a current employee at CACI" — per-company facts the profile
+#     does not encode; a human confirms (usually "No" for an external student)
 #   - "are you considering or committed to pursuing further education..."
 #   - skill/experience claims: ML libraries, programming languages, math
 #     competitions, quant-finance exposure, internships at hedge funds,
 #     2+ years consulting, ERP systems, Python/SQL proficiency
-#   - salary / compensation expectations; essays and free-text prompts
+#   - salary / compensation expectations (incl. "what is your desired salary?"
+#     band selects); essays and free-text prompts
 #   - availability confirmations: "i confirm that the listed dates are
 #     suitable...", 12-month-contract acknowledgment, "i confirm that this
 #     application is my preference for role and location", willing to work
@@ -362,8 +432,11 @@ entries:
 #   - "do you hold a degree in computer science..." (currently PURSUING a
 #     degree does not mean holding one)
 #   - age questions ("are you over 18 years of age", age range) — no DOB field
-#   - citizenship-status questions (export controls / ITAR) — usWorkAuthorized
-#     does not distinguish citizen / green card / visa status
+#   NOTE: citizenship / US-Person / active-clearance / US-Government-employment
+#   questions ARE now auto-answered — but ONLY from the explicit opt-in
+#   authorization.{usCitizen,usPerson,hasActiveSecurityClearance,
+#   everEmployedByUSGovernment} booleans (see the entries above). Leaving any of
+#   them unset keeps that question with a human, exactly as before.
 #   - UK right-to-work, UK sponsorship, UK residency, UK degree classification
 #     — authorization booleans are US-scoped and MUST NOT answer for other
 #     countries

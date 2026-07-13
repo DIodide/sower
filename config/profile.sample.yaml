@@ -28,6 +28,13 @@ work:
 authorization:
   usWorkAuthorized: true
   requiresSponsorship: false
+  # Opt-in fields for defense / federal-contractor postings (e.g. CACI on
+  # Workday). Each is answered ONLY when set; delete any you don't want the
+  # bank to answer and that question goes to a human instead.
+  usCitizen: true # answers explicit "are you a U.S. citizen?" questions
+  usPerson: true # ITAR/EAR "Are you a U.S. Person?" (citizen or green-card)
+  hasActiveSecurityClearance: false # false => "I do not possess a clearance"
+  everEmployedByUSGovernment: false # false => "never employed by the U.S. Gov"
 graduation:
   date: '2028-05' # anticipated graduation month, YYYY-MM
   year: 2028

@@ -42,6 +42,35 @@ export const ProfileSchema = z.object({
   authorization: z.object({
     usWorkAuthorized: z.boolean(),
     requiresSponsorship: z.boolean(),
+    /**
+     * US citizenship. Opt-in and distinct from usWorkAuthorized (which does
+     * NOT distinguish citizen / green-card / visa). Set only when you want the
+     * bank to answer explicit citizenship questions (defense/government
+     * Workday postings ask these). Unset => those questions go to a human.
+     */
+    usCitizen: z.boolean().optional(),
+    /**
+     * "US Person" per ITAR/EAR: a citizen OR lawful permanent resident OR
+     * protected individual. A citizen is always a US person; a green-card
+     * holder is a US person but NOT a citizen — so this is a SEPARATE opt-in
+     * from usCitizen. Unset => "Are you a U.S. Person?" goes to a human.
+     */
+    usPerson: z.boolean().optional(),
+    /**
+     * Whether you currently hold an active US security clearance. Opt-in.
+     * When explicitly false, the bank answers "do you possess a clearance?" /
+     * "which agency sponsored?" with the form's "I do not possess" option.
+     * When true (or unset), the specific level/agency goes to a human — the
+     * bank never guesses a clearance level.
+     */
+    hasActiveSecurityClearance: z.boolean().optional(),
+    /**
+     * Whether you have EVER been employed by the US Government. Opt-in. When
+     * explicitly false, the bank answers government-employment conflict
+     * surveys with "I have never been employed by the U.S. Government." When
+     * true (or unset), the specific status goes to a human.
+     */
+    everEmployedByUSGovernment: z.boolean().optional(),
   }),
   graduation: z
     .object({

@@ -1151,3 +1151,232 @@ describe('answer bank — review fixes (truthfulness)', () => {
     ).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Workday defense / federal-contractor questions (grounded in the real CACI
+// questionnaire). Every answer derives ONLY from an explicit opt-in profile
+// boolean; leaving it unset keeps the question with a human.
+// ---------------------------------------------------------------------------
+
+describe('answer bank — Workday defense/federal questions (CACI)', () => {
+  const bank = loadAnswerBank(DEFAULT_ANSWER_BANK_PATH);
+
+  // Real CACI option sets (labels verbatim; distinct values prove we submit
+  // the VALUE, not the label).
+  const YN_DISCLOSE = opts(['Yes', 'No', 'I choose not to disclose']);
+  const CLEARANCE_POSSESS = opts([
+    'No, I do not possess an active security clearance.',
+    'Secret',
+    'Top Secret',
+    'Confidential',
+  ]);
+  const CLEARANCE_AGENCY = opts([
+    'I do not possess an active security clearance.',
+    'DOD',
+    'CIA',
+    'Other',
+  ]);
+  const GOV_EMPLOYMENT = opts([
+    'I am currently employed by the U.S. Government.',
+    'I am a former U.S. Government officer or employee who left Government service within the last year.',
+    'I am a former U.S. Government officer or employee who left Government service more than one year ago.',
+    'I have never been employed by the U.S. Government.',
+  ]);
+  const MILITARY = opts(['Yes', 'No', 'I prefer not to answer']);
+
+  // Real CACI question bodies (auth block extended with the opt-in fields).
+  const US_PERSON =
+    'Are you a U.S. Person?  This includes a U.S. Citizen.  It also includes a lawful permanent resident as defined by 8 U.S.C. 1101(a)(20) or who is a protected individual as defined by 8 U.S.C. 324b(a)(3). It does not include any foreign person as defined in 22 CFR 120.16.';
+  const US_CITIZEN =
+    'For purposes of obtaining a U.S. security clearance, are you a U.S. citizen?';
+  const GOV_SURVEY =
+    "The below survey requests information from you so that CACI can fulfill its obligations to mitigate, avoid or eliminate any conflict before assigning you to support one of CACI's federal government projects. Please select the appropriate value regarding your employment history with the U.S. Government:";
+  const CLEARANCE_Q = 'Do you currently possess an active security clearance?';
+  const AGENCY_Q =
+    'If you currently possess an active security clearance, which agency sponsored the clearance?';
+  const MILITARY_Q =
+    'Have you ever served or are you currently serving in the United States Military?';
+
+  function authProfile(auth: Record<string, unknown>): Profile {
+    return makeProfile({
+      authorization: {
+        usWorkAuthorized: true,
+        requiresSponsorship: false,
+        ...auth,
+      },
+    });
+  }
+
+  it('answers "are you a U.S. citizen?" from authorization.usCitizen', () => {
+    const question = q({
+      id: 'x',
+      label: US_CITIZEN,
+      type: 'select',
+      options: YN_DISCLOSE,
+    });
+    expect(
+      resolveFromAnswerBank(question, authProfile({ usCitizen: true }), bank)
+        ?.value,
+    ).toBe(optionValue(YN_DISCLOSE, 'Yes'));
+    expect(
+      resolveFromAnswerBank(question, authProfile({ usCitizen: false }), bank)
+        ?.value,
+    ).toBe(optionValue(YN_DISCLOSE, 'No'));
+    // Unset -> a human answers (never guessed, never "choose not to disclose").
+    expect(resolveFromAnswerBank(question, authProfile({}), bank)).toBeNull();
+  });
+
+  it('answers "Are you a U.S. Person?" from the SEPARATE usPerson opt-in', () => {
+    const question = q({
+      id: 'x',
+      label: US_PERSON,
+      type: 'select',
+      options: YN_DISCLOSE,
+    });
+    expect(
+      resolveFromAnswerBank(question, authProfile({ usPerson: true }), bank)
+        ?.value,
+    ).toBe(optionValue(YN_DISCLOSE, 'Yes'));
+    // usCitizen alone must NOT answer US-Person (a green-card holder is a US
+    // person but not a citizen; the fields are deliberately independent).
+    expect(
+      resolveFromAnswerBank(question, authProfile({ usCitizen: true }), bank),
+    ).toBeNull();
+  });
+
+  it('answers "do you possess a clearance?" with the No option only when explicitly false', () => {
+    const question = q({
+      id: 'x',
+      label: CLEARANCE_Q,
+      type: 'select',
+      options: CLEARANCE_POSSESS,
+    });
+    expect(
+      resolveFromAnswerBank(
+        question,
+        authProfile({ hasActiveSecurityClearance: false }),
+        bank,
+      )?.value,
+    ).toBe(
+      optionValue(
+        CLEARANCE_POSSESS,
+        'No, I do not possess an active security clearance.',
+      ),
+    );
+    // Holds a clearance -> the specific level goes to a human (never guessed).
+    expect(
+      resolveFromAnswerBank(
+        question,
+        authProfile({ hasActiveSecurityClearance: true }),
+        bank,
+      ),
+    ).toBeNull();
+    // Unset -> human.
+    expect(resolveFromAnswerBank(question, authProfile({}), bank)).toBeNull();
+  });
+
+  it('answers "which agency sponsored?" with the do-not-possess option when no clearance', () => {
+    const question = q({
+      id: 'x',
+      label: AGENCY_Q,
+      type: 'select',
+      options: CLEARANCE_AGENCY,
+    });
+    expect(
+      resolveFromAnswerBank(
+        question,
+        authProfile({ hasActiveSecurityClearance: false }),
+        bank,
+      )?.value,
+    ).toBe(
+      optionValue(
+        CLEARANCE_AGENCY,
+        'I do not possess an active security clearance.',
+      ),
+    );
+  });
+
+  it('answers the US-Government employment survey with "never" only when explicitly false', () => {
+    const question = q({
+      id: 'x',
+      label: GOV_SURVEY,
+      type: 'select',
+      options: GOV_EMPLOYMENT,
+    });
+    expect(
+      resolveFromAnswerBank(
+        question,
+        authProfile({ everEmployedByUSGovernment: false }),
+        bank,
+      )?.value,
+    ).toBe(
+      optionValue(
+        GOV_EMPLOYMENT,
+        'I have never been employed by the U.S. Government.',
+      ),
+    );
+    // Former/current gov employee -> the specific status goes to a human.
+    expect(
+      resolveFromAnswerBank(
+        question,
+        authProfile({ everEmployedByUSGovernment: true }),
+        bank,
+      ),
+    ).toBeNull();
+    expect(resolveFromAnswerBank(question, authProfile({}), bank)).toBeNull();
+  });
+
+  it('declines the CACI military-service question (its decline option is "I prefer not to answer")', () => {
+    const answer = resolveFromAnswerBank(
+      q({ id: 'x', label: MILITARY_Q, type: 'select', options: MILITARY }),
+      authProfile({}),
+      bank,
+    );
+    expect(answer?.value).toBe(optionValue(MILITARY, 'I prefer not to answer'));
+  });
+
+  it('never auto-answers desired-salary or CACI company-history questions', () => {
+    const salary = q({
+      id: 'x',
+      label: 'What is your desired salary?',
+      type: 'select',
+      options: opts(['Up to $40,000', '$40,000-$60,000', '$200,000+']),
+    });
+    const prior = q({
+      id: 'x',
+      label:
+        'Have you previously worked for CACI (including subsidiaries or affiliates)?',
+      type: 'select',
+      options: opts(['Yes', 'No']),
+    });
+    expect(resolveFromAnswerBank(salary, authProfile({}), bank)).toBeNull();
+    expect(resolveFromAnswerBank(prior, authProfile({}), bank)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Dedup invariant: no two entries in the committed bank claim the same alias.
+// A collision would make matching order-dependent (first-wins), silently
+// shadowing one entry — so we assert uniqueness across the whole bank.
+// ---------------------------------------------------------------------------
+
+describe('answer bank — alias dedup invariant', () => {
+  it('has no duplicate normalized alias across entries', async () => {
+    const { normalizeLabel } = await import('./resolve.js');
+    const bank = loadAnswerBank(DEFAULT_ANSWER_BANK_PATH);
+    const owner = new Map<string, string>();
+    const collisions: string[] = [];
+    for (const entry of bank.entries) {
+      for (const alias of entry.aliases) {
+        const key = normalizeLabel(alias);
+        const prior = owner.get(key);
+        if (prior !== undefined && prior !== entry.key) {
+          collisions.push(`"${key}" claimed by both ${prior} and ${entry.key}`);
+        } else {
+          owner.set(key, entry.key);
+        }
+      }
+    }
+    expect(collisions).toEqual([]);
+  });
+});

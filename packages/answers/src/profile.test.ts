@@ -29,6 +29,10 @@ describe('loadProfile', () => {
     expect(profile.authorization).toEqual({
       usWorkAuthorized: true,
       requiresSponsorship: false,
+      usCitizen: true,
+      usPerson: true,
+      hasActiveSecurityClearance: false,
+      everEmployedByUSGovernment: false,
     });
     expect(profile.custom).toEqual({});
   });
