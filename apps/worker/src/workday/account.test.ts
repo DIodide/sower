@@ -5,9 +5,14 @@ import { FakeWorkdayPage } from './fake-page.js';
 const cred = { email: 'ibraheem.amin2@gmail.com', password: 'S3cret-pw!' };
 
 describe('bootstrapAccount — sign-in', () => {
-  it('fills email/password and submits, returning signed-in', async () => {
+  it('fills email/password, submits, and returns signed-in once the auth form is gone', async () => {
     const page = new FakeWorkdayPage([
-      { present: ['email', 'password', 'signInSubmitButton'] },
+      {
+        present: ['email', 'password', 'signInSubmitButton'],
+        advancesOn: ['signInSubmitButton'],
+      },
+      // Advanced past auth (no email/password) -> success.
+      { heading: 'My Information', present: ['pageFooterNextButton'] },
     ]);
     const outcome = await bootstrapAccount(page, cred, 'sign-in');
     expect(outcome).toBe('signed-in');
@@ -22,7 +27,9 @@ describe('bootstrapAccount — sign-in', () => {
     const page = new FakeWorkdayPage([
       {
         present: ['signInLink', 'email', 'password', 'signInSubmitButton'],
+        advancesOn: ['signInSubmitButton'],
       },
+      { heading: 'My Information' },
     ]);
     await bootstrapAccount(page, cred, 'sign-in');
     expect(page.log.clicked[0]).toBe('signInLink');
@@ -33,16 +40,24 @@ describe('bootstrapAccount — sign-in', () => {
     expect(await bootstrapAccount(page, cred, 'sign-in')).toBe('failed');
   });
 
+  it('returns failed when the auth form persists after submit (captcha/rejected)', async () => {
+    // The submit does NOT advance: email/password are still present, no OTP.
+    const page = new FakeWorkdayPage([
+      {
+        present: ['email', 'password', 'signInSubmitButton'],
+        advancesOn: [],
+      },
+    ]);
+    expect(await bootstrapAccount(page, cred, 'sign-in')).toBe('failed');
+  });
+
   it('returns needs-otp when a verification input appears after submit', async () => {
     const page = new FakeWorkdayPage([
       {
-        present: [
-          'email',
-          'password',
-          'signInSubmitButton',
-          'verificationCode',
-        ],
+        present: ['email', 'password', 'signInSubmitButton'],
+        advancesOn: ['signInSubmitButton'],
       },
+      { present: ['verificationCode'] },
     ]);
     expect(await bootstrapAccount(page, cred, 'sign-in')).toBe('needs-otp');
   });
@@ -60,7 +75,9 @@ describe('bootstrapAccount — create', () => {
           'createAccountCheckbox',
           'createAccountSubmitButton',
         ],
+        advancesOn: ['createAccountSubmitButton'],
       },
+      { heading: 'My Information' },
     ]);
     const outcome = await bootstrapAccount(page, cred, 'create');
     expect(outcome).toBe('created');
@@ -76,7 +93,11 @@ describe('bootstrapAccount — create', () => {
 
   it('tolerates a tenant with no verify-password field / no checkbox', async () => {
     const page = new FakeWorkdayPage([
-      { present: ['email', 'password', 'createAccountSubmitButton'] },
+      {
+        present: ['email', 'password', 'createAccountSubmitButton'],
+        advancesOn: ['createAccountSubmitButton'],
+      },
+      { heading: 'My Information' },
     ]);
     expect(await bootstrapAccount(page, cred, 'create')).toBe('created');
   });
@@ -84,10 +105,22 @@ describe('bootstrapAccount — create', () => {
   it('returns needs-otp when verification is required after create', async () => {
     const page = new FakeWorkdayPage([
       {
-        present: ['email', 'password', 'createAccountSubmitButton', 'otpCode'],
+        present: ['email', 'password', 'createAccountSubmitButton'],
+        advancesOn: ['createAccountSubmitButton'],
       },
+      { present: ['otpCode'] },
     ]);
     expect(await bootstrapAccount(page, cred, 'create')).toBe('needs-otp');
+  });
+
+  it('returns failed when create submit is rejected (form persists)', async () => {
+    const page = new FakeWorkdayPage([
+      {
+        present: ['email', 'password', 'createAccountSubmitButton'],
+        advancesOn: [],
+      },
+    ]);
+    expect(await bootstrapAccount(page, cred, 'create')).toBe('failed');
   });
 });
 

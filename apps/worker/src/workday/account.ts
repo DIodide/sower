@@ -94,9 +94,16 @@ async function createAccount(
 }
 
 /**
- * After an auth submit: if an OTP/verification input appeared, the tenant
- * requires email verification -> 'needs-otp'. Otherwise the expected success
- * outcome. A still-present auth form (submit bounced) is a 'failed'.
+ * After an auth submit, decide the true outcome:
+ * - an OTP/verification input appeared -> 'needs-otp';
+ * - the email/password form is STILL present -> the submit was rejected
+ *   (bad creds, or — commonly on Workday — an invisible reCAPTCHA blocking
+ *   the headless/low-trust session) -> 'failed';
+ * - otherwise we advanced past the auth step -> the expected success.
+ *
+ * The "still present" check is load-bearing: Workday's SPA does not surface an
+ * error on a captcha-blocked submit, so success can ONLY be inferred from the
+ * auth form being gone — never from the mere absence of an OTP field.
  */
 async function afterAuthSubmit(
   page: WorkdayPage,
@@ -104,6 +111,13 @@ async function afterAuthSubmit(
 ): Promise<AccountOutcome> {
   if (await page.isPresent(WORKDAY_IDS.verificationCodeInput)) {
     return 'needs-otp';
+  }
+  // Still on the auth form => the submit did not take (rejected / captcha).
+  if (
+    (await page.isPresent(WORKDAY_IDS.email)) &&
+    (await page.isPresent(WORKDAY_IDS.password))
+  ) {
+    return 'failed';
   }
   return success;
 }

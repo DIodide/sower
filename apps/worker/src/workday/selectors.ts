@@ -52,6 +52,8 @@ export const WORKDAY_IDS = {
   nextButton: ['pageFooterNextButton', 'bottom-navigation-next-button'],
   submitButton: ['pageFooterSubmitButton', 'bottom-navigation-submit-button'],
   progressBar: ['progressBar'],
+  /** The active step in the progress bar (its text IS the step name). */
+  progressActiveStep: ['progressBarActiveStep'],
 
   /** Resume upload (the file input lives inside the resume section). */
   resumeUploadInput: ['file-upload-input-ref'],

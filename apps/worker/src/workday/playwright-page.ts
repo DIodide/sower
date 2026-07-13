@@ -41,8 +41,12 @@ export class PlaywrightWorkdayPage implements WorkdayPage {
   }
 
   async heading(): Promise<string> {
-    // Prefer the active progress-bar step, then the most prominent headings.
+    // Prefer the active progress-bar STEP (its text is the step name, e.g.
+    // "My Information"/"Review"). Only fall back to page headings when there
+    // is no progress bar — the job title (an <h2>) persists across the whole
+    // apply flow and must NOT be mistaken for the current step.
     const candidates = [
+      anyAutomationId(WORKDAY_IDS.progressActiveStep),
       `${anyAutomationId(WORKDAY_IDS.progressBar)} [aria-current="step"]`,
       'h1',
       'h2',
@@ -118,6 +122,14 @@ export class PlaywrightWorkdayPage implements WorkdayPage {
   }
 
   async scrapeFields(): Promise<RawField[]> {
+    // tsx/esbuild instruments named functions with a module-level `__name`
+    // helper. Playwright serializes the evaluate callback via toString(), so
+    // those `__name(...)` calls reach the browser where the helper is
+    // undefined — a ReferenceError. Define a no-op shim in the page first
+    // (passed as a STRING so it is not itself instrumented).
+    await this.page.evaluate(
+      'globalThis.__name = globalThis.__name || function (f) { return f; };',
+    );
     // Runs in the browser context; must be self-contained (no imports).
     return this.page.evaluate(() => {
       const results: Array<{
