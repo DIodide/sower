@@ -1,0 +1,78 @@
+{
+  "jobPostingInfo": {
+    "id": "5a3607b229241001bbc61bf873cb0001",
+    "title": "Software Intern",
+    "jobDescription": "<h2><b><span class=\"emphasis\">At Cadence, we hire and develop leaders and innovators who want to make an impact on the world of technology.</span></b></h2><p><span><span><span><span>We are looking for a highly motivated software intern to work on the research and development using the state-of-the-art machine learning technologies in the area of on-chip in parasitic modeling, in a fast-paced, small team environment.</span></span></span></span></p><p><span><span><span><span><span>\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0</span></span></span></span></span></p><p><span><span><span><span><span>Position <span>Requirements:\u00a0\u00a0</span> </span></span></span></span></span></p><ul><li><span><span><span><span>Fast learner, highly motivated with good communication skills to solve extremely challenging technical problems, in a start-up like environment.</span></span></span></span></li><li><span><span><span><span>Strong algorithm background, programming skills and implementation for the processing of large amount of data</span></span></span></span></li><li><span><span><span><span>Knowledge and experience with state-of-the-art machine learning technologies, \u00a0parasitic modeling is a big plus</span></span></span></span></li><li><span><span><span><span>Experience in C/C&#43;&#43; coding, with any of the following background: CS, Mathematics, Physics or EE.</span></span></span></span></li><li><span><span><span><span>Knowledge in UNIX shell and scripting language like Python, Perl</span></span></span></span></li><li><span><span><span><span>ML knowledge is a plus</span></span></span></span></li><li><span><span><span><span>Minimum: Master or PhD graduate candidates</span></span></span></span></li></ul><p></p><p>\u200b<i>The hourly range for California is $31.63 <span>to $58.75 </span>per hour. You may also be eligible to receive incentive compensation: bonus, equity, and benefits. Please note that the hourly range is a guideline and compensation may vary based on factors such as qualifications, skill level, competencies and work location. Our benefits programs include: paid vacation and paid holidays, 401(k) plan with employer match, employee stock purchase plan, a variety of medical, dental and vision plan options, and more.</i><span><span><span><span><span>\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0\u00a0</span></span></span></span></span></p><h2><span class=\"emphasis\"><b>We\u2019re doing work that matters. Help us solve what others can\u2019t.</b></span></h2>",
+    "location": "SAN JOSE",
+    "postedOn": "Posted 30+ Days Ago",
+    "startDate": "2026-04-16",
+    "timeType": "Full time",
+    "jobReqId": "R53282",
+    "jobPostingId": "Software-Intern_R53282-1",
+    "jobPostingSiteId": "External_Careers",
+    "country": {
+      "descriptor": "United States of America",
+      "id": "bc33aa3152ec42d4995f4791a106ed09"
+    },
+    "canApply": true,
+    "posted": true,
+    "includeResumeParsing": true,
+    "jobRequisitionLocation": {
+      "descriptor": "SAN JOSE 10",
+      "country": {
+        "descriptor": "United States of America",
+        "id": "bc33aa3152ec42d4995f4791a106ed09",
+        "alpha2Code": "US"
+      }
+    },
+    "externalUrl": "https://cadence.wd1.myworkdayjobs.com/External_Careers/job/SAN-JOSE/Software-Intern_R53282-1",
+    "questionnaireId": "6598c240a7d1013fc7a28f6e5f16c953"
+  },
+  "hiringOrganization": {
+    "name": "",
+    "url": ""
+  },
+  "similarJobs": [
+    {
+      "title": "Software Engineer II",
+      "externalPath": "/job/SAN-JOSE/Software-Engineer-II_R54151-1",
+      "timeType": "Full time",
+      "locationsText": "SAN JOSE",
+      "postedOn": "Posted 30+ Days Ago",
+      "startDate": "2026-04-22"
+    },
+    {
+      "title": "Software Engineer II",
+      "externalPath": "/job/SAN-JOSE/Software-Engineer-II_R54765-2",
+      "timeType": "Full time",
+      "locationsText": "SAN JOSE",
+      "postedOn": "Posted 30+ Days Ago",
+      "startDate": "2026-05-13"
+    },
+    {
+      "title": "Software Engineer II",
+      "externalPath": "/job/SAN-JOSE/Software-Engineer-II_R55205-1",
+      "timeType": "Full time",
+      "locationsText": "SAN JOSE",
+      "postedOn": "Posted 26 Days Ago",
+      "startDate": "2026-06-16"
+    },
+    {
+      "title": "Sr. Principal Software Engineer",
+      "externalPath": "/job/SAN-JOSE/Sr-Principal-Software-Engineer_R53396",
+      "timeType": "Full time",
+      "locationsText": "SAN JOSE",
+      "postedOn": "Posted 30+ Days Ago",
+      "startDate": "2026-02-26"
+    },
+    {
+      "title": "Software Engineer II",
+      "externalPath": "/job/SAN-JOSE/Software-Engineer-II_R51635-1",
+      "timeType": "Full time",
+      "locationsText": "SAN JOSE",
+      "postedOn": "Posted 26 Days Ago",
+      "startDate": "2026-06-16"
+    }
+  ],
+  "userAuthenticated": false
+}

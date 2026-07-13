@@ -170,19 +170,30 @@ export async function processTask(
     );
     // REVIEW gates on REQUIRED answers only; optional gaps never block.
     const requiredMissing = missing.filter((question) => question.required);
+    // 'account-required' specs (workday) have NO discoverable questions at this
+    // tier — the form is behind an account + browser session. Such a task must
+    // NOT flow to REVIEW (which implies "ready to approve & submit"); it parks
+    // in NEEDS_INPUT until the account/browser tier can fill it.
+    const accountRequired = jobSpec.formAccess === 'account-required';
     const resolution: ResolutionResult = {
       resolved,
       missing,
       requiredMissingCount: requiredMissing.length,
       optionalMissingCount: missing.length - requiredMissing.length,
     };
+    if (accountRequired) {
+      resolution.note =
+        'Applying to this Workday job requires a per-tenant candidate account and a browser session, which the account/browser tier has not run yet. The title, company, and description are captured; the application form is not yet automatable.';
+    }
     await db
       .update(applicationTasks)
       .set({ resolution, updatedAt: new Date() })
       .where(eq(applicationTasks.id, taskId));
 
     const event =
-      requiredMissing.length === 0 ? 'RESOLVED_ALL' : 'RESOLVED_PARTIAL';
+      requiredMissing.length === 0 && !accountRequired
+        ? 'RESOLVED_ALL'
+        : 'RESOLVED_PARTIAL';
     currentState = await transitionTask(db, taskId, currentState, event, {
       resolved: resolved.length,
       missing: missing.length,

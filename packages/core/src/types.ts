@@ -56,6 +56,22 @@ export interface JobSpec {
   description?: string;
   /** Raw HTML (or entity-encoded HTML) job description as returned by the source. */
   descriptionHtml?: string;
+  /**
+   * How the application form is reached. Absent/'public' means the questions
+   * are fully discoverable at the network tier (greenhouse/ashby/lever), so a
+   * spec with no missing required answers is genuinely ready for REVIEW.
+   * 'account-required' means the questions live behind an authenticated,
+   * per-tenant candidate account + browser session (workday): `questions` is
+   * empty at discover time, so the task must NOT be treated as
+   * ready-to-submit — it parks for the account/browser tier instead.
+   */
+  formAccess?: 'public' | 'account-required';
+  /**
+   * Adapter-specific metadata preserved for later tiers (persisted with the
+   * spec). Workday stashes the cxs `site`/`externalPath`/`questionnaireId`
+   * here so the browser tier can resume without re-deriving them.
+   */
+  meta?: Record<string, unknown>;
 }
 
 export interface ResolvedAnswer {
@@ -79,6 +95,13 @@ export interface ResolutionResult {
   requiredMissingCount?: number;
   /** Count of missing questions with required === false. */
   optionalMissingCount?: number;
+  /**
+   * Human-readable reason the task is parked, when the parking is not simply
+   * "some required answers are missing" — e.g. a Workday job whose form is
+   * behind an account/browser tier that hasn't run yet. Surfaced on the
+   * dashboard so a NEEDS_INPUT task explains itself.
+   */
+  note?: string;
 }
 
 export interface PlatformRef {

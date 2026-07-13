@@ -18,3 +18,10 @@ export { recordedFetch } from './recorder.js';
 export { getAdapter } from './registry.js';
 export { resolveUrl } from './resolve-url.js';
 export { realSubmit } from './submit-common.js';
+export {
+  parseWorkdayJobUrl,
+  WorkdayAdapter,
+  WorkdayBrowserTierRequiredError,
+  WorkdayJobUnavailableError,
+  type WorkdayJobUrlParts,
+} from './workday/index.js';
