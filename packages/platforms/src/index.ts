@@ -54,6 +54,7 @@ export {
   parseWorkdayQuestionnaire,
   type WorkdayQuestionnaireField,
   type WorkdayQuestionOption,
+  workdayFieldsToQuestions,
 } from './workday/questionnaire.js';
 export {
   buildQuestionnaireResolution,
@@ -63,3 +64,9 @@ export {
   type QuestionnaireResolution,
   resolveQuestionnaireAnswer,
 } from './workday/questionnaire-responses.js';
+export {
+  loadWorkdaySession,
+  type SessionVault,
+  saveWorkdaySession,
+  sessionStoragePath,
+} from './workday/session.js';

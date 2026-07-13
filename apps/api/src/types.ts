@@ -7,6 +7,7 @@ import type {
   ApprovalVerdict,
   OtpRequestCard,
 } from '@sower/notify';
+import type { Storage } from '@sower/storage';
 import type { Config } from './config.js';
 
 export type Db = ReturnType<typeof createDb>;
@@ -58,6 +59,12 @@ export interface Deps {
    * answers without it — existing behavior is preserved.
    */
   answerBank?: AnswerBank;
+  /**
+   * Vault storage. Used to load a captured Workday session (per tenant) so the
+   * pipeline can read that job's questionnaire into jobSpec.questions. Omit to
+   * disable Workday questionnaire reading (tasks park account-required).
+   */
+  storage?: Storage;
   /** Set to false in tests to silence the pino logger. Defaults to true. */
   logger?: boolean;
 }

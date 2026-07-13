@@ -1,3 +1,4 @@
+import type { Question } from '@sower/core';
 import { htmlEntityEncodedToPlainText } from '../description.js';
 
 /**
@@ -245,4 +246,38 @@ export function parseQuestionnaireDefinition(
   }
   fields.sort((a, b) => compareOrder(a.order, b.order));
   return fields;
+}
+
+/**
+ * Convert parsed Workday questionnaire fields into the platform-neutral
+ * `Question[]` the task pipeline + answer resolver use, so Workday flows
+ * through the SAME resolve → NEEDS_INPUT → dashboard → bank spine as every
+ * other platform. Choice options become QuestionOptions matched on the human
+ * descriptor (buildQuestionnaireResolution maps the chosen descriptor back to
+ * the option GUID). Conditional/branch fields carry their required=false.
+ */
+export function workdayFieldsToQuestions(
+  fields: WorkdayQuestionnaireField[],
+): Question[] {
+  return fields.map((field): Question => {
+    const type: Question['type'] =
+      field.control === 'select'
+        ? 'select'
+        : field.control === 'file'
+          ? 'file'
+          : 'text';
+    const question: Question = {
+      id: field.id,
+      label: field.label,
+      type,
+      required: field.required,
+    };
+    if (field.options && field.options.length > 0) {
+      question.options = field.options.map((o) => ({
+        label: o.descriptor,
+        value: o.descriptor,
+      }));
+    }
+    return question;
+  });
 }

@@ -15,7 +15,12 @@ import {
   jobDescriptions,
   jobs,
 } from '@sower/db';
-import { getAdapter } from '@sower/platforms';
+import {
+  CalypsoClient,
+  getAdapter,
+  loadWorkdaySession,
+  workdayFieldsToQuestions,
+} from '@sower/platforms';
 import { and, desc, eq, inArray, lt, sql } from 'drizzle-orm';
 import { postReviewApprovalCard } from './discord.js';
 import { createTaskRecorder } from './recorder.js';
@@ -111,6 +116,12 @@ export async function processTask(
       job.url,
       { recorder },
     );
+    // Workday: the adapter returns account-required with NO questions (they live
+    // behind a per-tenant session). When a session is captured for this tenant,
+    // read the questionnaire here so its fields flow through resolve/REVIEW like
+    // any other platform — the task pipeline stays the single spine. Best-effort:
+    // no session / no questionnaireId / a dead session leaves the task parked.
+    await enrichWorkdayQuestionnaire(deps, jobSpec);
     await db
       .update(applicationTasks)
       .set({ jobSpec, updatedAt: new Date() })
@@ -234,6 +245,63 @@ export async function processTask(
       attempt: claimed.attempt,
       gaveUp: claimed.attempt >= MAX_ATTEMPTS,
     };
+  }
+}
+
+/**
+ * Fold a Workday job's questionnaire into jobSpec.questions when a captured
+ * session for its tenant is in the vault. The adapter returns Workday specs as
+ * `account-required` with the posting's questionnaireId in meta and no
+ * questions (they live behind a per-tenant candidate session). This reads that
+ * questionnaire via the `common` GET — which does NOT start an application — so
+ * the questions resolve against the bank/profile and the task flows to
+ * REVIEW/NEEDS_INPUT exactly like a public form. The pipeline thus stays the
+ * single spine across platforms; only the read source differs.
+ *
+ * Best-effort by design: a missing storage dep, missing questionnaireId,
+ * absent session, or an expired session all leave the spec account-required so
+ * the task parks in NEEDS_INPUT (surfacing "capture a session" to the human)
+ * rather than failing. Submission still requires the session at the fill step.
+ */
+async function enrichWorkdayQuestionnaire(
+  deps: Deps,
+  jobSpec: JobSpec,
+): Promise<void> {
+  if (
+    jobSpec.platform !== 'workday' ||
+    jobSpec.formAccess !== 'account-required' ||
+    jobSpec.questions.length > 0 ||
+    !deps.storage
+  ) {
+    return;
+  }
+  const questionnaireId = jobSpec.meta?.questionnaireId;
+  if (typeof questionnaireId !== 'string' || questionnaireId.length === 0) {
+    return;
+  }
+  const session = await loadWorkdaySession(deps.storage, jobSpec.tenant).catch(
+    () => null,
+  );
+  if (!session) {
+    return;
+  }
+  try {
+    const fields = await new CalypsoClient(session).getQuestionnaire(
+      questionnaireId,
+    );
+    jobSpec.questions = workdayFieldsToQuestions(fields);
+    // Questions are now known and answerable, so for the pipeline's purposes
+    // the task is no longer account-required: it flows to REVIEW/NEEDS_INPUT
+    // like a public form. (Submission still needs the session, gated at fill.)
+    jobSpec.formAccess = 'public';
+  } catch (error) {
+    // A dead/expired session (or a transient read failure) must not fail the
+    // task — leave it account-required so it parks in NEEDS_INPUT and the human
+    // is prompted to re-capture a session.
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `[sower] workday questionnaire read failed for tenant ${jobSpec.tenant}: ${message}`,
+    );
   }
 }
 

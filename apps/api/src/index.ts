@@ -8,6 +8,7 @@ import {
   verifyInteraction,
 } from '@sower/notify';
 import { createQueue } from '@sower/queue';
+import { createStorage } from '@sower/storage';
 import { loadConfig } from './config.js';
 import { processTask } from './process.js';
 import { buildServer } from './server.js';
@@ -45,7 +46,10 @@ async function main(): Promise<void> {
   const queue: Queue = createQueue(config, async (taskId: string) => {
     await processTask(deps, taskId);
   });
-  deps = { db, queue, config, notify, answerBank };
+  // Vault storage — lets the pipeline load a captured Workday session to read
+  // that job's questionnaire into the task's questions.
+  const storage = createStorage();
+  deps = { db, queue, config, notify, answerBank, storage };
 
   const app = buildServer(deps);
   await app.listen({ port: config.PORT, host: '0.0.0.0' });

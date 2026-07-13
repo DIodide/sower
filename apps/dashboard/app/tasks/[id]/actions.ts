@@ -14,7 +14,7 @@ import { normalizeLabel } from '@sower/answers';
 import type { Question } from '@sower/core';
 import { answers, applicationTasks, documents, jobs } from '@sower/db';
 import { createStorage } from '@sower/storage';
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { getDb } from '../../../lib/db';

@@ -24,42 +24,104 @@ const answersState = vi.hoisted(() => ({
   lastOpts: undefined as unknown,
 }));
 
+// Controls the Workday questionnaire-read path (enrichWorkdayQuestionnaire):
+// the adapter returns account-required with meta.questionnaireId; the pipeline
+// then loads a session and reads the questionnaire. These knobs stand in for
+// the vault session, the posting's questionnaireId, the read result, and any
+// read failure.
+const workdayState = vi.hoisted(() => ({
+  session: null as unknown,
+  questionnaireId: null as string | null,
+  fields: [] as unknown[],
+  readError: null as string | null,
+  getQuestionnaireCalls: [] as string[],
+}));
+
 vi.mock('@sower/platforms', () => ({
-  getAdapter: (platform: string) =>
-    platform === 'greenhouse'
-      ? {
-          discover: async (
-            _ref: unknown,
-            _url: unknown,
-            opts?: { recorder?: unknown },
-          ) => {
-            adapterState.lastDiscoverOpts = opts;
-            if (adapterState.discoverError) {
-              throw new Error(adapterState.discoverError);
-            }
-            return {
-              platform: 'greenhouse',
-              tenant: 'acme',
-              externalId: 'swe-1',
-              title: adapterState.title ?? 'Software Engineer Intern',
-              applyUrl: 'https://boards.greenhouse.io/acme/jobs/123',
-              questions: adapterState.questions,
-              ...(adapterState.company !== undefined
-                ? { company: adapterState.company }
-                : {}),
-              ...(adapterState.description !== undefined
-                ? { description: adapterState.description }
-                : {}),
-              ...(adapterState.formAccess !== undefined
-                ? { formAccess: adapterState.formAccess }
-                : {}),
-            };
-          },
-          submit: async () => {
-            throw new Error('submit disabled');
-          },
-        }
-      : null,
+  getAdapter: (platform: string) => {
+    if (platform === 'greenhouse') {
+      return {
+        discover: async (
+          _ref: unknown,
+          _url: unknown,
+          opts?: { recorder?: unknown },
+        ) => {
+          adapterState.lastDiscoverOpts = opts;
+          if (adapterState.discoverError) {
+            throw new Error(adapterState.discoverError);
+          }
+          return {
+            platform: 'greenhouse',
+            tenant: 'acme',
+            externalId: 'swe-1',
+            title: adapterState.title ?? 'Software Engineer Intern',
+            applyUrl: 'https://boards.greenhouse.io/acme/jobs/123',
+            questions: adapterState.questions,
+            ...(adapterState.company !== undefined
+              ? { company: adapterState.company }
+              : {}),
+            ...(adapterState.description !== undefined
+              ? { description: adapterState.description }
+              : {}),
+            ...(adapterState.formAccess !== undefined
+              ? { formAccess: adapterState.formAccess }
+              : {}),
+          };
+        },
+        submit: async () => {
+          throw new Error('submit disabled');
+        },
+      };
+    }
+    if (platform === 'workday') {
+      return {
+        discover: async (
+          _ref: unknown,
+          _url: unknown,
+          opts?: { recorder?: unknown },
+        ) => {
+          adapterState.lastDiscoverOpts = opts;
+          if (adapterState.discoverError) {
+            throw new Error(adapterState.discoverError);
+          }
+          // The adapter always returns account-required with NO questions; the
+          // questionnaireId (when the posting advertises one) rides in meta.
+          return {
+            platform: 'workday',
+            tenant: 'acme-wd',
+            externalId: 'wd-1',
+            title: 'Software Engineering Intern',
+            applyUrl: 'https://acme.wd1.myworkdayjobs.com/external/job/x/SWE_1',
+            questions: [],
+            formAccess: 'account-required',
+            meta: {
+              site: 'External',
+              externalPath: '/job/x/SWE_1',
+              questionnaireId: workdayState.questionnaireId,
+            },
+          };
+        },
+        submit: async () => {
+          throw new Error('submit disabled');
+        },
+      };
+    }
+    return null;
+  },
+  loadWorkdaySession: async (_vault: unknown, _tenant: string) =>
+    workdayState.session,
+  // The pure field→Question mapping is unit-tested in @sower/platforms; here a
+  // passthrough keeps the pipeline assertions decoupled from that mapping.
+  workdayFieldsToQuestions: (fields: unknown[]) => fields,
+  CalypsoClient: class {
+    async getQuestionnaire(id: string) {
+      workdayState.getQuestionnaireCalls.push(id);
+      if (workdayState.readError) {
+        throw new Error(workdayState.readError);
+      }
+      return workdayState.fields;
+    }
+  },
 }));
 
 vi.mock('@sower/answers', () => ({
@@ -122,6 +184,8 @@ function createFakeTaskDb(initial: {
   descriptions?: FakeDescriptionRow[];
   /** answers-table rows the bank select resolves (company '' = global). */
   bank?: Array<{ normalizedLabel: string; value: unknown; company: string }>;
+  /** Platform of the job row; defaults to greenhouse. */
+  platform?: string;
 }) {
   const task: FakeTaskRow = {
     id: 'task-1',
@@ -133,12 +197,15 @@ function createFakeTaskDb(initial: {
     lastError: null,
     updatedAt: new Date(0),
   };
+  const isWorkday = initial.platform === 'workday';
   const job: FakeJobRow = {
     id: 'job-1',
-    url: 'https://boards.greenhouse.io/acme/jobs/123',
-    platform: 'greenhouse',
-    tenant: 'acme',
-    externalId: 'swe-1',
+    url: isWorkday
+      ? 'https://acme.wd1.myworkdayjobs.com/external/job/x/SWE_1'
+      : 'https://boards.greenhouse.io/acme/jobs/123',
+    platform: initial.platform ?? 'greenhouse',
+    tenant: isWorkday ? 'acme-wd' : 'acme',
+    externalId: isWorkday ? 'wd-1' : 'swe-1',
     company: initial.company ?? null,
     title: initial.title ?? null,
   };
@@ -335,6 +402,11 @@ beforeEach(() => {
   adapterState.formAccess = undefined;
   answersState.result = { resolved: [], missing: [] };
   answersState.lastOpts = undefined;
+  workdayState.session = null;
+  workdayState.questionnaireId = null;
+  workdayState.fields = [];
+  workdayState.readError = null;
+  workdayState.getQuestionnaireCalls = [];
 });
 
 /** sha256 hex of `content`, matching process.ts's content_hash computation. */
@@ -592,6 +664,141 @@ describe('processTask', () => {
       toState: 'FAILED',
       data: { error: 'boom', attempt: 1 },
     });
+  });
+});
+
+describe('processTask Workday questionnaire read (session-gated)', () => {
+  // A truthy vault stub; loadWorkdaySession is mocked and ignores it, so only
+  // its presence (deps.storage) matters to the pipeline.
+  const storage = {} as unknown as NonNullable<Deps['storage']>;
+  const workdayQuestion = {
+    id: 'q-clearance',
+    label: 'Do you have a security clearance?',
+    type: 'select',
+    required: true,
+    options: [
+      { label: 'Yes', value: 'Yes' },
+      { label: 'No', value: 'No' },
+    ],
+  };
+
+  it('reads the questionnaire and flows to REVIEW when a session is present', async () => {
+    const { db, task, eventRows } = createFakeTaskDb({
+      state: 'QUEUED',
+      platform: 'workday',
+    });
+    workdayState.session = { tenant: 'acme-wd', cookie: 'x', csrfToken: 'y' };
+    workdayState.questionnaireId = 'Q-123';
+    workdayState.fields = [workdayQuestion];
+    // The read questions resolve fully (bank/profile), so nothing is missing.
+    answersState.result = { resolved: [workdayQuestion], missing: [] };
+
+    const outcome = await processTask(createDeps(db, { storage }), 'task-1');
+
+    // The questionnaire was read with the posting's id...
+    expect(workdayState.getQuestionnaireCalls).toEqual(['Q-123']);
+    // ...its fields became the task's questions, and the spec is no longer
+    // account-required — it flows through the SAME spine to REVIEW.
+    const spec = task.jobSpec as { questions: unknown[]; formAccess: string };
+    expect(spec.questions).toEqual([workdayQuestion]);
+    expect(spec.formAccess).toBe('public');
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'REVIEW' });
+    expect(task.state).toBe('REVIEW');
+    // Not parked: no account-required note.
+    expect((task.resolution as { note?: string }).note).toBeUndefined();
+    expect(eventRows.map((e) => e.type)).toContain('RESOLVED_ALL');
+  });
+
+  it('reads the questionnaire but parks NEEDS_INPUT when a required answer is missing', async () => {
+    const { db, task } = createFakeTaskDb({
+      state: 'QUEUED',
+      platform: 'workday',
+    });
+    workdayState.session = { tenant: 'acme-wd', cookie: 'x', csrfToken: 'y' };
+    workdayState.questionnaireId = 'Q-123';
+    workdayState.fields = [workdayQuestion];
+    // A required question the bank/profile can't answer -> genuine NEEDS_INPUT.
+    answersState.result = { resolved: [], missing: [workdayQuestion] };
+
+    const outcome = await processTask(createDeps(db, { storage }), 'task-1');
+
+    expect(workdayState.getQuestionnaireCalls).toEqual(['Q-123']);
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'NEEDS_INPUT' });
+    // Parked because a real question is unanswered — NOT the account-required
+    // park, so no Workday note (the dashboard shows the actual missing field).
+    expect((task.resolution as { note?: string }).note).toBeUndefined();
+  });
+
+  it('parks account-required (never reads) when no session is captured', async () => {
+    const { db, task } = createFakeTaskDb({
+      state: 'QUEUED',
+      platform: 'workday',
+    });
+    workdayState.session = null; // nothing in the vault for this tenant
+    workdayState.questionnaireId = 'Q-123';
+
+    const outcome = await processTask(createDeps(db, { storage }), 'task-1');
+
+    // No read attempted; the spec stays account-required and parks with the
+    // "capture a session" note surfaced to the human.
+    expect(workdayState.getQuestionnaireCalls).toEqual([]);
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'NEEDS_INPUT' });
+    const spec = task.jobSpec as { questions: unknown[]; formAccess: string };
+    expect(spec.questions).toEqual([]);
+    expect(spec.formAccess).toBe('account-required');
+    expect((task.resolution as { note?: string }).note).toMatch(/Workday/);
+  });
+
+  it('parks gracefully when the read fails (expired session), never fails the task', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { db, task } = createFakeTaskDb({
+      state: 'QUEUED',
+      platform: 'workday',
+    });
+    workdayState.session = { tenant: 'acme-wd', cookie: 'x', csrfToken: 'y' };
+    workdayState.questionnaireId = 'Q-123';
+    workdayState.readError = 'workday session expired (401)';
+
+    const outcome = await processTask(createDeps(db, { storage }), 'task-1');
+
+    expect(workdayState.getQuestionnaireCalls).toEqual(['Q-123']);
+    // A dead session must not FAIL the task — it parks account-required.
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'NEEDS_INPUT' });
+    const spec = task.jobSpec as { questions: unknown[]; formAccess: string };
+    expect(spec.formAccess).toBe('account-required');
+    expect((task.resolution as { note?: string }).note).toMatch(/Workday/);
+    warn.mockRestore();
+  });
+
+  it('does not read when the posting advertises no questionnaireId', async () => {
+    const { db, task } = createFakeTaskDb({
+      state: 'QUEUED',
+      platform: 'workday',
+    });
+    workdayState.session = { tenant: 'acme-wd', cookie: 'x', csrfToken: 'y' };
+    workdayState.questionnaireId = null; // posting has no questionnaire
+
+    const outcome = await processTask(createDeps(db, { storage }), 'task-1');
+
+    expect(workdayState.getQuestionnaireCalls).toEqual([]);
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'NEEDS_INPUT' });
+    expect((task.resolution as { note?: string }).note).toMatch(/Workday/);
+  });
+
+  it('does not read when no storage (vault) dep is configured', async () => {
+    const { db, task } = createFakeTaskDb({
+      state: 'QUEUED',
+      platform: 'workday',
+    });
+    workdayState.session = { tenant: 'acme-wd', cookie: 'x', csrfToken: 'y' };
+    workdayState.questionnaireId = 'Q-123';
+
+    // createDeps WITHOUT storage -> the pipeline can't load a session.
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(workdayState.getQuestionnaireCalls).toEqual([]);
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'NEEDS_INPUT' });
+    expect((task.resolution as { note?: string }).note).toMatch(/Workday/);
   });
 });
 
