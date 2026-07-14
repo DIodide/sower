@@ -171,15 +171,26 @@ export const apiCalls = pgTable(
   (table) => [index('api_calls_task_id_idx').on(table.taskId)],
 );
 
-export const documents = pgTable('documents', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  kind: text('kind').notNull(),
-  filename: text('filename').notNull(),
-  storagePath: text('storage_path').notNull(),
-  contentType: text('content_type'),
-  sizeBytes: integer('size_bytes'),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
-});
+export const documents = pgTable(
+  'documents',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    kind: text('kind').notNull(),
+    filename: text('filename').notNull(),
+    storagePath: text('storage_path').notNull(),
+    contentType: text('content_type'),
+    sizeBytes: integer('size_bytes'),
+    /**
+     * The job this document belongs to (e.g. a 'screenshot' captured from a
+     * Discord ingest attachment). Null for job-agnostic documents like the
+     * resume/cover-letter library uploads.
+     */
+    jobId: uuid('job_id').references(() => jobs.id),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  },
+  // The task detail page reads a job's screenshots by job_id.
+  (table) => [index('documents_job_id_idx').on(table.jobId)],
+);
 
 export const jobDescriptions = pgTable(
   'job_descriptions',

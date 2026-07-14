@@ -148,6 +148,17 @@ export interface DiscordChannelMessage {
   content: string;
   author?: { id: string; bot?: boolean };
   reactions?: { me: boolean; emoji: { name: string | null } }[];
+  /** Uploaded files (screenshots etc.) as Discord returns them (CDN urls). */
+  attachments?: {
+    id: string;
+    filename: string;
+    content_type?: string;
+    url: string;
+    proxy_url?: string;
+    size: number;
+    width?: number;
+    height?: number;
+  }[];
 }
 
 /**

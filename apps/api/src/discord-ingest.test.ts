@@ -8,6 +8,16 @@ import {
 } from './discord-ingest.js';
 import type { Deps } from './types.js';
 
+const CDN_URL = 'https://cdn.discordapp.com/attachments/1/2/shot.png';
+
+const IMAGE_ATTACHMENT = {
+  id: 'att-1',
+  filename: 'shot.png',
+  content_type: 'image/png',
+  url: CDN_URL,
+  size: 3,
+};
+
 const platformState = vi.hoisted(() => ({
   byUrl: {} as Record<
     string,
@@ -48,6 +58,11 @@ vi.mock('./ingest.js', () => ({
 vi.mock('./link-extract.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./link-extract.js')>()),
   fetchJobLinks: vi.fn(async (url: string) => dirState.byUrl[url] ?? []),
+}));
+
+// Screenshot ingest vaults image bytes; never touch the real vault in tests.
+vi.mock('@sower/storage', () => ({
+  createStorage: () => ({ put: vi.fn(async () => {}) }),
 }));
 
 beforeEach(() => {
@@ -193,6 +208,7 @@ describe('reactionFor / replyFor', () => {
     unsupported: 0,
     directories: 0,
     errors: 0,
+    screenshots: 0,
     outcomes: [],
   };
   it('picks the highest-signal emoji', () => {
@@ -202,9 +218,17 @@ describe('reactionFor / replyFor', () => {
     expect(reactionFor({ ...base, duplicates: 1 })).toBe('♻️');
     expect(reactionFor({ ...base })).toBe('❌');
   });
+  it('marks a screenshot-only message handled (never ❌)', () => {
+    expect(reactionFor({ ...base, screenshots: 1 })).toBe('🖼️');
+    // A queued link still outranks the screenshot marker.
+    expect(reactionFor({ ...base, screenshots: 1, ingested: 1 })).toBe('✅');
+  });
   it('summarizes counts in the reply', () => {
     expect(replyFor({ ...base, ingested: 2, unsupported: 1 })).toContain(
       '✅ 2 queued',
+    );
+    expect(replyFor({ ...base, screenshots: 1 })).toContain(
+      '🖼️ 1 screenshot recorded — triage on dashboard',
     );
     expect(replyFor({ ...base })).toMatch(/No job links/);
   });
@@ -214,6 +238,7 @@ describe('runDiscordIngestPoll', () => {
   function fakeDeps(messages: unknown[]) {
     const reactions: { id: string; emoji: string }[] = [];
     const replies: string[] = [];
+    const inserted: Record<string, unknown>[] = [];
     const notify = {
       fetchChannelMessages: vi.fn(async () => messages),
       addReaction: vi.fn(async (_c: string, id: string, emoji: string) => {
@@ -223,14 +248,24 @@ describe('runDiscordIngestPoll', () => {
         replies.push(text);
       }),
     };
+    // Minimal db: captures the documents rows screenshot ingest inserts.
+    const db = {
+      insert: () => ({
+        values: async (row: Record<string, unknown>) => {
+          inserted.push(row);
+          return [];
+        },
+      }),
+    };
     const deps = {
       config: {
         DISCORD_ENABLED: true,
         DISCORD_INGEST_CHANNEL_ID: 'chan-1',
       } as unknown as Config,
       notify,
+      db,
     } as unknown as Deps;
-    return { deps, notify, reactions, replies };
+    return { deps, notify, reactions, replies, inserted };
   }
 
   it('processes fresh messages with links from any author; skips reacted + no-link', async () => {
@@ -269,6 +304,82 @@ describe('runDiscordIngestPoll', () => {
     ]);
     expect(replies).toHaveLength(2);
     expect(ingestState.calls).toEqual(['https://gh/1', 'https://gh/1']);
+  });
+
+  it('processes an image-only message: parked + stored, 🖼️ reaction', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(Buffer.from([1, 2, 3]), {
+        status: 200,
+        headers: { 'content-type': 'image/png' },
+      }),
+    );
+    try {
+      const messages = [
+        {
+          id: 'm-shot',
+          content: 'saw this on a flyer',
+          author: { id: 'u' },
+          attachments: [IMAGE_ATTACHMENT],
+        },
+      ];
+      const { deps, reactions, replies, inserted } = fakeDeps(messages);
+
+      const result = await runDiscordIngestPoll(deps);
+
+      // NOT skipped despite having no URL in its content.
+      expect(result).toMatchObject({ enabled: true, scanned: 1, processed: 1 });
+      expect(reactions).toEqual([{ id: 'm-shot', emoji: '🖼️' }]);
+      expect(replies).toHaveLength(1);
+      expect(replies[0]).toContain('🖼️ 1 screenshot recorded');
+      // Parked via ingestJob and linked to the job via a documents row.
+      expect(ingestState.calls).toEqual([CDN_URL]);
+      expect(inserted).toHaveLength(1);
+      expect(inserted[0]).toMatchObject({
+        kind: 'screenshot',
+        filename: 'shot.png',
+        jobId: 'job-1',
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('handles a mixed message: link ingested AND screenshot recorded', async () => {
+    platformState.byUrl['https://gh/1'] = {
+      platform: 'greenhouse',
+      tenant: 'a',
+      externalId: '1',
+    };
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(Buffer.from([1, 2, 3]), {
+        status: 200,
+        headers: { 'content-type': 'image/png' },
+      }),
+    );
+    try {
+      const messages = [
+        {
+          id: 'm-mixed',
+          content: 'apply https://gh/1',
+          author: { id: 'u' },
+          attachments: [IMAGE_ATTACHMENT],
+        },
+      ];
+      const { deps, reactions, replies, inserted } = fakeDeps(messages);
+
+      const result = await runDiscordIngestPoll(deps);
+
+      expect(result).toMatchObject({ enabled: true, scanned: 1, processed: 1 });
+      // The queued link wins the reaction; the reply itemizes both outcomes.
+      expect(reactions).toEqual([{ id: 'm-mixed', emoji: '✅' }]);
+      expect(replies[0]).toContain('✅ 1 queued');
+      expect(replies[0]).toContain('🖼️ 1 screenshot recorded');
+      // Both the text link and the attachment went through ingestJob.
+      expect(ingestState.calls).toEqual(['https://gh/1', CDN_URL]);
+      expect(inserted).toHaveLength(1);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it('is a no-op when Discord or the ingest channel is unconfigured', async () => {

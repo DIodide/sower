@@ -1,5 +1,10 @@
 import { canonicalizeUrl } from '@sower/core';
+import type { DiscordChannelMessage } from '@sower/notify';
 import { detectPlatform, getAdapter, resolveUrl } from '@sower/platforms';
+import {
+  imageAttachments,
+  ingestMessageAttachments,
+} from './attachment-ingest.js';
 import { ingestJob } from './ingest.js';
 import {
   extractUrlsFromText,
@@ -9,13 +14,15 @@ import {
 import type { Deps } from './types.js';
 
 /**
- * Ingest job links that arrive via Discord. The classifier is ingress-agnostic;
- * `runDiscordIngestPoll` is the channel adapter over it.
+ * Ingest job links + screenshots that arrive via Discord. The classifier is
+ * ingress-agnostic; `runDiscordIngestPoll` is the channel adapter over it.
  *
  * The one invariant: NOTHING is silently dropped. Every URL you send resolves
  * to exactly one outcome — ingested (supported), recorded-and-parked
  * (unsupported, via ingestJob's unknown-platform path), expanded into child
  * links (a directory), or reported as an error — and the reply itemizes it.
+ * Image attachments (screenshots) are stored + parked for dashboard triage
+ * (see attachment-ingest.ts), so an image-only message is handled too.
  */
 
 const MAX_URLS_PER_MESSAGE = 25;
@@ -36,6 +43,8 @@ export interface MessageIngestSummary {
   unsupported: number;
   directories: number;
   errors: number;
+  /** Image attachments stored + parked for dashboard triage. */
+  screenshots: number;
   outcomes: UrlOutcome[];
 }
 
@@ -116,6 +125,7 @@ function summarize(
     unsupported: 0,
     directories: 0,
     errors: 0,
+    screenshots: 0,
     outcomes,
   };
   const tally = (outcome: UrlOutcome): void => {
@@ -159,11 +169,27 @@ export async function ingestMessageLinks(
   return summarize(urls.length, outcomes);
 }
 
+/**
+ * Ingest everything a message carries: text links AND image attachments
+ * (screenshots), merged into one summary for the reaction + reply.
+ */
+export async function ingestMessage(
+  deps: Deps,
+  message: DiscordChannelMessage,
+): Promise<MessageIngestSummary> {
+  const summary = await ingestMessageLinks(deps, message.content ?? '');
+  const screenshots = await ingestMessageAttachments(deps, message);
+  return { ...summary, screenshots: screenshots.length };
+}
+
 /** Emoji that best captures a message's result (the "processed" marker too). */
 export function reactionFor(summary: MessageIngestSummary): string {
   if (summary.ingested > 0) return '✅';
   if (summary.directories > 0) return '🔎';
   if (summary.unsupported > 0) return '⚠️';
+  // A screenshot is a new recorded+parked task (like unsupported); it outranks
+  // ♻️/❌ so a screenshot-only message reads as handled, never "no links".
+  if (summary.screenshots > 0) return '🖼️';
   if (summary.duplicates > 0) return '♻️';
   return '❌';
 }
@@ -178,6 +204,10 @@ export function replyFor(summary: MessageIngestSummary): string {
     );
   if (summary.unsupported > 0)
     parts.push(`⚠️ ${summary.unsupported} unsupported (recorded)`);
+  if (summary.screenshots > 0)
+    parts.push(
+      `🖼️ ${summary.screenshots} screenshot${summary.screenshots === 1 ? '' : 's'} recorded — triage on dashboard`,
+    );
   if (summary.duplicates > 0) parts.push(`♻️ ${summary.duplicates} duplicate`);
   if (summary.errors > 0) parts.push(`❌ ${summary.errors} error`);
   return parts.length > 0
@@ -192,9 +222,10 @@ export interface DiscordPollResult {
 }
 
 /**
- * Poll the #ingest channel: for each fresh message with links (any author),
- * classify + ingest, then react (the emoji doubles as the processed marker so
- * re-polls skip it) and post a concise reply. No-op when Discord/channel unset.
+ * Poll the #ingest channel: for each fresh message with links OR image
+ * attachments (any author), classify + ingest, then react (the emoji doubles
+ * as the processed marker so re-polls skip it) and post a concise reply.
+ * No-op when Discord/channel unset.
  */
 export async function runDiscordIngestPoll(
   deps: Deps,
@@ -216,10 +247,15 @@ export async function runDiscordIngestPoll(
     if (message.reactions?.some((reaction) => reaction.me)) {
       continue;
     }
-    if (extractUrlsFromText(message.content ?? '').length === 0) {
+    // Process a message with links OR image attachments (a screenshot-only
+    // message must never be dropped); skip only when it has neither.
+    if (
+      extractUrlsFromText(message.content ?? '').length === 0 &&
+      imageAttachments(message).length === 0
+    ) {
       continue;
     }
-    const summary = await ingestMessageLinks(deps, message.content);
+    const summary = await ingestMessage(deps, message);
     await notify
       .addReaction(channelId, message.id, reactionFor(summary))
       .catch((error) =>

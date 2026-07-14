@@ -71,6 +71,13 @@
       "when": 1783967216008,
       "tag": "0009_narrow_boomerang",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1784002822214,
+      "tag": "0010_useful_hitman",
+      "breakpoints": true
     }
   ]
 }

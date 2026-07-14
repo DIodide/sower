@@ -394,6 +394,11 @@ export default async function TaskPage({
         )[0]
       : undefined;
   const docByPath = new Map(documentRows.map((d) => [d.storagePath, d]));
+  // Screenshots captured for THIS job (Discord image-attachment ingest) —
+  // rendered up top so a triager immediately sees what was posted.
+  const screenshotDocs = documentRows.filter(
+    (d) => d.kind === 'screenshot' && d.jobId === task.jobId,
+  );
   const views = spec
     ? buildQuestionViews(
         spec.questions,
@@ -560,6 +565,40 @@ export default async function TaskPage({
         session={sessionRow}
         tenant={job?.tenant}
       />
+
+      {/* ---- ingested screenshots (manual triage source) ---- */}
+      {screenshotDocs.length > 0 ? (
+        <section>
+          <SectionHeading>
+            Screenshot{screenshotDocs.length === 1 ? '' : 's'}
+          </SectionHeading>
+          <div className="card">
+            <p className="hint" style={{ margin: '0 0 0.75rem' }}>
+              Posted to the ingest channel as an image — read the posting
+              details from it to triage this task.
+            </p>
+            {screenshotDocs.map((doc) => (
+              <figure key={doc.id} style={{ margin: '0 0 1rem' }}>
+                {/* biome-ignore lint/performance/noImgElement: served by our
+                    own IAP-gated /documents route; next/image optimization
+                    would re-proxy a private, DB-authorized byte stream. */}
+                <img
+                  src={`/documents/${doc.id}`}
+                  alt={doc.filename}
+                  style={{ maxWidth: '100%' }}
+                />
+                <figcaption
+                  className="hint mono"
+                  style={{ marginTop: '0.25rem' }}
+                >
+                  {doc.filename}
+                  {doc.createdAt ? ` · ${formatLocal(doc.createdAt)}` : ''}
+                </figcaption>
+              </figure>
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       {/* ---- form & answers ---- */}
       <section id="answers">

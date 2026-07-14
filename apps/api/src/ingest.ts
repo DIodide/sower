@@ -13,6 +13,13 @@ export interface IngestInput {
   company?: string;
   title?: string;
   terms?: string[];
+  /**
+   * Resolve the URL with a live GET before canonicalizing (default true).
+   * Pass false when the URL must be recorded as-is — e.g. a Discord screenshot
+   * attachment, where the CDN link is an image we've already downloaded, not a
+   * page worth re-fetching. Dedupe + park logic is unchanged either way.
+   */
+  resolve?: boolean;
 }
 
 export type IngestResult =
@@ -50,7 +57,8 @@ export async function ingestJob(
 ): Promise<IngestResult> {
   const { db, queue } = deps;
 
-  const resolvedUrl = await resolveUrl(input.url);
+  const resolvedUrl =
+    input.resolve === false ? input.url : await resolveUrl(input.url);
   const canonicalUrl = canonicalizeUrl(resolvedUrl);
   const ref = detectPlatform(canonicalUrl);
   const dedupeKey = computeDedupeKey(ref, canonicalUrl);

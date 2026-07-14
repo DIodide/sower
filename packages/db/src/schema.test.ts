@@ -164,6 +164,7 @@ describe('schema', () => {
       'created_at',
       'filename',
       'id',
+      'job_id',
       'kind',
       'size_bytes',
       'storage_path',
@@ -173,6 +174,18 @@ describe('schema', () => {
     expect(documents.storagePath.notNull).toBe(true);
     expect(documents.contentType.notNull).toBe(false);
     expect(documents.sizeBytes.notNull).toBe(false);
+    // Nullable: library documents (resume/cover letter) belong to no job.
+    expect(documents.jobId.notNull).toBe(false);
+  });
+
+  it('references jobs and indexes job_id on documents', () => {
+    const config = getTableConfig(documents);
+    const fk = config.foreignKeys[0]?.reference();
+    expect(fk?.foreignTable && getTableName(fk.foreignTable)).toBe('jobs');
+    expect(fk?.columns.map((c) => c.name)).toEqual(['job_id']);
+    expect(config.indexes.map((idx) => idx.config.name ?? null)).toContain(
+      'documents_job_id_idx',
+    );
   });
 
   it('defines the job_descriptions table', () => {
