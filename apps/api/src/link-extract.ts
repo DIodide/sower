@@ -125,7 +125,7 @@ export async function fetchJobLinks(url: string): Promise<string[]> {
   } catch {
     return [];
   }
-  if (!response || !response.ok) {
+  if (!response?.ok) {
     return [];
   }
   const contentType = response.headers.get('content-type') ?? '';

@@ -1,8 +1,7 @@
 import { ingestionRuns, jobs } from '@sower/db';
 import { count, desc } from 'drizzle-orm';
 import { getDb } from '../../lib/db';
-import { relativeTime } from '../../lib/format';
-import { Empty } from '../../lib/ui';
+import { Empty, Timestamp } from '../../lib/ui';
 
 export const dynamic = 'force-dynamic';
 
@@ -107,8 +106,8 @@ export default async function IngestionPage() {
             <div className="row" style={{ alignItems: 'baseline' }}>
               <strong>Latest run</strong>
               <span className="hint faint spread">
-                {relativeTime(latest.createdAt)} · {latest.durationMs} ms ·{' '}
-                {latest.ok ? 'ok' : 'FAILED'}
+                <Timestamp value={latest.createdAt} inline /> ·{' '}
+                {latest.durationMs} ms · {latest.ok ? 'ok' : 'FAILED'}
               </span>
             </div>
             {!latest.ok && latest.error ? (
@@ -208,8 +207,8 @@ export default async function IngestionPage() {
             <tbody>
               {runs.map((run) => (
                 <tr key={run.id}>
-                  <td title={run.createdAt?.toISOString?.() ?? ''}>
-                    {relativeTime(run.createdAt)}
+                  <td>
+                    <Timestamp value={run.createdAt} />
                   </td>
                   <td className="num">{run.scanned}</td>
                   <td className="num">{run.matched}</td>

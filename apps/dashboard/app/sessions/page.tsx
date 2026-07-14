@@ -7,8 +7,7 @@ import {
 } from '@sower/db';
 import { count, desc, eq } from 'drizzle-orm';
 import { getDb } from '../../lib/db';
-import { relativeTime } from '../../lib/format';
-import { Empty } from '../../lib/ui';
+import { Empty, Timestamp } from '../../lib/ui';
 
 export const dynamic = 'force-dynamic';
 
@@ -93,7 +92,7 @@ export default async function SessionsPage() {
                   </span>
                   <span className="mono">{hb.name}</span>
                   <span className="hint faint">
-                    seen {relativeTime(hb.lastSeenAt)}
+                    seen <Timestamp value={hb.lastSeenAt} inline />
                     {hb.detail ? ` · ${hb.detail}` : ''}
                   </span>
                 </span>
@@ -138,9 +137,11 @@ export default async function SessionsPage() {
                         {eff}
                       </span>
                     </td>
-                    <td className="faint">{relativeTime(s.capturedAt)}</td>
-                    <td className="faint">
-                      {s.expiresAt ? relativeTime(s.expiresAt) : '—'}
+                    <td>
+                      <Timestamp value={s.capturedAt} />
+                    </td>
+                    <td>
+                      <Timestamp value={s.expiresAt} />
                     </td>
                     <td className="num">
                       {total}

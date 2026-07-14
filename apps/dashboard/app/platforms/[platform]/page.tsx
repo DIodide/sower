@@ -4,13 +4,13 @@ import { and, asc, eq, isNotNull } from 'drizzle-orm';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { getDb } from '../../../lib/db';
-import { formatDate, relativeTime } from '../../../lib/format';
 import {
   Empty,
   ExpandableText,
   SectionHeading,
   StateBadge,
   TableWrap,
+  Timestamp,
 } from '../../../lib/ui';
 
 export const dynamic = 'force-dynamic';
@@ -227,12 +227,8 @@ export default async function PlatformPage({
                 </td>
                 <td className="num">{summary.jobIds.size}</td>
                 <td className="num">{summary.tasks}</td>
-                <td
-                  className="faint"
-                  style={{ whiteSpace: 'nowrap' }}
-                  title={formatDate(summary.latest)}
-                >
-                  {relativeTime(summary.latest)}
+                <td>
+                  <Timestamp value={summary.latest} inline />
                 </td>
               </tr>
             ))}
@@ -310,12 +306,8 @@ export default async function PlatformPage({
                   <ExpandableText text={failure.error} max={140} />
                 </td>
                 <td className="num">{failure.count}</td>
-                <td
-                  className="faint"
-                  style={{ whiteSpace: 'nowrap' }}
-                  title={formatDate(failure.latest)}
-                >
-                  {relativeTime(failure.latest)}
+                <td>
+                  <Timestamp value={failure.latest} inline />
                 </td>
               </tr>
             ))}

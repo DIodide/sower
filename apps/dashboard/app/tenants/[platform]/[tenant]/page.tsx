@@ -4,13 +4,13 @@ import { and, asc, desc, eq, isNotNull } from 'drizzle-orm';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { getDb } from '../../../../lib/db';
-import { formatDate, relativeTime } from '../../../../lib/format';
 import {
   Empty,
   ExpandableText,
   SectionHeading,
   StateBadge,
   TableWrap,
+  Timestamp,
 } from '../../../../lib/ui';
 
 export const dynamic = 'force-dynamic';
@@ -167,12 +167,11 @@ export default async function TenantPage({
                   <span className="faint">—</span>
                 )}
               </td>
-              <td
-                className="faint"
-                style={{ whiteSpace: 'nowrap' }}
-                title={formatDate(row.taskUpdatedAt ?? row.jobCreatedAt)}
-              >
-                {relativeTime(row.taskUpdatedAt ?? row.jobCreatedAt)}
+              <td>
+                <Timestamp
+                  value={row.taskUpdatedAt ?? row.jobCreatedAt}
+                  inline
+                />
               </td>
             </tr>
           ))}
@@ -254,12 +253,8 @@ export default async function TenantPage({
           <tbody>
             {eventRows.map((event) => (
               <tr key={event.id}>
-                <td
-                  className="faint"
-                  style={{ whiteSpace: 'nowrap' }}
-                  title={formatDate(event.createdAt)}
-                >
-                  {relativeTime(event.createdAt)}
+                <td>
+                  <Timestamp value={event.createdAt} inline />
                 </td>
                 <td className="mono">{event.type}</td>
                 <td style={{ whiteSpace: 'nowrap' }}>

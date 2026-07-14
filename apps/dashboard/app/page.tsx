@@ -6,13 +6,11 @@ import { getDb } from '../lib/db';
 import {
   BUCKETS,
   type Bucket,
-  formatDate,
   isBucket,
-  relativeTime,
   STATE_META,
   stateMeta,
 } from '../lib/format';
-import { Empty, StateBadge } from '../lib/ui';
+import { Empty, StateBadge, Timestamp } from '../lib/ui';
 
 export const dynamic = 'force-dynamic';
 
@@ -96,11 +94,13 @@ export default async function Page({
     .select({
       id: applicationTasks.id,
       state: applicationTasks.state,
+      createdAt: applicationTasks.createdAt,
       updatedAt: applicationTasks.updatedAt,
       company: jobs.company,
       title: jobs.title,
       platform: jobs.platform,
       tenant: jobs.tenant,
+      source: jobs.source,
     })
     .from(applicationTasks)
     .innerJoin(jobs, eq(applicationTasks.jobId, jobs.id))
@@ -229,7 +229,9 @@ export default async function Page({
               <tr>
                 <th>Role</th>
                 <th>Platform</th>
+                <th>Source</th>
                 <th>State</th>
+                <th>Added</th>
                 <th>Updated</th>
               </tr>
             </thead>
@@ -256,15 +258,21 @@ export default async function Page({
                       <span className="faint"> / {row.tenant}</span>
                     ) : null}
                   </td>
+                  <td
+                    className="mono faint"
+                    style={{ fontSize: '0.8125rem', whiteSpace: 'nowrap' }}
+                    title="How this job arrived"
+                  >
+                    {row.source}
+                  </td>
                   <td>
                     <StateBadge state={row.state} />
                   </td>
-                  <td
-                    className="faint"
-                    style={{ whiteSpace: 'nowrap', fontSize: '0.8125rem' }}
-                    title={formatDate(row.updatedAt)}
-                  >
-                    {relativeTime(row.updatedAt)}
+                  <td style={{ fontSize: '0.8125rem' }}>
+                    <Timestamp value={row.createdAt} />
+                  </td>
+                  <td style={{ fontSize: '0.8125rem' }}>
+                    <Timestamp value={row.updatedAt} />
                   </td>
                 </tr>
               ))}

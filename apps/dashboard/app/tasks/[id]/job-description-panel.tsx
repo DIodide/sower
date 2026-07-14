@@ -2,7 +2,7 @@
 // presentation (no client directive): renders the latest job_descriptions
 // row's plain-text content inside a collapsed clay panel so it never pushes
 // the answer form below the fold.
-import { formatDate } from '../../../lib/format';
+import { formatLocal } from '../../../lib/format';
 
 export interface JobDescriptionView {
   /** Plain-text description (JobSpec.description) of the latest version. */
@@ -22,7 +22,7 @@ export interface JobDescriptionView {
  * happen if history was pruned — so the count stays truthful.
  */
 function caption(view: JobDescriptionView): string {
-  const fetched = `fetched ${formatDate(view.fetchedAt)}`;
+  const fetched = `fetched ${formatLocal(view.fetchedAt)}`;
   if (view.versionCount <= 1) return fetched;
   const extra =
     view.versionCount !== view.version

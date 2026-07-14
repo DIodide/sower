@@ -8,6 +8,30 @@ export function formatDate(value: Date | string | null | undefined): string {
   return `${d.toISOString().replace('T', ' ').slice(0, 16)} UTC`;
 }
 
+/** The timezone the dashboard renders local times in. */
+const DISPLAY_TZ = 'America/New_York';
+
+const LOCAL_FMT = new Intl.DateTimeFormat('en-US', {
+  timeZone: DISPLAY_TZ,
+  month: 'short',
+  day: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+  timeZoneName: 'short',
+});
+
+/**
+ * Readable local timestamp (Eastern), e.g. `Jul 13, 3:47 PM EDT`. Uses a fixed
+ * timezone via Intl so it renders identically on the server (Cloud Run = UTC)
+ * and the client — no hydration mismatch, and always the user's zone.
+ */
+export function formatLocal(value: Date | string | null | undefined): string {
+  if (!value) return '—';
+  const d = typeof value === 'string' ? new Date(value) : value;
+  if (Number.isNaN(d.getTime())) return '—';
+  return LOCAL_FMT.format(d);
+}
+
 const RELATIVE_UNITS: { ms: number; label: string }[] = [
   { ms: 365 * 24 * 60 * 60 * 1000, label: 'y' },
   { ms: 30 * 24 * 60 * 60 * 1000, label: 'mo' },

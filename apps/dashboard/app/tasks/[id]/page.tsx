@@ -15,12 +15,13 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import type { ReactNode } from 'react';
 import { getDb } from '../../../lib/db';
-import { formatDate, relativeTime, type Tone } from '../../../lib/format';
+import { formatLocal, type Tone } from '../../../lib/format';
 import {
   Empty,
   ExpandableText,
   SectionHeading,
   StateBadge,
+  Timestamp,
 } from '../../../lib/ui';
 import { JobDescriptionPanel } from './job-description-panel';
 import { NeedsInputForm } from './needs-input-form';
@@ -406,7 +407,7 @@ export default async function TaskPage({
     id: d.id,
     kind: d.kind,
     filename: d.filename,
-    createdLabel: formatDate(d.createdAt),
+    createdLabel: formatLocal(d.createdAt),
   }));
   const resolvedCount = views.filter((v) => v.status === 'resolved').length;
   const missingViews = views.filter((v) => v.status === 'missing');
@@ -511,12 +512,11 @@ export default async function TaskPage({
             )}
           </MetaItem>
           <MetaItem label="Source">{job?.source ?? '—'}</MetaItem>
-          <MetaItem label="Created">{formatDate(task.createdAt)}</MetaItem>
+          <MetaItem label="Added">
+            <Timestamp value={task.createdAt} inline />
+          </MetaItem>
           <MetaItem label="Updated">
-            {formatDate(task.updatedAt)}
-            {task.updatedAt ? (
-              <span className="faint"> · {relativeTime(task.updatedAt)}</span>
-            ) : null}
+            <Timestamp value={task.updatedAt} inline />
           </MetaItem>
           {job?.terms && job.terms.length > 0 ? (
             <MetaItem label="Terms">
@@ -659,12 +659,8 @@ export default async function TaskPage({
                         ) : null}
                       </span>
                     ) : null}
-                    <span
-                      className="hint faint spread"
-                      style={{ whiteSpace: 'nowrap' }}
-                      title={formatDate(event.createdAt)}
-                    >
-                      {relativeTime(event.createdAt)}
+                    <span className="hint faint spread">
+                      <Timestamp value={event.createdAt} inline />
                     </span>
                   </div>
                   <EventData data={event.data} />
@@ -775,7 +771,7 @@ export default async function TaskPage({
                       >
                         {call.method} {call.url}
                         {call.createdAt
-                          ? ` · ${formatDate(call.createdAt)}`
+                          ? ` · ${formatLocal(call.createdAt)}`
                           : ''}
                       </div>
                       <JsonDetails

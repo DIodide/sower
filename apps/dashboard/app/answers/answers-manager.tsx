@@ -7,7 +7,7 @@
 
 import type { ReactNode } from 'react';
 import { useMemo, useState, useTransition } from 'react';
-import { formatDate, relativeTime, truncate } from '../../lib/format';
+import { formatLocal, relativeTime, truncate } from '../../lib/format';
 import { Empty } from '../../lib/ui';
 import { Badge } from '../tasks/[id]/ui';
 import type { ActionResult } from './actions';
@@ -420,7 +420,7 @@ function EntryRow({
         <span
           className="hint faint"
           style={{ whiteSpace: 'nowrap' }}
-          title={formatDate(entry.updatedAt)}
+          title={formatLocal(entry.updatedAt)}
         >
           {entry.updatedAt ? `updated ${relativeTime(entry.updatedAt)}` : ''}
         </span>
