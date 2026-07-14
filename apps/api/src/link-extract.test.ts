@@ -4,6 +4,7 @@ import {
   extractAnchorHrefs,
   extractUrlsFromText,
   fetchJobLinks,
+  unwrapRedirectShim,
 } from './link-extract.js';
 
 describe('extractUrlsFromText', () => {
@@ -26,6 +27,38 @@ describe('extractUrlsFromText', () => {
       'https://x.example/job',
     ]);
     expect(extractUrlsFromText('no links here')).toEqual([]);
+  });
+});
+
+describe('unwrapRedirectShim', () => {
+  it('decodes the target from an instagram shim link', () => {
+    const target = 'https://careers.twosigma.com/careers/JobDetail/12345';
+    const shim = `https://l.instagram.com/?u=${encodeURIComponent(target)}&e=xyz`;
+    expect(unwrapRedirectShim(shim)).toBe(target);
+  });
+
+  it('decodes the target from a google /url?q= shim link', () => {
+    const target = 'https://boards.greenhouse.io/acme/jobs/1';
+    const shim = `https://www.google.com/url?q=${encodeURIComponent(target)}`;
+    expect(unwrapRedirectShim(shim)).toBe(target);
+  });
+
+  it('leaves a google careers url with a non-URL ?q= unchanged', () => {
+    const url =
+      'https://www.google.com/about/careers/applications/jobs/results/?q=ai+catalyst';
+    expect(unwrapRedirectShim(url)).toBe(url);
+  });
+
+  it('leaves a non-shim url unchanged', () => {
+    const url = 'https://boards.greenhouse.io/acme/jobs/1?u=ignored';
+    expect(unwrapRedirectShim(url)).toBe(url);
+  });
+
+  it('fully unwraps a shim that wraps another shim', () => {
+    const target = 'https://jobs.lever.co/acme/2';
+    const inner = `https://l.facebook.com/l.php?u=${encodeURIComponent(target)}`;
+    const outer = `https://l.instagram.com/?u=${encodeURIComponent(inner)}`;
+    expect(unwrapRedirectShim(outer)).toBe(target);
   });
 });
 

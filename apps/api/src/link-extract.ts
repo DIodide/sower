@@ -19,6 +19,51 @@ const MAX_REDIRECTS = 5;
 const URL_RE = /https?:\/\/[^\s<>"'()\]]+/gi;
 const HREF_RE = /href\s*=\s*["']([^"']+)["']/gi;
 
+/** Redirect-shim hosts → the query param(s) that carry the real destination. */
+const SHIM_HOST_PARAMS: Record<string, string[]> = {
+  'l.instagram.com': ['u'],
+  'l.facebook.com': ['u'],
+  'lm.facebook.com': ['u'],
+  'www.google.com': ['q', 'url'],
+  'google.com': ['q', 'url'],
+  'out.reddit.com': ['url'],
+};
+
+const MAX_SHIM_DEPTH = 3;
+
+/**
+ * Unwrap known redirect-shim links that carry the real destination in a query
+ * param (l.instagram.com/?u=…, l.facebook.com/l.php?u=…, google.com/url?q=…).
+ * A plain fetch of these lands on an interstitial/home page, losing the target,
+ * so decode the param up front. Opaque short-links (t.co, lnkd.in, bit.ly) carry
+ * no embedded target and are left to resolveUrl's redirect-follow. Recurses (a
+ * shim can wrap a shim); returns the input unchanged when it's not a shim.
+ */
+export function unwrapRedirectShim(url: string, depth = 0): string {
+  if (depth >= MAX_SHIM_DEPTH) {
+    return url;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
+  const paramNames = SHIM_HOST_PARAMS[parsed.hostname.toLowerCase()];
+  if (!paramNames) {
+    return url;
+  }
+  for (const name of paramNames) {
+    const target = parsed.searchParams.get(name); // URL-decodes the value
+    // Only a URL-valued param is a shim target — e.g. a real Google Careers
+    // URL has ?q=ai+catalyst (a search term, not a URL) and must pass through.
+    if (target && /^https?:\/\//i.test(target)) {
+      return unwrapRedirectShim(target, depth + 1);
+    }
+  }
+  return url;
+}
+
 /** Extract distinct http(s) URLs from message text (trailing punctuation trimmed). */
 export function extractUrlsFromText(text: string): string[] {
   const matches = text.match(URL_RE) ?? [];

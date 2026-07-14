@@ -1,7 +1,11 @@
 import { canonicalizeUrl } from '@sower/core';
 import { detectPlatform, getAdapter, resolveUrl } from '@sower/platforms';
 import { ingestJob } from './ingest.js';
-import { extractUrlsFromText, fetchJobLinks } from './link-extract.js';
+import {
+  extractUrlsFromText,
+  fetchJobLinks,
+  unwrapRedirectShim,
+} from './link-extract.js';
 import type { Deps } from './types.js';
 
 /**
@@ -35,6 +39,18 @@ export interface MessageIngestSummary {
   outcomes: UrlOutcome[];
 }
 
+/** Workday returns platform:'workday' for ANY tenant host; only a /job/ or
+ *  /details/ path is an actual posting we can discover. Everything else
+ *  (login/careers landing) falls through to directory-expand-or-record. */
+function isIngestableJobUrl(platform: string, url: string): boolean {
+  if (platform !== 'workday') return true;
+  try {
+    return /\/(job|details)\//i.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
+
 /** Classify one URL and route it: supported→ingest, unknown→expand-or-record. */
 async function classifyAndIngest(
   deps: Deps,
@@ -42,11 +58,15 @@ async function classifyAndIngest(
   depth: number,
 ): Promise<UrlOutcome> {
   try {
-    const resolved = await resolveUrl(url);
+    const resolved = await resolveUrl(unwrapRedirectShim(url));
     const ref = detectPlatform(canonicalizeUrl(resolved));
 
     // Supported platform with a resolvable tenant → normal ingest (enqueues).
-    if (getAdapter(ref.platform) && ref.tenant !== null) {
+    if (
+      getAdapter(ref.platform) &&
+      ref.tenant !== null &&
+      isIngestableJobUrl(ref.platform, resolved)
+    ) {
       const result = await ingestJob(deps, { url: resolved, source: SOURCE });
       return result.duplicate
         ? { url: resolved, kind: 'duplicate', jobId: result.jobId }

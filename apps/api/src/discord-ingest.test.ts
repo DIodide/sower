@@ -116,6 +116,55 @@ describe('ingestMessageLinks', () => {
     expect(s.outcomes[0]).toMatchObject({ kind: 'directory' });
   });
 
+  it('records (not queues) a workday url without a /job/ path', async () => {
+    const url = 'https://caci.wd1.myworkdayjobs.com/External/login';
+    platformState.byUrl[url] = {
+      platform: 'workday',
+      tenant: 'caci',
+      externalId: null,
+    };
+    const s = await ingestMessageLinks({} as Deps, `login page: ${url}`);
+    expect(s.ingested).toBe(0);
+    expect(s.unsupported).toBe(1);
+    expect(s.outcomes[0]).toMatchObject({ kind: 'unsupported', url });
+    // still recorded via ingestJob (parked), never dropped
+    expect(ingestState.calls).toEqual([url]);
+  });
+
+  it('ingests a workday url with a /job/ path', async () => {
+    const url = 'https://caci.wd1.myworkdayjobs.com/External/job/Jessup/SWE_1';
+    platformState.byUrl[url] = {
+      platform: 'workday',
+      tenant: 'caci',
+      externalId: null,
+    };
+    const s = await ingestMessageLinks({} as Deps, url);
+    expect(s.ingested).toBe(1);
+    expect(s.outcomes[0]).toMatchObject({
+      kind: 'ingested',
+      platform: 'workday',
+      url,
+    });
+  });
+
+  it('unwraps a redirect shim and ingests the embedded target', async () => {
+    const target = 'https://boards.greenhouse.io/acme/jobs/77';
+    platformState.byUrl[target] = {
+      platform: 'greenhouse',
+      tenant: 'acme',
+      externalId: '77',
+    };
+    const shim = `https://l.instagram.com/?u=${encodeURIComponent(target)}`;
+    const s = await ingestMessageLinks({} as Deps, `saw this: ${shim}`);
+    expect(s.ingested).toBe(1);
+    expect(s.outcomes[0]).toMatchObject({
+      kind: 'ingested',
+      platform: 'greenhouse',
+      url: target,
+    });
+    expect(ingestState.calls).toEqual([target]);
+  });
+
   it('counts a duplicate and handles a mixed message', async () => {
     platformState.byUrl['https://gh/1'] = {
       platform: 'greenhouse',
