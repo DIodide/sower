@@ -233,7 +233,7 @@ describe('runDiscordIngestPoll', () => {
     return { deps, notify, reactions, replies };
   }
 
-  it('processes only fresh user messages with links; skips the rest', async () => {
+  it('processes fresh messages with links from any author; skips reacted + no-link', async () => {
     platformState.byUrl['https://gh/1'] = {
       platform: 'greenhouse',
       tenant: 'a',
@@ -248,6 +248,7 @@ describe('runDiscordIngestPoll', () => {
         author: { id: 'u' },
         reactions: [{ me: true, emoji: { name: '✅' } }],
       },
+      // A link forwarded by another bot/webhook must still ingest (no author skip).
       { id: 'm-bot', content: 'https://gh/1', author: { id: 'b', bot: true } },
       {
         id: 'm-fresh',
@@ -259,10 +260,15 @@ describe('runDiscordIngestPoll', () => {
 
     const result = await runDiscordIngestPoll(deps);
 
-    expect(result).toMatchObject({ enabled: true, scanned: 4, processed: 1 });
-    expect(reactions).toEqual([{ id: 'm-fresh', emoji: '✅' }]);
-    expect(replies).toHaveLength(1);
-    expect(ingestState.calls).toEqual(['https://gh/1']); // only the fresh one
+    // oldest-first: m-fresh (ingest) → m-bot (ingest) → m-done (reacted, skip)
+    // → m-nolink (no url, skip).
+    expect(result).toMatchObject({ enabled: true, scanned: 4, processed: 2 });
+    expect(reactions).toEqual([
+      { id: 'm-fresh', emoji: '✅' },
+      { id: 'm-bot', emoji: '✅' },
+    ]);
+    expect(replies).toHaveLength(2);
+    expect(ingestState.calls).toEqual(['https://gh/1', 'https://gh/1']);
   });
 
   it('is a no-op when Discord or the ingest channel is unconfigured', async () => {

@@ -192,9 +192,9 @@ export interface DiscordPollResult {
 }
 
 /**
- * Poll the #ingest channel: for each fresh user message with links, classify +
- * ingest, then react (the emoji doubles as the processed marker so re-polls
- * skip it) and post a concise reply. No-op when Discord/the channel is unset.
+ * Poll the #ingest channel: for each fresh message with links (any author),
+ * classify + ingest, then react (the emoji doubles as the processed marker so
+ * re-polls skip it) and post a concise reply. No-op when Discord/channel unset.
  */
 export async function runDiscordIngestPoll(
   deps: Deps,
@@ -209,10 +209,10 @@ export async function runDiscordIngestPoll(
   let processed = 0;
   // Discord returns newest-first; process oldest-first for chronological replies.
   for (const message of [...messages].reverse()) {
-    if (message.author?.bot) {
-      continue;
-    }
-    // Any existing bot reaction means we already handled this message.
+    // We do NOT skip by author: links forwarded by another bot/webhook (RSS,
+    // link-preview, Simplify) should ingest too, and our own reply messages
+    // carry no links so the no-URL guard below drops them. The reaction we add
+    // marks a message processed, so re-polls skip it — no self-processing loop.
     if (message.reactions?.some((reaction) => reaction.me)) {
       continue;
     }
