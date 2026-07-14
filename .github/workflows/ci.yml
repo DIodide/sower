@@ -95,3 +95,24 @@ jobs:
           --project ${{ secrets.GCP_PROJECT_ID }}
           --iap
           --quiet
+
+      - name: Build investigator image
+        # Tier-2 screenshot-investigation Cloud Run Job. Keep the SDK's bundled
+        # Claude Code binary — the Dockerfile installs without pruning optionals.
+        run: >
+          docker build
+          -t us-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/sower/investigator:${{ github.sha }}
+          -f Dockerfile.investigator .
+
+      - name: Push investigator image
+        run: docker push us-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/sower/investigator:${{ github.sha }}
+
+      - name: Deploy investigator job to Cloud Run
+        # `jobs update` (not deploy): the job resource is owned by Terraform with
+        # image ignore_changes, and CI just rolls its image forward.
+        run: >
+          gcloud run jobs update sower-investigator
+          --image us-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/sower/investigator:${{ github.sha }}
+          --region us-east1
+          --project ${{ secrets.GCP_PROJECT_ID }}
+          --quiet
