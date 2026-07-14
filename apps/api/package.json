@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@google-cloud/run": "^3.3.0",
     "@sower/accounts": "workspace:*",
     "@sower/answers": "workspace:*",
     "@sower/core": "workspace:*",

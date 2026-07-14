@@ -70,11 +70,22 @@ const envSchema = z
       ),
     /** Channel the Discord ingest poll reads job links from (opt-in). */
     DISCORD_INGEST_CHANNEL_ID: z.string().optional(),
+    /** Cloud Run Job that runs Tier-2 screenshot investigation. */
+    INVESTIGATOR_JOB_NAME: z.string().default('sower-investigator'),
+    /**
+     * Opt-in flag ('true' enables) for Tier-2 screenshot investigation.
+     * Raw env string here; derived to a boolean in the transform below so
+     * the feature stays fully dormant until infra flips it.
+     */
+    SCREENSHOT_INVESTIGATION_ENABLED: z.string().optional(),
   })
   .transform((env) => ({
     ...env,
     /** Derived: Discord features are enabled iff a bot token is configured. */
     DISCORD_ENABLED: (env.DISCORD_BOT_TOKEN ?? '') !== '',
+    /** Derived: screenshot investigation fires only when explicitly enabled. */
+    SCREENSHOT_INVESTIGATION_ENABLED:
+      (env.SCREENSHOT_INVESTIGATION_ENABLED ?? '') === 'true',
   }));
 
 export type Config = z.infer<typeof envSchema>;

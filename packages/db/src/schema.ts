@@ -225,6 +225,83 @@ export const jobDescriptions = pgTable(
 );
 
 /**
+ * Outcome of a Tier-2 screenshot investigation. Mirrors
+ * InvestigationResult in @sower/investigate — re-declared locally so
+ * @sower/db stays dependency-light (no agent-SDK transitives).
+ */
+export interface InvestigationResult {
+  /** true ONLY if a real application URL was located. */
+  found: boolean;
+  applyUrl?: string;
+  company?: string;
+  title?: string;
+  /** greenhouse | lever | ashby | workday | other (best guess). */
+  platform?: string;
+  confidence: 'high' | 'medium' | 'low';
+  notes: string;
+}
+
+/**
+ * One observability step of the investigation agent run (assistant text,
+ * tool call, tool result, ...). Mirrors TranscriptStep in @sower/investigate.
+ */
+export interface TranscriptStep {
+  seq: number;
+  kind: 'assistant_text' | 'tool_use' | 'tool_result' | 'result' | 'system';
+  tool?: string;
+  input?: unknown;
+  output?: string;
+  text?: string;
+  ts: number;
+}
+
+/**
+ * Lifecycle of an investigation run:
+ * - 'running': trigger row inserted; the Cloud Run Job is (about to be) started.
+ * - 'found': the agent located a real apply URL (see result/foundJobId).
+ * - 'not_found': the agent finished without a verified URL.
+ * - 'error': the run finished but post-processing failed (see `error`).
+ */
+export type InvestigationRunStatus =
+  | 'running'
+  | 'found'
+  | 'not_found'
+  | 'error';
+
+/**
+ * One row per Tier-2 screenshot investigation (Cloud Run Job execution) of a
+ * parked screenshot task. `transcript` is the full observability record of
+ * the agent run; `foundJobId` links the real job ingested from the located
+ * apply URL.
+ */
+export const investigationRuns = pgTable(
+  'investigation_runs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    /** The parked screenshot task being investigated. */
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => applicationTasks.id),
+    status: text('status')
+      .$type<InvestigationRunStatus>()
+      .notNull()
+      .default('running'),
+    result: jsonb('result').$type<InvestigationResult>(),
+    /** Full agent transcript — the observability record. */
+    transcript: jsonb('transcript').$type<TranscriptStep[]>(),
+    /** Real job ingested from result.applyUrl (found runs only). */
+    foundJobId: uuid('found_job_id').references(() => jobs.id),
+    error: text('error'),
+    startedAt: timestamp('started_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    finishedAt: timestamp('finished_at', { withTimezone: true }),
+  },
+  // The result endpoint + task detail page read a task's runs by task_id.
+  (table) => [index('investigation_runs_task_id_idx').on(table.taskId)],
+);
+
+/**
  * Lifecycle of a per-tenant candidate account (Workday etc.):
  * - 'provisioned': credential generated and stored in the vault; no account
  *   exists on the tenant yet.

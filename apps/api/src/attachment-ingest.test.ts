@@ -25,6 +25,7 @@ const ingestState = vi.hoisted(() => ({
     title?: string;
     resolve?: boolean;
   }[],
+  duplicate: false,
 }));
 
 vi.mock('./ingest.js', () => ({
@@ -39,6 +40,9 @@ vi.mock('./ingest.js', () => ({
       },
     ) => {
       ingestState.calls.push(input);
+      if (ingestState.duplicate) {
+        return { duplicate: true, jobId: 'job-1' };
+      }
       return {
         duplicate: false,
         jobId: 'job-1',
@@ -47,6 +51,20 @@ vi.mock('./ingest.js', () => ({
       };
     },
   ),
+}));
+
+const triggerState = vi.hoisted(() => ({
+  calls: [] as string[],
+  error: null as Error | null,
+}));
+
+vi.mock('./investigate-trigger.js', () => ({
+  triggerInvestigation: vi.fn(async (_deps: unknown, taskId: string) => {
+    triggerState.calls.push(taskId);
+    if (triggerState.error) {
+      throw triggerState.error;
+    }
+  }),
 }));
 
 /** Fake db that captures documents inserts. */
@@ -93,6 +111,9 @@ beforeEach(() => {
   storageState.puts = [];
   storageState.failPut = false;
   ingestState.calls = [];
+  ingestState.duplicate = false;
+  triggerState.calls = [];
+  triggerState.error = null;
 });
 
 afterEach(() => vi.restoreAllMocks());
@@ -237,5 +258,51 @@ describe('ingestMessageAttachments', () => {
     expect(outcomes[0]).toMatchObject({ stored: false, jobId: 'job-1' });
     expect(ingestState.calls).toHaveLength(1);
     expect(inserted).toEqual([]);
+  });
+
+  it('triggers a Tier-2 investigation for a freshly parked screenshot task', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(okImageResponse());
+    const { deps } = fakeDeps();
+
+    await ingestMessageAttachments(deps, message([imageAttachment()]));
+
+    expect(triggerState.calls).toEqual(['task-1']);
+  });
+
+  it('does not trigger an investigation for a duplicate screenshot', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(okImageResponse());
+    ingestState.duplicate = true;
+    const { deps } = fakeDeps();
+
+    const outcomes = await ingestMessageAttachments(
+      deps,
+      message([imageAttachment()]),
+    );
+
+    expect(outcomes[0]).toMatchObject({ jobId: 'job-1' });
+    expect(triggerState.calls).toEqual([]);
+  });
+
+  it('a trigger throw never breaks the park (belt — trigger should not throw)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(okImageResponse());
+    triggerState.error = new Error('jobs client exploded');
+    const { deps, inserted } = fakeDeps();
+
+    const outcomes = await ingestMessageAttachments(
+      deps,
+      message([imageAttachment()]),
+    );
+
+    // The trigger was attempted and threw, but the park + document link held.
+    expect(triggerState.calls).toEqual(['task-1']);
+    expect(outcomes).toEqual([
+      {
+        kind: 'screenshot',
+        jobId: 'job-1',
+        filename: 'job posting.png',
+        stored: true,
+      },
+    ]);
+    expect(inserted).toHaveLength(1);
   });
 });

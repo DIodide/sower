@@ -1,5 +1,12 @@
 import { timingSafeEqual } from 'node:crypto';
-import { apiCalls, applicationTasks, events, jobs } from '@sower/db';
+import {
+  apiCalls,
+  applicationTasks,
+  events,
+  type InvestigationRunStatus,
+  investigationRuns,
+  jobs,
+} from '@sower/db';
 import { asc, desc, eq } from 'drizzle-orm';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -66,6 +73,42 @@ const sessionFailBodySchema = z.object({
 const heartbeatBodySchema = z.object({
   name: z.string().min(1).max(120),
   detail: z.string().max(200).optional(),
+});
+
+// What the investigator Cloud Run Job POSTs back — matches
+// InvestigationResult / TranscriptStep in @sower/investigate (re-declared as
+// types in @sower/db). applyUrl is deliberately NOT .url(): persisting the
+// observability transcript must never be lost to a malformed URL — ingestJob
+// failing on it lands the run in status 'error' instead.
+const investigationResultSchema = z.object({
+  found: z.boolean(),
+  applyUrl: z.string().optional(),
+  company: z.string().optional(),
+  title: z.string().optional(),
+  platform: z.string().optional(),
+  confidence: z.enum(['high', 'medium', 'low']),
+  notes: z.string(),
+});
+
+const transcriptStepSchema = z.object({
+  seq: z.number(),
+  kind: z.enum([
+    'assistant_text',
+    'tool_use',
+    'tool_result',
+    'result',
+    'system',
+  ]),
+  tool: z.string().optional(),
+  input: z.unknown().optional(),
+  output: z.string().optional(),
+  text: z.string().optional(),
+  ts: z.number(),
+});
+
+const investigationResultBodySchema = z.object({
+  result: investigationResultSchema,
+  transcript: z.array(transcriptStepSchema),
 });
 
 /** Constant-time string comparison (length-guarded). */
@@ -270,6 +313,106 @@ export function buildServer(deps: Deps): FastifyInstance {
       return reply.code(200).send({ skipped: true, state: outcome.state });
     }
     return reply.code(200).send({ state: outcome.state });
+  });
+
+  // Tier-2 investigation callback: the investigator Cloud Run Job POSTs its
+  // outcome here (x-api-key gated by the global preHandler like every route
+  // except GET /health and POST /discord/interactions). Persists the full
+  // observability transcript on the task's latest investigation run and, when
+  // a real apply URL was found, feeds it into the normal ingest pipeline.
+  // Idempotent: a Job retry re-updates the latest run and ingestJob dedupes
+  // the URL.
+  app.post('/tasks/:id/investigation-result', async (request, reply) => {
+    const params = taskParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid task id', issues: params.error.issues });
+    }
+    const body = investigationResultBodySchema.safeParse(request.body);
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid body', issues: body.error.issues });
+    }
+    const taskId = params.data.id;
+    const { result, transcript } = body.data;
+
+    // Latest run for this task (inserted by the trigger); if the trigger's
+    // insert was lost (or the Job was started manually), self-heal with one.
+    const runs = await deps.db
+      .select({ id: investigationRuns.id })
+      .from(investigationRuns)
+      .where(eq(investigationRuns.taskId, taskId))
+      .orderBy(desc(investigationRuns.startedAt))
+      .limit(1);
+    let runId = runs[0]?.id;
+    if (runId === undefined) {
+      const inserted = await deps.db
+        .insert(investigationRuns)
+        .values({ taskId, status: 'running' })
+        .returning({ id: investigationRuns.id });
+      runId = inserted[0]?.id;
+    }
+
+    let status: InvestigationRunStatus = result.found ? 'found' : 'not_found';
+    let foundJobId: string | undefined;
+    let ingestError: string | null = null;
+
+    if (result.found && result.applyUrl) {
+      try {
+        // Feed the located posting into the normal pipeline (dedupe + park/
+        // enqueue in one place — a re-POST of the same URL is a duplicate).
+        const ingested = await ingestJob(deps, {
+          url: result.applyUrl,
+          source: 'discord-investigation',
+        });
+        foundJobId = ingested.jobId;
+        // Timeline annotation on the screenshot task (a direct events insert,
+        // not a transition — the task's state is unchanged).
+        await deps.db.insert(events).values({
+          taskId,
+          type: 'INVESTIGATION_FOUND',
+          data: {
+            applyUrl: result.applyUrl,
+            foundJobId,
+            company: result.company,
+            title: result.title,
+            platform: result.platform,
+          },
+        });
+      } catch (error) {
+        // An ingest hiccup must not force a Cloud Run Job retry: record the
+        // failure on the run (transcript still persisted below) and 200.
+        status = 'error';
+        ingestError = error instanceof Error ? error.message : String(error);
+      }
+    } else {
+      // No URL to ingest — still annotate the timeline with the outcome.
+      await deps.db.insert(events).values({
+        taskId,
+        type: 'INVESTIGATION_DONE',
+        data: { notes: result.notes, confidence: result.confidence },
+      });
+    }
+
+    if (runId !== undefined) {
+      await deps.db
+        .update(investigationRuns)
+        .set({
+          status,
+          result,
+          transcript,
+          foundJobId: foundJobId ?? null,
+          error: ingestError,
+          finishedAt: new Date(),
+        })
+        .where(eq(investigationRuns.id, runId));
+    }
+
+    return reply
+      .code(200)
+      .send(foundJobId !== undefined ? { ok: true, foundJobId } : { ok: true });
   });
 
   app.post('/ingest', async (request, reply) => {

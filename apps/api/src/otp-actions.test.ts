@@ -162,6 +162,8 @@ const baseConfig = {
   DISCORD_APP_ID: 'test-app-id',
   DISCORD_CHANNEL_MAP: undefined,
   DISCORD_ENABLED: true,
+  INVESTIGATOR_JOB_NAME: 'sower-investigator',
+  SCREENSHOT_INVESTIGATION_ENABLED: false,
 } as Config;
 
 function createNotify(): Notifier {

@@ -8,6 +8,7 @@ import {
   applicationTasks,
   documents,
   events,
+  investigationRuns,
   jobDescriptions,
   jobs,
 } from './schema.js';
@@ -244,5 +245,50 @@ describe('schema', () => {
     expect(
       unique?.config.columns.map((c) => ('name' in c ? c.name : null)),
     ).toEqual(['platform', 'tenant']);
+  });
+
+  it('defines the investigation_runs table', () => {
+    expect(getTableName(investigationRuns)).toBe('investigation_runs');
+    expect(sqlColumnNames(investigationRuns)).toEqual([
+      'error',
+      'finished_at',
+      'found_job_id',
+      'id',
+      'result',
+      'started_at',
+      'status',
+      'task_id',
+      'transcript',
+    ]);
+    expect(investigationRuns.taskId.notNull).toBe(true);
+    expect(investigationRuns.status.notNull).toBe(true);
+    expect(investigationRuns.status.default).toBe('running');
+    expect(investigationRuns.startedAt.notNull).toBe(true);
+    // All set only as a run progresses/finishes.
+    expect(investigationRuns.result.notNull).toBe(false);
+    expect(investigationRuns.transcript.notNull).toBe(false);
+    expect(investigationRuns.foundJobId.notNull).toBe(false);
+    expect(investigationRuns.error.notNull).toBe(false);
+    expect(investigationRuns.finishedAt.notNull).toBe(false);
+  });
+
+  it('references application_tasks + jobs and indexes task_id on investigation_runs', () => {
+    const config = getTableConfig(investigationRuns);
+    const foreignTables = config.foreignKeys.map((fk) => {
+      const ref = fk.reference();
+      return {
+        table: getTableName(ref.foreignTable),
+        columns: ref.columns.map((c) => c.name),
+      };
+    });
+    expect(foreignTables).toEqual(
+      expect.arrayContaining([
+        { table: 'application_tasks', columns: ['task_id'] },
+        { table: 'jobs', columns: ['found_job_id'] },
+      ]),
+    );
+    expect(config.indexes.map((idx) => idx.config.name ?? null)).toContain(
+      'investigation_runs_task_id_idx',
+    );
   });
 });

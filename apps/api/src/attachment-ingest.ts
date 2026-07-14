@@ -3,6 +3,7 @@ import { documents } from '@sower/db';
 import type { DiscordChannelMessage } from '@sower/notify';
 import { createStorage } from '@sower/storage';
 import { ingestJob } from './ingest.js';
+import { triggerInvestigation } from './investigate-trigger.js';
 import { assertSafeFetchTarget } from './link-extract.js';
 import type { Deps } from './types.js';
 
@@ -149,6 +150,19 @@ export async function ingestMessageAttachments(
         sizeBytes: image.size,
         jobId: result.jobId,
       });
+    }
+
+    // 4. Tier 2: fire the screenshot investigation for a freshly parked task
+    // (after the documents link so the Job can find the image). It self-gates
+    // on config.SCREENSHOT_INVESTIGATION_ENABLED and never throws — the
+    // try/catch is belt-and-suspenders so a trigger failure can NEVER affect
+    // the parked task (the never-drop invariant above).
+    if (!result.duplicate) {
+      try {
+        await triggerInvestigation(deps, result.taskId);
+      } catch {
+        // Logged inside triggerInvestigation; the park already succeeded.
+      }
     }
 
     outcomes.push({

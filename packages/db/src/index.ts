@@ -63,6 +63,8 @@ export type JobDescription = typeof schema.jobDescriptions.$inferSelect;
 export type NewJobDescription = typeof schema.jobDescriptions.$inferInsert;
 export type IngestionRun = typeof schema.ingestionRuns.$inferSelect;
 export type NewIngestionRun = typeof schema.ingestionRuns.$inferInsert;
+export type InvestigationRun = typeof schema.investigationRuns.$inferSelect;
+export type NewInvestigationRun = typeof schema.investigationRuns.$inferInsert;
 // Named *Row to avoid colliding with @sower/platforms' WorkdaySession (the
 // runtime cookies/CSRF object); this is the DB row that mirrors its state.
 export type WorkdaySessionRow = typeof schema.workdaySessions.$inferSelect;

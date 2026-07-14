@@ -174,6 +174,8 @@ const config: Config = {
   DISCORD_APP_ID: 'test-app-id',
   DISCORD_CHANNEL_MAP: undefined,
   DISCORD_ENABLED: false,
+  INVESTIGATOR_JOB_NAME: 'sower-investigator',
+  SCREENSHOT_INVESTIGATION_ENABLED: false,
 };
 
 const jobSpec = {

@@ -1,3 +1,4 @@
+import { events, investigationRuns, jobs } from '@sower/db';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
 import { buildServer } from './server.js';
@@ -79,14 +80,14 @@ interface Chain {
   innerJoin: () => Chain;
   leftJoin: () => Chain;
   orderBy: () => Chain;
-  values: () => Chain;
+  values: (arg?: unknown) => Chain;
   returning: () => Chain;
-  set: () => Chain;
+  set: (arg?: unknown) => Chain;
   onConflictDoNothing: () => Chain;
   then: (onFulfilled: (value: unknown) => unknown) => Promise<unknown>;
 }
 
-function chain(result: unknown): Chain {
+function chain(result: unknown, onArg?: (arg: unknown) => void): Chain {
   const self: Chain = {
     from: () => self,
     where: () => self,
@@ -94,9 +95,15 @@ function chain(result: unknown): Chain {
     innerJoin: () => self,
     leftJoin: () => self,
     orderBy: () => self,
-    values: () => self,
+    values: (arg?: unknown) => {
+      onArg?.(arg);
+      return self;
+    },
     returning: () => self,
-    set: () => self,
+    set: (arg?: unknown) => {
+      onArg?.(arg);
+      return self;
+    },
     onConflictDoNothing: () => self,
     // biome-ignore lint/suspicious/noThenProperty: intentionally thenable to mimic drizzle's awaitable query builder
     then: (onFulfilled) => Promise.resolve(result).then(onFulfilled),
@@ -104,15 +111,33 @@ function chain(result: unknown): Chain {
   return self;
 }
 
+/** One recorded write: db.insert(table).values(arg) / db.update(table).set(arg). */
+interface DbWrite {
+  method: 'insert' | 'update';
+  table: unknown;
+  arg: unknown;
+}
+
 function createFakeDb(
-  options: { selectResults?: unknown[][]; insertResults?: unknown[][] } = {},
+  options: {
+    selectResults?: unknown[][];
+    insertResults?: unknown[][];
+    /** When provided, every insert/update write is recorded here. */
+    writes?: DbWrite[];
+  } = {},
 ): Deps['db'] {
   const selectResults = [...(options.selectResults ?? [])];
   const insertResults = [...(options.insertResults ?? [])];
   const db = {
     select: () => chain(selectResults.shift() ?? []),
-    insert: () => chain(insertResults.shift() ?? []),
-    update: () => chain([]),
+    insert: (table: unknown) =>
+      chain(insertResults.shift() ?? [], (arg) =>
+        options.writes?.push({ method: 'insert', table, arg }),
+      ),
+    update: (table: unknown) =>
+      chain([], (arg) =>
+        options.writes?.push({ method: 'update', table, arg }),
+      ),
   };
   return db as unknown as Deps['db'];
 }
@@ -137,6 +162,8 @@ const config: Config = {
   DISCORD_APP_ID: 'test-app-id',
   DISCORD_CHANNEL_MAP: undefined,
   DISCORD_ENABLED: false,
+  INVESTIGATOR_JOB_NAME: 'sower-investigator',
+  SCREENSHOT_INVESTIGATION_ENABLED: false,
 };
 
 function createDeps(db: Deps['db']) {
@@ -508,5 +535,252 @@ describe('buildServer', () => {
     expect(enqueueProcess).toHaveBeenCalledTimes(2);
     expect(enqueueProcess).toHaveBeenNthCalledWith(1, 'task-1');
     expect(enqueueProcess).toHaveBeenNthCalledWith(2, 'task-2');
+  });
+
+  describe('POST /tasks/:id/investigation-result', () => {
+    const TASK_ID = '7d8e9f10-1112-4314-a516-b71819c2d2e2';
+    const APPLY_URL = 'https://boards.greenhouse.io/acme/jobs/999';
+
+    const foundResult = {
+      found: true,
+      applyUrl: APPLY_URL,
+      company: 'Acme',
+      title: 'Software Engineer Intern',
+      platform: 'greenhouse',
+      confidence: 'high',
+      notes: 'located on the tenant board',
+    };
+    const notFoundResult = {
+      found: false,
+      confidence: 'low',
+      notes: 'no verifiable posting located',
+    };
+    const transcript = [
+      { seq: 0, kind: 'assistant_text', text: 'reading the screenshot', ts: 1 },
+      {
+        seq: 1,
+        kind: 'tool_use',
+        tool: 'WebSearch',
+        input: { query: 'acme swe intern greenhouse' },
+        ts: 2,
+      },
+      { seq: 2, kind: 'tool_result', tool: 'WebSearch', output: 'hits', ts: 3 },
+      { seq: 3, kind: 'result', text: 'success', ts: 4 },
+    ];
+
+    function inject(
+      app: ReturnType<typeof buildServer>,
+      payload: unknown,
+      id: string = TASK_ID,
+    ) {
+      return app.inject({
+        method: 'POST',
+        url: `/tasks/${id}/investigation-result`,
+        headers: { 'x-api-key': 'test-key' },
+        payload: payload as Record<string, unknown>,
+      });
+    }
+
+    it('responds 401 without an api key (NOT exempt from the global guard)', async () => {
+      const { deps } = createDeps(createFakeDb());
+      const app = buildServer(deps);
+      const res = await app.inject({
+        method: 'POST',
+        url: `/tasks/${TASK_ID}/investigation-result`,
+        payload: { result: notFoundResult, transcript: [] },
+      });
+      expect(res.statusCode).toBe(401);
+      expect(res.json()).toEqual({ error: 'unauthorized' });
+    });
+
+    it('found+applyUrl: ingests the url, marks the run found, and records INVESTIGATION_FOUND', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [
+          [{ id: 'run-1' }], // latest investigation run for the task
+          [], // ingestJob's canonical-url dup check: fresh
+        ],
+        insertResults: [
+          [{ id: 'job-9' }], // ingested job
+          [{ id: 'task-9' }], // its application task
+        ],
+        writes,
+      });
+      const { deps, enqueueProcess } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, { result: foundResult, transcript });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, foundJobId: 'job-9' });
+
+      // The found URL went through the real ingest pipeline (and enqueued).
+      const jobInsert = writes.find(
+        (w) => w.method === 'insert' && w.table === jobs,
+      );
+      expect(jobInsert?.arg).toMatchObject({
+        url: APPLY_URL,
+        source: 'discord-investigation',
+      });
+      expect(enqueueProcess).toHaveBeenCalledWith('task-9');
+
+      // Timeline annotation on the screenshot task.
+      const foundEvent = writes
+        .filter((w) => w.method === 'insert' && w.table === events)
+        .map((w) => w.arg as Record<string, unknown>)
+        .find((arg) => arg.type === 'INVESTIGATION_FOUND');
+      expect(foundEvent).toMatchObject({
+        taskId: TASK_ID,
+        data: {
+          applyUrl: APPLY_URL,
+          foundJobId: 'job-9',
+          company: 'Acme',
+          title: 'Software Engineer Intern',
+          platform: 'greenhouse',
+        },
+      });
+
+      // The run persisted the full transcript + result and linked the job.
+      const runUpdate = writes.find(
+        (w) => w.method === 'update' && w.table === investigationRuns,
+      );
+      expect(runUpdate?.arg).toMatchObject({
+        status: 'found',
+        foundJobId: 'job-9',
+        result: foundResult,
+        transcript,
+        error: null,
+      });
+      const runSet = runUpdate?.arg as { finishedAt?: unknown } | undefined;
+      expect(runSet?.finishedAt).toBeInstanceOf(Date);
+    });
+
+    it('not_found: updates the run, records INVESTIGATION_DONE, and ingests nothing', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[{ id: 'run-1' }]],
+        insertResults: [[]], // INVESTIGATION_DONE event insert
+        writes,
+      });
+      const { deps, enqueueProcess } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, { result: notFoundResult, transcript });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true });
+      expect(enqueueProcess).not.toHaveBeenCalled();
+      // No job ingested.
+      expect(writes.some((w) => w.table === jobs)).toBe(false);
+
+      const doneEvent = writes
+        .filter((w) => w.method === 'insert' && w.table === events)
+        .map((w) => w.arg as Record<string, unknown>)
+        .find((arg) => arg.type === 'INVESTIGATION_DONE');
+      expect(doneEvent).toMatchObject({
+        taskId: TASK_ID,
+        data: {
+          notes: 'no verifiable posting located',
+          confidence: 'low',
+        },
+      });
+
+      const runUpdate = writes.find(
+        (w) => w.method === 'update' && w.table === investigationRuns,
+      );
+      expect(runUpdate?.arg).toMatchObject({
+        status: 'not_found',
+        foundJobId: null,
+        result: notFoundResult,
+        transcript,
+      });
+    });
+
+    it('self-heals a missing run row by inserting one before updating it', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[]], // no existing run for the task
+        insertResults: [
+          [{ id: 'run-new' }], // the self-healed run row
+          [], // INVESTIGATION_DONE event
+        ],
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, { result: notFoundResult, transcript: [] });
+
+      expect(res.statusCode).toBe(200);
+      const runInsert = writes.find(
+        (w) => w.method === 'insert' && w.table === investigationRuns,
+      );
+      expect(runInsert?.arg).toEqual({ taskId: TASK_ID, status: 'running' });
+      const runUpdate = writes.find(
+        (w) => w.method === 'update' && w.table === investigationRuns,
+      );
+      expect(runUpdate?.arg).toMatchObject({ status: 'not_found' });
+    });
+
+    it('an ingest failure marks the run error but still responds 200 (no Job retry)', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [
+          [{ id: 'run-1' }], // latest run
+          [], // dup check: fresh
+          [], // dedupe-key conflict lookup: nothing
+        ],
+        insertResults: [[]], // job insert returns no row -> ingestJob throws
+        writes,
+      });
+      const { deps, enqueueProcess } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, { result: foundResult, transcript });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true });
+      expect(enqueueProcess).not.toHaveBeenCalled();
+      // No INVESTIGATION_FOUND event without a real ingested job...
+      expect(writes.some((w) => w.table === events)).toBe(false);
+      // ...but the transcript is still persisted, with the error recorded.
+      const runUpdate = writes.find(
+        (w) => w.method === 'update' && w.table === investigationRuns,
+      );
+      expect(runUpdate?.arg).toMatchObject({
+        status: 'error',
+        error: 'failed to insert job',
+        foundJobId: null,
+        result: foundResult,
+        transcript,
+      });
+    });
+
+    it('responds 400 for an invalid task id', async () => {
+      const { deps } = createDeps(createFakeDb());
+      const app = buildServer(deps);
+      const res = await inject(
+        app,
+        { result: notFoundResult, transcript: [] },
+        'not-a-uuid',
+      );
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ error: 'invalid task id' });
+    });
+
+    it('responds 400 for an invalid body', async () => {
+      const { deps } = createDeps(createFakeDb());
+      const app = buildServer(deps);
+      for (const payload of [
+        {},
+        { result: notFoundResult }, // missing transcript
+        { result: { found: 'yes' }, transcript: [] }, // malformed result
+        { result: notFoundResult, transcript: 'nope' }, // not an array
+      ]) {
+        const res = await inject(app, payload);
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toMatchObject({ error: 'invalid body' });
+      }
+    });
   });
 });
