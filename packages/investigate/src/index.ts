@@ -7,6 +7,16 @@
  *
  * Auth: the SDK's Claude Code subprocess authenticates via the
  * CLAUDE_CODE_OAUTH_TOKEN env var (a secret — never log it).
+ *
+ * Security posture: the agent fetches arbitrary web pages, so every page is a
+ * potential prompt-injection vector. Two containment layers:
+ *   1. The subprocess env is a minimal allowlist (see SUBPROCESS_ENV_KEYS) —
+ *      DB/API/GCP secrets never reach the agent process.
+ *   2. The tool surface is restricted to WebSearch/WebFetch via the SDK's
+ *      `tools` base-set option, with shell/file/code built-ins additionally
+ *      blocked through `disallowedTools` and `permissionMode: 'dontAsk'`
+ *      (headless: never prompts, denies anything not pre-approved). Denials
+ *      surface as 'permission_denied' system steps in the transcript.
  */
 import { query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
@@ -26,11 +36,14 @@ export interface InvestigationResult {
 export interface TranscriptStep {
   seq: number;
   kind: 'assistant_text' | 'tool_use' | 'tool_result' | 'result' | 'system';
-  /** WebSearch / WebFetch / ... */
+  /** WebSearch / WebFetch / ... (on 'system' steps: the denied tool). */
   tool?: string;
   /** tool_use input (e.g. {query} or {url}). */
   input?: unknown;
-  /** tool_result output, truncated to ~8000 chars. */
+  /**
+   * tool_result output (or, on 'permission_denied' system steps, the
+   * denial message), truncated to ~8000 chars.
+   */
   output?: string;
   /** assistant reasoning text. */
   text?: string;
@@ -44,6 +57,58 @@ export interface InvestigationOutcome {
 
 const DEFAULT_MAX_TURNS = 12;
 const OUTPUT_TRUNCATE_CHARS = 8000;
+
+/** The only tools the investigation agent may use. */
+const INVESTIGATION_TOOLS = ['WebSearch', 'WebFetch'];
+
+/**
+ * Shell/file/code built-ins removed from the agent's context entirely
+ * (defense in depth on top of the restricted `tools` base set: a bare name
+ * in `disallowedTools` removes the tool and blocks harness-internal calls
+ * in every permission mode).
+ */
+const DENIED_TOOLS = [
+  'Task',
+  'Agent',
+  'Bash',
+  'BashOutput',
+  'KillShell',
+  'Read',
+  'Write',
+  'Edit',
+  'MultiEdit',
+  'NotebookEdit',
+  'Glob',
+  'Grep',
+  'LS',
+  'Skill',
+  'REPL',
+  'TodoWrite',
+  'ExitPlanMode',
+];
+
+/**
+ * Env vars forwarded to the agent subprocess — nothing else. The SDK `env`
+ * option REPLACES the subprocess environment (it is not merged with
+ * process.env), so secrets like DATABASE_URL, INGEST_API_KEY, and GCP_* /
+ * vault vars in the parent process never reach the agent, even if a
+ * prompt-injected page convinces it to try dumping its environment.
+ */
+const SUBPROCESS_ENV_KEYS = [
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'PATH',
+  'HOME',
+  'CLAUDE_CONFIG_DIR',
+];
+
+function buildSubprocessEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of SUBPROCESS_ENV_KEYS) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
 
 const investigationResultSchema = z.object({
   found: z.boolean(),
@@ -232,11 +297,23 @@ export async function investigateScreenshot(input: {
   const stream = query({
     prompt: userMessages(),
     options: {
-      allowedTools: ['WebSearch', 'WebFetch'],
+      // Base tool set: ONLY web research tools exist in the agent's context.
+      // (allowedTools alone does not restrict — it only auto-approves.)
+      tools: [...INVESTIGATION_TOOLS],
+      // Defense in depth: remove shell/file/code tools even if the base set
+      // ever changes shape.
+      disallowedTools: [...DENIED_TOOLS],
+      // Pre-approve the web tools (plus ToolSearch, the harness meta-tool
+      // that loads deferred tools) so the headless run never needs a prompt.
+      allowedTools: [...INVESTIGATION_TOOLS, 'ToolSearch'],
+      // Headless: never prompt; auto-deny anything not pre-approved. Denials
+      // arrive as 'permission_denied' system messages and are recorded in
+      // the transcript.
+      permissionMode: 'dontAsk',
       maxTurns: input.maxTurns ?? DEFAULT_MAX_TURNS,
-      // Headless: never block on interactive permission prompts.
-      permissionMode: 'bypassPermissions',
-      allowDangerouslySkipPermissions: true,
+      // Minimal allowlisted environment — REPLACES process.env for the
+      // subprocess, starving it of DB/API/GCP secrets.
+      env: buildSubprocessEnv(),
     },
   });
 
@@ -303,11 +380,21 @@ export async function investigateScreenshot(input: {
         ts,
       });
     } else if (message.type === 'system') {
-      const m = message as { subtype?: unknown };
+      const m = message as {
+        subtype?: unknown;
+        tool_name?: unknown;
+        message?: unknown;
+      };
+      // 'permission_denied' system messages record blocked tool calls —
+      // keep the tool name and denial message so denials are observable.
+      const denied = m.subtype === 'permission_denied';
       transcript.push({
         seq: seq++,
         kind: 'system',
         text: typeof m.subtype === 'string' ? m.subtype : undefined,
+        tool:
+          denied && typeof m.tool_name === 'string' ? m.tool_name : undefined,
+        output: denied && typeof m.message === 'string' ? m.message : undefined,
         ts,
       });
     }

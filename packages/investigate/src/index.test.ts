@@ -165,9 +165,15 @@ describe('investigateScreenshot', () => {
       options: Record<string, unknown>;
     };
 
-    expect(call.options.allowedTools).toEqual(['WebSearch', 'WebFetch']);
+    expect(call.options.tools).toEqual(['WebSearch', 'WebFetch']);
+    expect(call.options.allowedTools).toEqual([
+      'WebSearch',
+      'WebFetch',
+      'ToolSearch',
+    ]);
     expect(call.options.maxTurns).toBe(5);
-    expect(call.options.permissionMode).toBe('bypassPermissions');
+    expect(call.options.permissionMode).toBe('dontAsk');
+    expect(call.options.allowDangerouslySkipPermissions).toBeUndefined();
 
     const yielded = [];
     for await (const m of call.prompt) yielded.push(m);
@@ -189,6 +195,93 @@ describe('investigateScreenshot', () => {
       media_type: 'image/png',
       data: image.toString('base64'),
     });
+  });
+
+  it('starves the agent subprocess of secrets and restricts its tool set', async () => {
+    // Simulate the Job process env: secrets that must NOT reach the agent.
+    process.env.DATABASE_URL = 'postgres://user:pw@host:5432/sower';
+    process.env.INGEST_API_KEY = 'super-secret-ingest-key';
+    process.env.GCP_PROJECT = 'sower-production';
+    try {
+      queryMock.mockReturnValue(fakeStream(HAPPY_PATH_MESSAGES));
+      await investigateScreenshot({
+        image: Buffer.from('x'),
+        contentType: 'image/png',
+      });
+
+      const call = queryMock.mock.calls[0]?.[0] as
+        | { options: Record<string, unknown> }
+        | undefined;
+      const options = call?.options ?? {};
+
+      // env is a minimal allowlist that REPLACES the subprocess env.
+      const env = options.env as Record<string, string>;
+      expect(env).toBeDefined();
+      const allowlist = [
+        'CLAUDE_CODE_OAUTH_TOKEN',
+        'PATH',
+        'HOME',
+        'CLAUDE_CONFIG_DIR',
+      ];
+      for (const key of Object.keys(env)) {
+        expect(allowlist).toContain(key);
+      }
+      expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe('test-token');
+      expect(env).not.toHaveProperty('DATABASE_URL');
+      expect(env).not.toHaveProperty('INGEST_API_KEY');
+      expect(env).not.toHaveProperty('GCP_PROJECT');
+
+      // Tool surface: only web research tools; shell/file/code tools denied.
+      expect(options.tools).toEqual(['WebSearch', 'WebFetch']);
+      expect(options.disallowedTools).toEqual(
+        expect.arrayContaining([
+          'Bash',
+          'Read',
+          'Write',
+          'Edit',
+          'NotebookEdit',
+          'Task',
+          'Agent',
+          'Glob',
+          'Grep',
+        ]),
+      );
+      expect(options.permissionMode).toBe('dontAsk');
+      expect(options.allowDangerouslySkipPermissions).toBeUndefined();
+    } finally {
+      delete process.env.DATABASE_URL;
+      delete process.env.INGEST_API_KEY;
+      delete process.env.GCP_PROJECT;
+    }
+  });
+
+  it('records permission denials as system steps with tool and message', async () => {
+    queryMock.mockReturnValue(
+      fakeStream([
+        {
+          type: 'system',
+          subtype: 'permission_denied',
+          tool_name: 'Bash',
+          message: 'Bash is not allowed in this session.',
+        },
+        {
+          type: 'result',
+          subtype: 'success',
+          result: `\`\`\`json\n${JSON.stringify(FINAL_JSON)}\n\`\`\``,
+        },
+      ]),
+    );
+
+    const outcome = await investigateScreenshot({
+      image: Buffer.from('x'),
+      contentType: 'image/png',
+    });
+
+    const denial = outcome.transcript.find(
+      (s) => s.kind === 'system' && s.text === 'permission_denied',
+    );
+    expect(denial?.tool).toBe('Bash');
+    expect(denial?.output).toBe('Bash is not allowed in this session.');
   });
 
   it('returns found:false with the full transcript when no valid JSON is produced', async () => {
