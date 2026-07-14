@@ -22,7 +22,7 @@ export function Badge({
   );
 }
 
-function safeStringify(value: unknown): string {
+export function safeStringify(value: unknown): string {
   try {
     const json = JSON.stringify(value, null, 2);
     return json === undefined ? String(value) : json;

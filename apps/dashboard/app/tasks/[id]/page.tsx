@@ -5,6 +5,7 @@ import {
   applicationTasks,
   documents,
   events,
+  investigationRuns,
   jobDescriptions,
   jobs,
   type WorkdaySessionRow,
@@ -23,6 +24,7 @@ import {
   StateBadge,
   Timestamp,
 } from '../../../lib/ui';
+import { InvestigationPanel } from './investigation-panel';
 import { JobDescriptionPanel } from './job-description-panel';
 import { NeedsInputForm } from './needs-input-form';
 import { OtpForm } from './otp-form';
@@ -352,30 +354,56 @@ export default async function TaskPage({
   const task = taskRows[0];
   if (!task) notFound();
 
-  const [jobRows, eventRows, callRows, documentRows, descriptionRows] =
-    await Promise.all([
-      db.select().from(jobs).where(eq(jobs.id, task.jobId)).limit(1),
-      db
-        .select()
-        .from(events)
-        .where(eq(events.taskId, id))
-        .orderBy(asc(events.createdAt)),
-      db
-        .select()
-        .from(apiCalls)
-        .where(eq(apiCalls.taskId, id))
-        .orderBy(asc(apiCalls.seq)),
-      db.select().from(documents).orderBy(desc(documents.createdAt)),
-      // Newest description version first; row [0] is the current one and the
-      // array length is the total number of stored versions for this job.
-      db
-        .select()
-        .from(jobDescriptions)
-        .where(eq(jobDescriptions.jobId, task.jobId))
-        .orderBy(desc(jobDescriptions.version)),
-    ]);
+  const [
+    jobRows,
+    eventRows,
+    callRows,
+    documentRows,
+    descriptionRows,
+    investigationRows,
+  ] = await Promise.all([
+    db.select().from(jobs).where(eq(jobs.id, task.jobId)).limit(1),
+    db
+      .select()
+      .from(events)
+      .where(eq(events.taskId, id))
+      .orderBy(asc(events.createdAt)),
+    db
+      .select()
+      .from(apiCalls)
+      .where(eq(apiCalls.taskId, id))
+      .orderBy(asc(apiCalls.seq)),
+    db.select().from(documents).orderBy(desc(documents.createdAt)),
+    // Newest description version first; row [0] is the current one and the
+    // array length is the total number of stored versions for this job.
+    db
+      .select()
+      .from(jobDescriptions)
+      .where(eq(jobDescriptions.jobId, task.jobId))
+      .orderBy(desc(jobDescriptions.version)),
+    // Latest Tier-2 screenshot investigation for this task (none for
+    // non-screenshot tasks — the panel simply doesn't render then).
+    db
+      .select()
+      .from(investigationRuns)
+      .where(eq(investigationRuns.taskId, id))
+      .orderBy(desc(investigationRuns.startedAt))
+      .limit(1),
+  ]);
   const job = jobRows[0];
   const latestDescription = descriptionRows[0];
+  const investigation = investigationRows[0];
+  // "Found" runs ingest the real job; link the reader to its queued task.
+  const foundTaskRow = investigation?.foundJobId
+    ? (
+        await db
+          .select({ id: applicationTasks.id })
+          .from(applicationTasks)
+          .where(eq(applicationTasks.jobId, investigation.foundJobId))
+          .orderBy(desc(applicationTasks.createdAt))
+          .limit(1)
+      )[0]
+    : undefined;
 
   const spec = task.jobSpec;
   const resolution = task.resolution;
@@ -597,6 +625,17 @@ export default async function TaskPage({
               </figure>
             ))}
           </div>
+        </section>
+      ) : null}
+
+      {/* ---- agent investigation (Tier-2 screenshot triage) ---- */}
+      {investigation ? (
+        <section>
+          <SectionHeading>Agent investigation</SectionHeading>
+          <InvestigationPanel
+            run={investigation}
+            foundTaskId={foundTaskRow?.id ?? null}
+          />
         </section>
       ) : null}
 
