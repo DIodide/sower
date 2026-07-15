@@ -643,26 +643,41 @@ export default async function TaskPage({
       <section id="answers">
         <SectionHeading>Questions &amp; answers</SectionHeading>
         {spec?.discoveredByAgent ? (
-          <div className="banner banner--attention">
-            <p>
-              <strong>Form discovered by agent — verify before use.</strong>{' '}
-              These questions were machine-extracted from{' '}
-              {spec.applyUrl ? (
-                <a
-                  href={spec.applyUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  the application page
-                </a>
-              ) : (
-                'the application page'
-              )}{' '}
-              of an unsupported platform. Check them against the real form —
-              labels, options, or required flags may be off, and nothing is ever
-              auto-submitted for this task.
-            </p>
-          </div>
+          spec.formVerified ? (
+            <div className="banner banner--success">
+              <p>
+                <Badge tone="success">✓ Form verified</Badge> A human checked
+                these machine-extracted questions against the real application
+                form. Nothing is ever auto-submitted for this task.
+              </p>
+            </div>
+          ) : (
+            <div className="banner banner--attention">
+              <div style={{ flex: '1 1 20rem' }}>
+                <p style={{ marginBottom: '0.625rem' }}>
+                  <strong>Form discovered by agent — verify before use.</strong>{' '}
+                  These questions were machine-extracted from{' '}
+                  {spec.applyUrl ? (
+                    <a
+                      href={spec.applyUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      the application page
+                    </a>
+                  ) : (
+                    'the application page'
+                  )}{' '}
+                  of an unsupported platform. Check them against the real form —
+                  labels, options, or required flags may be off, and nothing is
+                  ever auto-submitted for this task. Once you have compared
+                  every field, confirm it here (this also updates the Discord
+                  ingest reply):
+                </p>
+                <TaskActions taskId={task.id} mode="verify" />
+              </div>
+            </div>
+          )
         ) : null}
         {spec && views.length > 0 ? (
           <div className="row" style={{ margin: '0 0 0.75rem' }}>

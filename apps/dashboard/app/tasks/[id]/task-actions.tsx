@@ -2,10 +2,15 @@
 
 import { useActionState } from 'react';
 import type { ActionResult } from './actions';
-import { approveTask, requeueTask, startSessionCapture } from './actions';
+import {
+  approveTask,
+  requeueTask,
+  startSessionCapture,
+  verifyDiscoveredForm,
+} from './actions';
 
 const LABELS: Record<
-  'requeue' | 'approve' | 'start',
+  'requeue' | 'approve' | 'start' | 'verify',
   { idle: string; className: string; title: string }
 > = {
   approve: {
@@ -25,6 +30,12 @@ const LABELS: Record<
     title:
       'Asks the local agent to open a browser on your machine so you can sign in to Workday',
   },
+  verify: {
+    idle: 'Verify form — I checked it against the real page',
+    className: 'btn btn--success',
+    title:
+      'Confirms that you, a human, checked the machine-extracted questions against the real application form — marks the form verified and updates the Discord ingest reply',
+  },
 };
 
 export function TaskActions({
@@ -32,7 +43,7 @@ export function TaskActions({
   mode,
 }: {
   taskId: string;
-  mode: 'requeue' | 'approve' | 'start';
+  mode: 'requeue' | 'approve' | 'start' | 'verify';
 }) {
   const [result, formAction, pending] = useActionState<
     ActionResult | null,
@@ -40,6 +51,7 @@ export function TaskActions({
   >(async () => {
     if (mode === 'approve') return approveTask(taskId);
     if (mode === 'start') return startSessionCapture(taskId);
+    if (mode === 'verify') return verifyDiscoveredForm(taskId);
     return requeueTask(taskId);
   }, null);
 

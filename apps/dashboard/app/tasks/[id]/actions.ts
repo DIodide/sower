@@ -353,6 +353,21 @@ export async function startSessionCapture(
 }
 
 /**
+ * Human confirmation of an agent-discovered form via the api service: marks
+ * jobSpec.formVerified, records a FORM_VERIFIED event, and edits the Discord
+ * #ingest reply to the verified line. Idempotent on the api side.
+ */
+export async function verifyDiscoveredForm(
+  taskId: string,
+): Promise<ActionResult> {
+  const idParse = uuidSchema.safeParse(taskId);
+  if (!idParse.success) return { ok: false, message: 'invalid task id.' };
+  const result = await callApi(idParse.data, 'verify-form');
+  revalidatePath(`/tasks/${idParse.data}`);
+  return result;
+}
+
+/**
  * Deliver a one-time code to an AWAITING_OTP task via the api service, which
  * stores it and resumes the task (AWAITING_OTP -> FILLING). Mirrors the
  * Discord modal path; either can satisfy the same wait.
@@ -396,7 +411,7 @@ const apiResponseSchema = z.object({
  */
 async function callApi(
   taskId: string,
-  action: 'requeue' | 'approve' | 'otp' | 'start',
+  action: 'requeue' | 'approve' | 'otp' | 'start' | 'verify-form',
   jsonBody?: Record<string, unknown>,
 ): Promise<ActionResult> {
   const base = process.env.API_BASE_URL;
@@ -465,6 +480,14 @@ async function callApi(
     return {
       ok: true,
       message: `Session capture requested for ${body.tenant ?? 'this tenant'} — the local agent will open a browser on your machine; sign in there. Once the session is captured the task advances automatically.`,
+    };
+  }
+
+  if (action === 'verify-form') {
+    return {
+      ok: true,
+      message:
+        'form verified — recorded on the task and the Discord ingest reply now shows it as verified.',
     };
   }
 
