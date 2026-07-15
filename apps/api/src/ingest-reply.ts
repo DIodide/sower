@@ -10,8 +10,10 @@ import {
 import { getAdapter } from '@sower/platforms';
 import { asc, desc, eq, inArray } from 'drizzle-orm';
 import {
+  formatEasternDate,
   isIngestableJobUrl,
   renderReplyLines,
+  taskLabel,
   taskLink,
 } from './discord-ingest.js';
 import type { Deps } from './types.js';
@@ -55,18 +57,11 @@ function fieldCount(spec: JobSpec): string {
   return `${count} field${count === 1 ? '' : 's'}`;
 }
 
-/** `, "Title" @ Company` (whichever parts the discovered spec carries). */
-function formDescriptor(spec: JobSpec): string {
-  if (spec.title && spec.company) return `, "${spec.title}" @ ${spec.company}`;
-  if (spec.title) return `, "${spec.title}"`;
-  if (spec.company) return `, ${spec.company}`;
-  return '';
-}
-
 /**
  * One reply line for a task, derived purely from its current DB state.
  * Wording mirrors replyFor's lines so an edit reads as an update, not a
- * rewrite; the dashboard task link is identical (taskLink).
+ * rewrite; the dashboard task link is identical (taskLink), but the label
+ * upgrades to `Title · Company` as soon as either is known.
  */
 export function renderTaskLine(
   row: ReplyTaskRow,
@@ -74,21 +69,34 @@ export function renderTaskLine(
   dashboardBaseUrl?: string,
 ): string {
   const { task, job } = row;
-  const ref = taskLink(task.id, dashboardBaseUrl);
+  const spec = task.jobSpec;
+  // Parsed values first (processTask backfills jobs.title/company from the
+  // discovered spec), then whatever the form-discovery spec carries, else the
+  // shortened job URL. Never the task id.
+  const ref = taskLink(
+    task.id,
+    taskLabel({
+      title: job.title || spec?.title,
+      company: job.company || spec?.company,
+      url: job.url,
+    }),
+    dashboardBaseUrl,
+  );
+  const date = job.createdAt ? ` · ${formatEasternDate(job.createdAt)}` : '';
 
   // Screenshot tasks: the run kind is authoritative; the CDN host covers
   // parked screenshots that never got an investigation run.
   if (run?.kind === 'screenshot' || (!run && isDiscordAttachmentUrl(job.url))) {
     if (run?.status === 'running') {
-      return `🖼️ screenshot recorded · investigating… → ${ref}`;
+      return `🖼️ ${ref} · screenshot recorded · investigating…${date}`;
     }
     if (run?.status === 'found') {
-      return `🖼️ screenshot recorded · job found → ${ref}`;
+      return `🖼️ ${ref} · screenshot recorded · job found${date}`;
     }
     if (run?.status === 'not_found') {
-      return `🖼️ screenshot recorded · no job found → ${ref}`;
+      return `🖼️ ${ref} · screenshot recorded · no job found${date}`;
     }
-    return `🖼️ screenshot recorded → ${ref}`;
+    return `🖼️ ${ref} · screenshot recorded${date}`;
   }
 
   // Supported/queued: same classification the poll ingested it under.
@@ -99,23 +107,22 @@ export function renderTaskLine(
     job.tenant !== null &&
     isIngestableJobUrl(job.platform, job.url)
   ) {
-    return `✅ ${ref} queued · ${job.platform}`;
+    return `✅ ${ref} · queued · ${job.platform}${date}`;
   }
 
   // Unsupported (recorded + parked): reflect the form-discovery lifecycle.
   if (run?.kind === 'form' && run.status === 'running') {
-    return `🔎 discovering form… → ${ref}`;
+    return `🔎 ${ref} · discovering form…${date}`;
   }
-  const spec = task.jobSpec;
   if (spec?.discoveredByAgent) {
     return spec.formVerified
-      ? `✅ form verified: ${fieldCount(spec)} → ${ref}`
-      : `🔎 form discovered: ${fieldCount(spec)}${formDescriptor(spec)} → ${ref}`;
+      ? `✅ ${ref} · form verified: ${fieldCount(spec)}${date}`
+      : `🔎 ${ref} · form discovered: ${fieldCount(spec)}${date}`;
   }
   if (run?.kind === 'form' && run.status === 'not_found') {
-    return `⚠️ recorded (unsupported) · no form found → ${ref}`;
+    return `⚠️ ${ref} · recorded (unsupported) · no form found${date}`;
   }
-  return `⚠️ recorded (unsupported) → ${ref}`;
+  return `⚠️ ${ref} · recorded (unsupported)${date}`;
 }
 
 /**

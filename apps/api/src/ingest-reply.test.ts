@@ -8,6 +8,11 @@ const CHANNEL = 'chan-1';
 const MESSAGE = 'reply-1';
 const BASE_URL = 'https://dash.test';
 const TASK_ID = '7d8e9f10-1112-4314-a516-b71819c2d2e2';
+/** Every fake job row is ingested at this instant → "Jul 13" in ET. */
+const INGESTED_AT = new Date('2026-07-13T19:47:00Z');
+const DATE = 'Jul 13';
+/** The default fake job URL as the reply's link label shortens it. */
+const URL_LABEL = 'weirdats.example/jobs/1';
 
 interface Chain {
   from: () => Chain;
@@ -63,6 +68,9 @@ function row(
       platform: 'unknown',
       tenant: null,
       url: 'https://weirdats.example/jobs/1',
+      title: null,
+      company: null,
+      createdAt: INGESTED_AT,
       ...jobOverrides,
     },
   };
@@ -157,14 +165,16 @@ describe('refreshIngestReply', () => {
     );
     const text = editChannelMessage.mock.calls[0]?.[2] as string;
     expect(text.split('\n')).toEqual([
-      `✅ [\`queued-1\`](${BASE_URL}/tasks/queued-1) queued · greenhouse`,
-      `🔎 discovering form… → [\`invest-1\`](${BASE_URL}/tasks/invest-1)`,
-      `🔎 form discovered: 3 fields, "Platform Intern" @ WeirdCo → [\`found-1x\`](${BASE_URL}/tasks/found-1x)`,
-      `✅ form verified: 2 fields → [\`verify-1\`](${BASE_URL}/tasks/verify-1)`,
-      `⚠️ recorded (unsupported) · no form found → [\`noform-1\`](${BASE_URL}/tasks/noform-1)`,
-      `⚠️ recorded (unsupported) → [\`plain-1x\`](${BASE_URL}/tasks/plain-1x)`,
-      `🖼️ screenshot recorded · job found → [\`shot-1xx\`](${BASE_URL}/tasks/shot-1xx)`,
+      `✅ [boards.greenhouse.io/acme/jobs/1](${BASE_URL}/tasks/queued-1) · queued · greenhouse · ${DATE}`,
+      `🔎 [${URL_LABEL}](${BASE_URL}/tasks/invest-1) · discovering form… · ${DATE}`,
+      `🔎 [Platform Intern · WeirdCo](${BASE_URL}/tasks/found-1x) · form discovered: 3 fields · ${DATE}`,
+      `✅ [Platform Intern · WeirdCo](${BASE_URL}/tasks/verify-1) · form verified: 2 fields · ${DATE}`,
+      `⚠️ [${URL_LABEL}](${BASE_URL}/tasks/noform-1) · recorded (unsupported) · no form found · ${DATE}`,
+      `⚠️ [${URL_LABEL}](${BASE_URL}/tasks/plain-1x) · recorded (unsupported) · ${DATE}`,
+      `🖼️ [cdn.discordapp.com/attachments/1/2/shot.png](${BASE_URL}/tasks/shot-1xx) · screenshot recorded · job found · ${DATE}`,
     ]);
+    // A task id is only ever the link TARGET, never the visible label.
+    expect(text).not.toMatch(/\[[^\]]*(queued-1|invest-1|found-1x)[^\]]*\]/);
     // The whole edit respects Discord's cap.
     expect(text.length).toBeLessThanOrEqual(2000);
   });
@@ -184,7 +194,7 @@ describe('refreshIngestReply', () => {
     await refreshIngestReply(deps, TASK_ID);
 
     const text = editChannelMessage.mock.calls[0]?.[2] as string;
-    expect(text).toContain('🔎 discovering form…');
+    expect(text).toContain('· discovering form…');
     expect(text).not.toContain('no form found');
   });
 
@@ -224,32 +234,134 @@ describe('refreshIngestReply', () => {
 });
 
 describe('renderTaskLine (screenshot states)', () => {
+  const CDN_LABEL = 'cdn.discordapp.com/attachments/1/2/shot.png';
   const shot = row('shot-1xx', {
     url: 'https://cdn.discordapp.com/attachments/1/2/shot.png',
   }) as unknown as Parameters<typeof renderTaskLine>[0];
 
   it('renders the plain recorded line when no investigation ran', () => {
     expect(renderTaskLine(shot, undefined, BASE_URL)).toBe(
-      `🖼️ screenshot recorded → [\`shot-1xx\`](${BASE_URL}/tasks/shot-1xx)`,
+      `🖼️ [${CDN_LABEL}](${BASE_URL}/tasks/shot-1xx) · screenshot recorded · ${DATE}`,
     );
   });
 
   it('reflects a running / not_found screenshot investigation', () => {
     expect(
       renderTaskLine(shot, { kind: 'screenshot', status: 'running' }, BASE_URL),
-    ).toContain('🖼️ screenshot recorded · investigating…');
+    ).toContain('· screenshot recorded · investigating…');
     expect(
       renderTaskLine(
         shot,
         { kind: 'screenshot', status: 'not_found' },
         BASE_URL,
       ),
-    ).toContain('🖼️ screenshot recorded · no job found');
+    ).toContain('· screenshot recorded · no job found');
   });
 
-  it('degrades to a backticked id without a dashboard base url', () => {
+  it('degrades to a bold link-less label (never the id) without a dashboard base url', () => {
     expect(renderTaskLine(shot, undefined)).toBe(
-      '🖼️ screenshot recorded → `shot-1xx`',
+      `🖼️ **${CDN_LABEL}** · screenshot recorded · ${DATE}`,
+    );
+  });
+});
+
+describe('renderTaskLine (link labels)', () => {
+  const asRow = (r: ReturnType<typeof row>) =>
+    r as unknown as Parameters<typeof renderTaskLine>[0];
+
+  it('labels with Title · Company from the jobs row (parsed values win over the spec)', () => {
+    const line = renderTaskLine(
+      asRow(
+        row(
+          'lbl-1',
+          {
+            platform: 'greenhouse',
+            tenant: 'acme',
+            url: 'https://boards.greenhouse.io/acme/jobs/9',
+            title: 'Account Executive',
+            company: 'Vercel',
+          },
+          discoveredSpec({ title: 'Spec Title', company: 'SpecCo' }),
+        ),
+      ),
+      undefined,
+      BASE_URL,
+    );
+    expect(line).toBe(
+      `✅ [Account Executive · Vercel](${BASE_URL}/tasks/lbl-1) · queued · greenhouse · ${DATE}`,
+    );
+  });
+
+  it('falls back to the jobSpec title/company when the jobs row has none', () => {
+    const line = renderTaskLine(
+      asRow(row('lbl-2', {}, discoveredSpec())),
+      undefined,
+      BASE_URL,
+    );
+    expect(line).toContain(
+      `[Platform Intern · WeirdCo](${BASE_URL}/tasks/lbl-2)`,
+    );
+  });
+
+  it('labels with the lone known part (title-only / company-only)', () => {
+    expect(
+      renderTaskLine(
+        asRow(row('lbl-3', { title: 'Data Scientist' })),
+        undefined,
+        BASE_URL,
+      ),
+    ).toContain(`[Data Scientist](${BASE_URL}/tasks/lbl-3)`);
+    expect(
+      renderTaskLine(
+        asRow(row('lbl-4', { company: 'TickPick' })),
+        undefined,
+        BASE_URL,
+      ),
+    ).toContain(`[TickPick](${BASE_URL}/tasks/lbl-4)`);
+  });
+
+  it('shortens the URL fallback (scheme + www. stripped) and caps it at 48 chars', () => {
+    const line = renderTaskLine(
+      asRow(row('lbl-5', { url: `https://www.example.com/${'x'.repeat(80)}` })),
+      undefined,
+      BASE_URL,
+    );
+    const label = /\[([^\]]*)\]/.exec(line)?.[1] ?? '';
+    expect(label.startsWith('example.com/xxx')).toBe(true);
+    expect(label).toHaveLength(48);
+    expect(label.endsWith('…')).toBe(true);
+  });
+
+  it('escapes markdown-breaking characters in a title', () => {
+    const line = renderTaskLine(
+      asRow(row('lbl-6', { title: 'Eng [Platform] `Sr`', company: 'A*Co' })),
+      undefined,
+      BASE_URL,
+    );
+    expect(line).toContain(
+      `[Eng \\[Platform\\] \\\`Sr\\\` · A\\*Co](${BASE_URL}/tasks/lbl-6)`,
+    );
+  });
+
+  it('renders a bold link-less label without a base url — still never the id', () => {
+    const line = renderTaskLine(
+      asRow(row('lbl-7', { title: 'Data Scientist', company: 'TickPick' })),
+      undefined,
+    );
+    expect(line).toBe(
+      `⚠️ **Data Scientist · TickPick** · recorded (unsupported) · ${DATE}`,
+    );
+    expect(line).not.toContain('lbl-7');
+  });
+
+  it('omits the date when the job has no createdAt', () => {
+    const line = renderTaskLine(
+      asRow(row('lbl-8', { createdAt: null })),
+      undefined,
+      BASE_URL,
+    );
+    expect(line).toBe(
+      `⚠️ [${URL_LABEL}](${BASE_URL}/tasks/lbl-8) · recorded (unsupported)`,
     );
   });
 });

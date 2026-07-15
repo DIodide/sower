@@ -3,12 +3,17 @@ import type { Config } from './config.js';
 import type { MessageIngestSummary, UrlOutcome } from './discord-ingest.js';
 import {
   announcedTaskIds,
+  formatEasternDate,
   ingestMessageLinks,
   reactionFor,
   replyFor,
   runDiscordIngestPoll,
+  taskLabel,
 } from './discord-ingest.js';
 import type { Deps } from './types.js';
+
+/** replyFor stamps fresh outcomes with the CURRENT ET date (ingest = now). */
+const TODAY = formatEasternDate(new Date());
 
 const CDN_URL = 'https://cdn.discordapp.com/attachments/1/2/shot.png';
 
@@ -371,15 +376,19 @@ describe('reactionFor / replyFor', () => {
       },
       BASE_URL,
     );
+    // Labels are the shortened URL / filename + the ingest date — the task id
+    // is only ever the link TARGET, never the visible text.
     expect(reply).toContain(
-      `✅ [\`task-111\`](${BASE_URL}/tasks/task-1111-aaaa) queued · greenhouse`,
+      `✅ [gh/1](${BASE_URL}/tasks/task-1111-aaaa) · queued · greenhouse · ${TODAY}`,
     );
     expect(reply).toContain(
-      `⚠️ recorded (unsupported) → [\`task-222\`](${BASE_URL}/tasks/task-2222-bbbb)`,
+      `⚠️ [weird/x](${BASE_URL}/tasks/task-2222-bbbb) · recorded (unsupported) · ${TODAY}`,
     );
     expect(reply).toContain(
-      `🖼️ screenshot recorded → [\`task-333\`](${BASE_URL}/tasks/task-3333-cccc)`,
+      `🖼️ [shot.png](${BASE_URL}/tasks/task-3333-cccc) · screenshot recorded · ${TODAY}`,
     );
+    expect(reply).not.toContain('`task-');
+    expect(reply).not.toMatch(/\[[^\]]*task-\d{4}[^\]]*\]/);
   });
 
   it('renders "discovering form…" for an unsupported outcome under investigation', () => {
@@ -400,7 +409,7 @@ describe('reactionFor / replyFor', () => {
       BASE_URL,
     );
     expect(reply).toContain(
-      `🔎 discovering form… → [\`task-222\`](${BASE_URL}/tasks/task-2222-bbbb)`,
+      `🔎 [weird/x](${BASE_URL}/tasks/task-2222-bbbb) · discovering form… · ${TODAY}`,
     );
     expect(reply).not.toContain('recorded (unsupported)');
   });
@@ -425,7 +434,7 @@ describe('reactionFor / replyFor', () => {
       BASE_URL,
     );
     expect(reply).toContain(
-      `♻️ duplicate of [\`task-ori\`](${BASE_URL}/tasks/task-orig-1)`,
+      `♻️ [gh/1](${BASE_URL}/tasks/task-orig-1) · duplicate`,
     );
     expect(reply).toContain('originally added Jul 13, 3:47 PM ET');
     expect(reply).toContain(
@@ -455,7 +464,7 @@ describe('reactionFor / replyFor', () => {
     expect(reply).not.toContain('github.com/discord');
   });
 
-  it('degrades to backticked task ids when no dashboard base URL is set', () => {
+  it('degrades to bold link-less labels (never the id) when no dashboard base URL is set', () => {
     const reply = replyFor({
       ...base,
       urls: 2,
@@ -489,11 +498,15 @@ describe('reactionFor / replyFor', () => {
         },
       ],
     });
-    expect(reply).toContain('✅ `task-111` queued · greenhouse');
-    expect(reply).toContain('♻️ duplicate of `task-ori`');
-    expect(reply).toContain('🖼️ screenshot recorded → `task-333`');
+    expect(reply).toContain(`✅ **gh/1** · queued · greenhouse · ${TODAY}`);
+    expect(reply).toContain('♻️ **gh/2** · duplicate');
+    expect(reply).toContain(`🖼️ **shot.png** · screenshot recorded · ${TODAY}`);
     expect(reply).toContain('originally added Jul 13, 3:47 PM ET via discord');
     expect(reply).not.toContain('](');
+    // The raw task ids appear nowhere at all without a link target.
+    expect(reply).not.toContain('task-1111-aaaa');
+    expect(reply).not.toContain('task-orig-1');
+    expect(reply).not.toContain('task-3333-cccc');
   });
 
   it('summarizes a directory outcome with child counts', () => {
@@ -578,6 +591,48 @@ describe('reactionFor / replyFor', () => {
   it('keeps the empty-message reply', () => {
     expect(replyFor({ ...base }, BASE_URL)).toMatch(/No job links/);
     expect(replyFor({ ...base })).toMatch(/No job links/);
+  });
+});
+
+describe('taskLabel', () => {
+  const url = 'https://apply.workable.com/tickpick/j/436CCC1027/';
+
+  it('renders Title · Company when both are known', () => {
+    expect(
+      taskLabel({ title: 'Data Scientist', company: 'TickPick', url }),
+    ).toBe('Data Scientist · TickPick');
+  });
+
+  it('renders the lone known part when only one is present', () => {
+    expect(taskLabel({ title: 'Data Scientist', url })).toBe('Data Scientist');
+    expect(taskLabel({ title: null, company: 'TickPick', url })).toBe(
+      'TickPick',
+    );
+    // Blank strings count as unknown, not as a label.
+    expect(taskLabel({ title: '  ', company: '', url })).toBe(
+      'apply.workable.com/tickpick/j/436CCC1027',
+    );
+  });
+
+  it('falls back to the URL, scheme + www. stripped and trailing slash dropped', () => {
+    expect(taskLabel({ url: 'https://www.example.com/careers/123/' })).toBe(
+      'example.com/careers/123',
+    );
+    expect(taskLabel({ url })).toBe('apply.workable.com/tickpick/j/436CCC1027');
+  });
+
+  it('caps a long URL fallback at 48 chars with a trailing ellipsis', () => {
+    const long = `https://boards.example.com/${'a'.repeat(80)}`;
+    const label = taskLabel({ url: long });
+    expect(label).toHaveLength(48);
+    expect(label.endsWith('…')).toBe(true);
+    expect(label.startsWith('boards.example.com/')).toBe(true);
+  });
+
+  it('escapes markdown-breaking characters so a title cannot corrupt the link', () => {
+    expect(
+      taskLabel({ title: 'C++ Dev [Sr] `beta`', company: 'A*B_C', url }),
+    ).toBe('C++ Dev \\[Sr\\] \\`beta\\` · A\\*B\\_C');
   });
 });
 
@@ -822,9 +877,9 @@ describe('runDiscordIngestPoll', () => {
       expect(result).toMatchObject({ enabled: true, scanned: 1, processed: 1 });
       expect(reactions).toEqual([{ id: 'm-shot', emoji: '🖼️' }]);
       expect(replies).toHaveLength(1);
-      // The reply links the parked task on the dashboard.
+      // The reply links the parked task on the dashboard under its filename.
       expect(replies[0]).toContain(
-        '🖼️ screenshot recorded → [`task-1`](https://dash.test/tasks/task-1)',
+        `🖼️ [shot.png](https://dash.test/tasks/task-1) · screenshot recorded · ${TODAY}`,
       );
       // Parked via ingestJob and linked to the job via a documents row.
       expect(ingestState.calls).toEqual([CDN_URL]);
@@ -869,10 +924,10 @@ describe('runDiscordIngestPoll', () => {
       // each linked to its dashboard task.
       expect(reactions).toEqual([{ id: 'm-mixed', emoji: '✅' }]);
       expect(replies[0]).toContain(
-        '✅ [`task-1`](https://dash.test/tasks/task-1) queued · greenhouse',
+        `✅ [gh/1](https://dash.test/tasks/task-1) · queued · greenhouse · ${TODAY}`,
       );
       expect(replies[0]).toContain(
-        '🖼️ screenshot recorded → [`task-1`](https://dash.test/tasks/task-1)',
+        `🖼️ [shot.png](https://dash.test/tasks/task-1) · screenshot recorded · ${TODAY}`,
       );
       // Both the text link and the attachment went through ingestJob.
       expect(ingestState.calls).toEqual(['https://gh/1', CDN_URL]);

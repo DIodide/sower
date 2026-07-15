@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
+import { refreshIngestReply } from './ingest-reply.js';
 import { MAX_ATTEMPTS, processTask } from './process.js';
 import type { Deps, Notifier } from './types.js';
 
@@ -130,6 +131,12 @@ vi.mock('@sower/answers', () => ({
     answersState.lastOpts = opts;
     return answersState.result;
   },
+}));
+
+// The post-parse #ingest reply refresh (label upgrade to "Title · Company"):
+// mocked so tests assert exactly when the successful-parse path fires it.
+vi.mock('./ingest-reply.js', () => ({
+  refreshIngestReply: vi.fn(async () => {}),
 }));
 
 interface FakeTaskRow {
@@ -399,6 +406,7 @@ const discordConfig: Config = {
 };
 
 beforeEach(() => {
+  vi.mocked(refreshIngestReply).mockClear();
   adapterState.discoverError = null;
   adapterState.questions = [];
   adapterState.lastDiscoverOpts = undefined;
@@ -965,6 +973,60 @@ describe('processTask Discord approval card (REVIEW hook)', () => {
     expect(task.lastError).toBeNull();
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+describe('processTask #ingest reply refresh (post-parse label upgrade)', () => {
+  it('refreshes the ingest reply after a successful parse that lands in REVIEW', async () => {
+    const { db } = createFakeTaskDb({ state: 'QUEUED' });
+    answersState.result = {
+      resolved: [{ questionId: 'email', source: 'profile', value: 'x' }],
+      missing: [],
+    };
+    const deps = createDeps(db);
+
+    const outcome = await processTask(deps, 'task-1');
+
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'REVIEW' });
+    expect(refreshIngestReply).toHaveBeenCalledTimes(1);
+    expect(refreshIngestReply).toHaveBeenCalledWith(deps, 'task-1');
+  });
+
+  it('refreshes after a parse that parks in NEEDS_INPUT too (still a successful parse)', async () => {
+    const { db } = createFakeTaskDb({ state: 'QUEUED' });
+    answersState.result = {
+      resolved: [],
+      missing: [
+        { id: 'resume', label: 'Resume', type: 'file', required: true },
+      ],
+    };
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'NEEDS_INPUT' });
+    expect(refreshIngestReply).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not refresh when the parse fails', async () => {
+    const { db } = createFakeTaskDb({ state: 'QUEUED' });
+    adapterState.discoverError = 'boom';
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome).toMatchObject({ kind: 'failed' });
+    expect(refreshIngestReply).not.toHaveBeenCalled();
+  });
+
+  it('never fails processing when the refresh itself rejects (best-effort)', async () => {
+    const { db, task } = createFakeTaskDb({ state: 'QUEUED' });
+    vi.mocked(refreshIngestReply).mockRejectedValueOnce(
+      new Error('discord down'),
+    );
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'REVIEW' });
+    expect(task.lastError).toBeNull();
   });
 });
 

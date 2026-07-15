@@ -313,14 +313,71 @@ function formatEasternTime(date: Date): string {
   return `${formatted} ET`;
 }
 
+const easternDateFormat = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York',
+  month: 'short',
+  day: 'numeric',
+});
+
+/** "Jul 15" — the compact ET ingest date each task line carries. */
+export function formatEasternDate(date: Date): string {
+  return easternDateFormat.format(date);
+}
+
+/** Longest a URL-fallback label gets before it is truncated with `…`. */
+const MAX_URL_LABEL_CHARS = 48;
+
 /**
- * A `task id8` label, linked to the dashboard task page when a base URL is
- * configured; plain backticked id when it isn't (graceful degradation).
+ * Escape markdown-breaking characters (brackets, backticks, emphasis, …) so a
+ * job title can never corrupt the `[label](url)` link it is embedded in.
+ */
+function escapeLabel(text: string): string {
+  return text.replace(/[\\`*_~[\]()]/g, '\\$&');
+}
+
+/** Scheme + leading `www.` stripped, trailing slash dropped, ~48-char cap. */
+function shortenUrlForLabel(url: string): string {
+  const stripped = url
+    .replace(/^https?:\/\//i, '')
+    .replace(/^www\./i, '')
+    .replace(/\/+$/, '');
+  return stripped.length > MAX_URL_LABEL_CHARS
+    ? `${stripped.slice(0, MAX_URL_LABEL_CHARS - 1)}…`
+    : stripped;
+}
+
+/**
+ * The human-meaningful visible text for a task link, in priority order:
+ * `Title · Company` → `Title` → `Company` → the shortened job URL. NEVER the
+ * task UUID — an id tells a human nothing. Markdown-escaped so a title with
+ * `]`/backticks/etc. cannot break the surrounding link.
+ */
+export function taskLabel(parts: {
+  title?: string | null;
+  company?: string | null;
+  url: string;
+}): string {
+  const title = parts.title?.trim();
+  const company = parts.company?.trim();
+  const label =
+    title && company
+      ? `${title} · ${company}`
+      : title || company || shortenUrlForLabel(parts.url);
+  return escapeLabel(label);
+}
+
+/**
+ * The task reference on a reply line: `[<label>](<dashboard>/tasks/<id>)`,
+ * or the bold label alone when no dashboard base URL is configured. The task
+ * id is only ever the link TARGET — the visible text is always the label.
  * Shared with refreshIngestReply so edited replies keep identical links.
  */
-export function taskLink(taskId: string, dashboardBaseUrl?: string): string {
-  const label = `\`${taskId.slice(0, 8)}\``;
-  if (!dashboardBaseUrl) return label;
+export function taskLink(
+  taskId: string,
+  label: string,
+  dashboardBaseUrl?: string,
+): string {
+  if (!dashboardBaseUrl) return `**${label}**`;
   return `[${label}](${dashboardBaseUrl.replace(/\/+$/, '')}/tasks/${taskId})`;
 }
 
@@ -347,29 +404,36 @@ function lineForOutcome(
   outcome: UrlOutcome,
   dashboardBaseUrl?: string,
 ): string {
+  // A fresh ingest knows no title/company at post time (the ATS parse runs
+  // async), so the label is the shortened URL; refreshIngestReply upgrades it
+  // to "Title · Company" once the parse lands. The ingest date IS now.
+  const today = formatEasternDate(new Date());
   switch (outcome.kind) {
     case 'ingested': {
+      const label = taskLabel({ url: outcome.url });
       const ref = outcome.taskId
-        ? taskLink(outcome.taskId, dashboardBaseUrl)
-        : shortenUrl(outcome.url);
-      return `✅ ${ref} queued · ${outcome.platform}`;
+        ? taskLink(outcome.taskId, label, dashboardBaseUrl)
+        : label;
+      return `✅ ${ref} · queued · ${outcome.platform} · ${today}`;
     }
     case 'unsupported': {
+      const label = taskLabel({ url: outcome.url });
       const ref = outcome.taskId
-        ? taskLink(outcome.taskId, dashboardBaseUrl)
-        : shortenUrl(outcome.url);
+        ? taskLink(outcome.taskId, label, dashboardBaseUrl)
+        : label;
       // A fired form discovery renders as in-progress; refreshIngestReply
       // edits this line once the investigator Job reports back.
       return outcome.investigating
-        ? `🔎 discovering form… → ${ref}`
-        : `⚠️ recorded (unsupported) → ${ref}`;
+        ? `🔎 ${ref} · discovering form… · ${today}`
+        : `⚠️ ${ref} · recorded (unsupported) · ${today}`;
     }
     case 'duplicate': {
-      const target =
+      const label = taskLabel({ url: outcome.url });
+      const ref =
         outcome.taskId === null
-          ? ''
-          : ` of ${taskLink(outcome.taskId, dashboardBaseUrl)}`;
-      return `♻️ duplicate${target} · originally added ${formatEasternTime(outcome.originalCreatedAt)} via ${sourceLink(outcome.originalSource)}`;
+          ? label
+          : taskLink(outcome.taskId, label, dashboardBaseUrl);
+      return `♻️ ${ref} · duplicate — originally added ${formatEasternTime(outcome.originalCreatedAt)} via ${sourceLink(outcome.originalSource)}`;
     }
     case 'directory': {
       let queued = 0;
@@ -397,19 +461,23 @@ function lineForScreenshot(
   outcome: AttachmentOutcome,
   dashboardBaseUrl?: string,
 ): string {
+  // The filename is the only human-meaningful handle a screenshot has at post
+  // time — never the job/task UUID.
+  const label = escapeLabel(outcome.filename);
   const ref =
     outcome.taskId === null
-      ? `\`${outcome.jobId.slice(0, 8)}\``
-      : taskLink(outcome.taskId, dashboardBaseUrl);
+      ? label
+      : taskLink(outcome.taskId, label, dashboardBaseUrl);
   const suffix = outcome.stored ? '' : ' (image not stored)';
-  return `🖼️ screenshot recorded → ${ref}${suffix}`;
+  return `🖼️ ${ref} · screenshot recorded${suffix} · ${formatEasternDate(new Date())}`;
 }
 
 /**
  * A per-outcome reply for the channel: every outcome gets one line linking it
- * to its dashboard task (markdown links when DASHBOARD_BASE_URL is set, plain
- * backticked ids otherwise), capped at MAX_REPLY_ITEMS lines + a "…+N more"
- * summary so the whole message stays under Discord's 2000-char limit.
+ * to its dashboard task under a human-meaningful label (markdown links when
+ * DASHBOARD_BASE_URL is set, bold labels otherwise — never the raw task id),
+ * capped at MAX_REPLY_ITEMS lines + a "…+N more" summary so the whole message
+ * stays under Discord's 2000-char limit.
  */
 export function replyFor(
   summary: MessageIngestSummary,

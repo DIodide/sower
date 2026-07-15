@@ -23,6 +23,7 @@ import {
 } from '@sower/platforms';
 import { and, desc, eq, inArray, lt, sql } from 'drizzle-orm';
 import { postReviewApprovalCard } from './discord.js';
+import { refreshIngestReply } from './ingest-reply.js';
 import { createTaskRecorder } from './recorder.js';
 import { transitionTask } from './transitions.js';
 import type { Deps } from './types.js';
@@ -223,6 +224,13 @@ export async function processTask(
         resolution,
       });
     }
+    // The #ingest reply that announced this task (if any) still labels its
+    // link by URL — title/company were unknown at post time. The parse just
+    // persisted them (jobSpec + jobs backfill), so upgrade the reply's label
+    // to "Title · Company" in place. Best-effort: refreshIngestReply no-ops
+    // without an ingest ref and swallows its own errors, but guard anyway —
+    // a reply edit must never change processing's outcome.
+    await refreshIngestReply(deps, taskId).catch(() => {});
     return {
       kind: 'processed',
       state: currentState,
