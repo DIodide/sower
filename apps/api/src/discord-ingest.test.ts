@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
 import type { MessageIngestSummary, UrlOutcome } from './discord-ingest.js';
 import {
+  announcedTaskIds,
   ingestMessageLinks,
   reactionFor,
   replyFor,
@@ -36,7 +37,11 @@ const ingestState = vi.hoisted(() => ({
   },
 }));
 const dirState = vi.hoisted(() => ({ byUrl: {} as Record<string, string[]> }));
-const triggerState = vi.hoisted(() => ({ calls: [] as string[] }));
+const triggerState = vi.hoisted(() => ({
+  calls: [] as string[],
+  /** What the mocked trigger reports back (true = investigation fired). */
+  fires: false,
+}));
 
 vi.mock('@sower/platforms', () => ({
   detectPlatform: (url: string) =>
@@ -66,6 +71,7 @@ vi.mock('./ingest.js', () => ({
 vi.mock('./investigate-trigger.js', () => ({
   triggerInvestigation: vi.fn(async (_deps: unknown, taskId: string) => {
     triggerState.calls.push(taskId);
+    return triggerState.fires;
   }),
 }));
 
@@ -92,6 +98,7 @@ beforeEach(() => {
   };
   dirState.byUrl = {};
   triggerState.calls = [];
+  triggerState.fires = false;
 });
 
 describe('ingestMessageLinks', () => {
@@ -118,11 +125,30 @@ describe('ingestMessageLinks', () => {
     };
     const s = await ingestMessageLinks({} as Deps, 'https://weirdats/x');
     expect(s.unsupported).toBe(1);
-    expect(s.outcomes[0]).toMatchObject({ kind: 'unsupported' });
+    // The gated-off trigger reports not-fired: the outcome stays "recorded".
+    expect(s.outcomes[0]).toMatchObject({
+      kind: 'unsupported',
+      investigating: false,
+    });
     // still routed through ingestJob (which records + parks the unknown job)
     expect(ingestState.calls).toEqual(['https://weirdats/x']);
     // a directly-sent (depth-0) unsupported link fires the investigator Job
     expect(triggerState.calls).toEqual(['task-1']);
+  });
+
+  it('marks an unsupported link investigating when the trigger reports fired', async () => {
+    platformState.byUrl['https://weirdats/x'] = {
+      platform: 'unknown',
+      tenant: null,
+      externalId: null,
+    };
+    triggerState.fires = true;
+    const s = await ingestMessageLinks({} as Deps, 'https://weirdats/x');
+    expect(s.outcomes[0]).toMatchObject({
+      kind: 'unsupported',
+      taskId: 'task-1',
+      investigating: true,
+    });
   });
 
   it('does NOT trigger form discovery for a supported link or a duplicate', async () => {
@@ -356,6 +382,29 @@ describe('reactionFor / replyFor', () => {
     );
   });
 
+  it('renders "discovering form…" for an unsupported outcome under investigation', () => {
+    const reply = replyFor(
+      {
+        ...base,
+        unsupported: 1,
+        outcomes: [
+          {
+            url: 'https://weird/x',
+            kind: 'unsupported',
+            jobId: 'job-2',
+            taskId: 'task-2222-bbbb',
+            investigating: true,
+          },
+        ],
+      },
+      BASE_URL,
+    );
+    expect(reply).toContain(
+      `🔎 discovering form… → [\`task-222\`](${BASE_URL}/tasks/task-2222-bbbb)`,
+    );
+    expect(reply).not.toContain('recorded (unsupported)');
+  });
+
   it('links a duplicate to the existing task with original time + repo source', () => {
     const reply = replyFor(
       {
@@ -532,11 +581,109 @@ describe('reactionFor / replyFor', () => {
   });
 });
 
+describe('announcedTaskIds', () => {
+  const base: MessageIngestSummary = {
+    urls: 0,
+    ingested: 0,
+    duplicates: 0,
+    unsupported: 0,
+    directories: 0,
+    errors: 0,
+    screenshots: 0,
+    outcomes: [],
+    screenshotOutcomes: [],
+  };
+
+  it('collects fresh ingested/unsupported/screenshot tasks, deduped', () => {
+    const ids = announcedTaskIds({
+      ...base,
+      outcomes: [
+        {
+          url: 'https://gh/1',
+          kind: 'ingested',
+          platform: 'greenhouse',
+          jobId: 'j1',
+          taskId: 'task-a',
+        },
+        {
+          url: 'https://weird/x',
+          kind: 'unsupported',
+          jobId: 'j2',
+          taskId: 'task-b',
+        },
+        // Same task announced twice (e.g. the same URL pasted twice).
+        {
+          url: 'https://gh/1',
+          kind: 'ingested',
+          platform: 'greenhouse',
+          jobId: 'j1',
+          taskId: 'task-a',
+        },
+      ],
+      screenshotOutcomes: [
+        {
+          kind: 'screenshot',
+          jobId: 'j3',
+          taskId: 'task-c',
+          filename: 'shot.png',
+          stored: true,
+        },
+      ],
+    });
+    expect(ids).toEqual(['task-a', 'task-b', 'task-c']);
+  });
+
+  it('skips duplicates, directory children, errors, and null/absent task ids', () => {
+    const ids = announcedTaskIds({
+      ...base,
+      outcomes: [
+        {
+          url: 'https://gh/1',
+          kind: 'duplicate',
+          jobId: 'j1',
+          taskId: 'task-orig', // an EXISTING task announced elsewhere
+          originalSource: 'discord',
+          originalCreatedAt: new Date('2026-07-13T19:47:00Z'),
+        },
+        {
+          url: 'https://dir/list',
+          kind: 'directory',
+          children: [
+            {
+              url: 'https://gh/2',
+              kind: 'ingested',
+              platform: 'greenhouse',
+              jobId: 'j2',
+              taskId: 'task-child', // collapses into one summary line
+            },
+          ],
+        },
+        { url: 'https://broken/x', kind: 'error', error: 'boom' },
+        { url: 'https://weird/y', kind: 'unsupported', jobId: 'j4' },
+      ],
+      screenshotOutcomes: [
+        {
+          kind: 'screenshot',
+          jobId: 'j5',
+          taskId: null,
+          filename: 'shot.png',
+          stored: false,
+        },
+      ],
+    });
+    expect(ids).toEqual([]);
+  });
+});
+
 describe('runDiscordIngestPoll', () => {
-  function fakeDeps(messages: unknown[]) {
+  function fakeDeps(
+    messages: unknown[],
+    options: { updateThrows?: boolean } = {},
+  ) {
     const reactions: { id: string; emoji: string }[] = [];
     const replies: string[] = [];
     const inserted: Record<string, unknown>[] = [];
+    const updated: Record<string, unknown>[] = [];
     const notify = {
       fetchChannelMessages: vi.fn(async () => messages),
       addReaction: vi.fn(async (_c: string, id: string, emoji: string) => {
@@ -544,15 +691,28 @@ describe('runDiscordIngestPoll', () => {
       }),
       postChannelMessage: vi.fn(async (_c: string, text: string) => {
         replies.push(text);
+        return { id: `reply-${replies.length}` };
       }),
+      editChannelMessage: vi.fn(async () => {}),
     };
-    // Minimal db: captures the documents rows screenshot ingest inserts.
+    // Minimal db: captures the documents rows screenshot ingest inserts and
+    // the application_tasks reply-ref updates the poll performs.
     const db = {
       insert: () => ({
         values: async (row: Record<string, unknown>) => {
           inserted.push(row);
           return [];
         },
+      }),
+      update: () => ({
+        set: (arg: Record<string, unknown>) => ({
+          where: async () => {
+            if (options.updateThrows) {
+              throw new Error('db down');
+            }
+            updated.push(arg);
+          },
+        }),
       }),
     };
     const deps = {
@@ -565,7 +725,7 @@ describe('runDiscordIngestPoll', () => {
       notify,
       db,
     } as unknown as Deps;
-    return { deps, notify, reactions, replies, inserted };
+    return { deps, notify, reactions, replies, inserted, updated };
   }
 
   it('processes fresh messages with links from any author; skips reacted + no-link', async () => {
@@ -729,5 +889,61 @@ describe('runDiscordIngestPoll', () => {
     } as unknown as Deps;
     const result = await runDiscordIngestPoll(deps);
     expect(result).toEqual({ enabled: false, scanned: 0, processed: 0 });
+  });
+
+  it('stores the reply channel + message id on the tasks the message created', async () => {
+    platformState.byUrl['https://gh/1'] = {
+      platform: 'greenhouse',
+      tenant: 'a',
+      externalId: '1',
+    };
+    const messages = [
+      { id: 'm-fresh', content: 'https://gh/1', author: { id: 'u' } },
+    ];
+    const { deps, updated } = fakeDeps(messages);
+
+    await runDiscordIngestPoll(deps);
+
+    // One update per posted reply, tagging its fresh tasks with the ref.
+    expect(updated).toEqual([
+      { ingestChannelId: 'chan-1', ingestMessageId: 'reply-1' },
+    ]);
+  });
+
+  it('does not update tasks when the reply itself failed to post', async () => {
+    platformState.byUrl['https://gh/1'] = {
+      platform: 'greenhouse',
+      tenant: 'a',
+      externalId: '1',
+    };
+    const messages = [
+      { id: 'm-fresh', content: 'https://gh/1', author: { id: 'u' } },
+    ];
+    const { deps, notify, updated } = fakeDeps(messages);
+    notify.postChannelMessage.mockRejectedValueOnce(new Error('discord down'));
+
+    const result = await runDiscordIngestPoll(deps);
+
+    // The poll still completed (reply failure is best-effort)...
+    expect(result).toMatchObject({ enabled: true, processed: 1 });
+    // ...and no reply ref was written (there is no message to edit later).
+    expect(updated).toEqual([]);
+  });
+
+  it('never fails the poll when storing the reply ref throws (best-effort)', async () => {
+    platformState.byUrl['https://gh/1'] = {
+      platform: 'greenhouse',
+      tenant: 'a',
+      externalId: '1',
+    };
+    const messages = [
+      { id: 'm-fresh', content: 'https://gh/1', author: { id: 'u' } },
+    ];
+    const { deps, replies } = fakeDeps(messages, { updateThrows: true });
+
+    const result = await runDiscordIngestPoll(deps);
+
+    expect(result).toMatchObject({ enabled: true, scanned: 1, processed: 1 });
+    expect(replies).toHaveLength(1);
   });
 });

@@ -293,7 +293,8 @@ function createNotify(options: { verified?: boolean } = {}) {
     ),
     fetchChannelMessages: vi.fn(async () => []),
     addReaction: vi.fn(async () => {}),
-    postChannelMessage: vi.fn(async () => {}),
+    postChannelMessage: vi.fn(async () => ({ id: 'reply-1' })),
+    editChannelMessage: vi.fn(async () => {}),
   } satisfies Notifier;
   return notify;
 }

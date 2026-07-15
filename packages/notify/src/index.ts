@@ -30,6 +30,7 @@ export {
 export type { ApprovalCardRef, DiscordChannelMessage } from './discord.js';
 export {
   addReaction,
+  editChannelMessage,
   fetchChannelMessages,
   notifyText,
   postApprovalCard,

@@ -32,25 +32,33 @@ function getJobsClient(): JobsClient {
  * `taskId` (passed to the container via a TASK_ID env override). Starting the
  * execution is fire-and-forget: the returned long-running operation is NOT
  * awaited to completion — the Job reports back over HTTP when it finishes.
+ *
+ * Returns true once the 'running' run row was recorded (an investigation is
+ * visibly underway), so the #ingest reply can honestly render "discovering
+ * form…"; false when the feature is gated off or nothing was recorded.
  */
 export async function triggerInvestigation(
   deps: Deps,
   taskId: string,
-): Promise<void> {
+): Promise<boolean> {
   const { config } = deps;
   if (!config.SCREENSHOT_INVESTIGATION_ENABLED) {
-    return;
+    return false;
   }
   if (!config.GCP_PROJECT_ID || !config.GCP_REGION) {
     console.warn(
       `[sower] investigation enabled but GCP_PROJECT_ID/GCP_REGION unset; not triggering for task ${taskId}`,
     );
-    return;
+    return false;
   }
+  let fired = false;
   try {
     await deps.db
       .insert(investigationRuns)
       .values({ taskId, status: 'running' });
+    // The run row is the visible "investigation underway" breadcrumb: even if
+    // the runJob RPC below fails, the reply/refresh state stays consistent.
+    fired = true;
     const name = `projects/${config.GCP_PROJECT_ID}/locations/${config.GCP_REGION}/jobs/${config.INVESTIGATOR_JOB_NAME}`;
     // Resolves once the execution is STARTED (the initial RPC); the
     // operation itself is left running.
@@ -66,4 +74,5 @@ export async function triggerInvestigation(
       error,
     );
   }
+  return fired;
 }

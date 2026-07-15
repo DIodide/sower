@@ -100,6 +100,14 @@ export const applicationTasks = pgTable('application_tasks', {
   /** Discord OTP-request card location, so the card can be edited on submit. */
   otpChannelId: text('otp_channel_id'),
   otpMessageId: text('otp_message_id'),
+  /**
+   * The #ingest reply message this task was announced in (set best-effort by
+   * the Discord ingest poll), so refreshIngestReply can re-render + edit that
+   * reply as the task's state advances (form discovered, human verified, ...).
+   * Null for tasks that did not arrive via #ingest or when the reply failed.
+   */
+  ingestChannelId: text('ingest_channel_id'),
+  ingestMessageId: text('ingest_message_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });

@@ -57,8 +57,14 @@ export interface Notifier {
     messageId: string,
     emoji: string,
   ): Promise<void>;
-  /** Post a plain-text message to a specific channel id. */
-  postChannelMessage(channelId: string, text: string): Promise<void>;
+  /** Post a plain-text message to a specific channel id (returns its id). */
+  postChannelMessage(channelId: string, text: string): Promise<{ id: string }>;
+  /** Edit a previously posted channel message (the #ingest reply refresh). */
+  editChannelMessage(
+    channelId: string,
+    messageId: string,
+    content: string,
+  ): Promise<void>;
 }
 
 export interface Deps {

@@ -3,6 +3,7 @@ import { createDb } from '@sower/db';
 import {
   addReaction,
   applyVerdict,
+  editChannelMessage,
   fetchChannelMessages,
   postApprovalCard,
   postChannelMessage,
@@ -33,6 +34,7 @@ async function main(): Promise<void> {
     fetchChannelMessages,
     addReaction,
     postChannelMessage,
+    editChannelMessage,
   };
 
   // Curated answer bank, loaded ONCE at startup and reused per request. A

@@ -1,6 +1,8 @@
 import { canonicalizeUrl } from '@sower/core';
+import { applicationTasks } from '@sower/db';
 import type { DiscordChannelMessage } from '@sower/notify';
 import { detectPlatform, getAdapter, resolveUrl } from '@sower/platforms';
+import { inArray } from 'drizzle-orm';
 import type { AttachmentOutcome } from './attachment-ingest.js';
 import {
   imageAttachments,
@@ -50,7 +52,18 @@ export type UrlOutcome =
       /** When the existing job was first ingested. */
       originalCreatedAt: Date;
     }
-  | { url: string; kind: 'unsupported'; jobId: string; taskId?: string }
+  | {
+      url: string;
+      kind: 'unsupported';
+      jobId: string;
+      taskId?: string;
+      /**
+       * True when Tier-2 form discovery was fired for this freshly parked
+       * task, so the reply renders "discovering form…" instead of a plain
+       * "recorded (unsupported)" (kept honest until the edit lands).
+       */
+      investigating?: boolean;
+    }
   | { url: string; kind: 'directory'; children: UrlOutcome[] }
   | { url: string; kind: 'error'; error: string };
 
@@ -70,8 +83,9 @@ export interface MessageIngestSummary {
 
 /** Workday returns platform:'workday' for ANY tenant host; only a /job/ or
  *  /details/ path is an actual posting we can discover. Everything else
- *  (login/careers landing) falls through to directory-expand-or-record. */
-function isIngestableJobUrl(platform: string, url: string): boolean {
+ *  (login/careers landing) falls through to directory-expand-or-record.
+ *  Exported so refreshIngestReply classifies a stored job the same way. */
+export function isIngestableJobUrl(platform: string, url: string): boolean {
   if (platform !== 'workday') return true;
   try {
     return /\/(job|details)\//i.test(new URL(url).pathname);
@@ -144,14 +158,16 @@ async function classifyAndIngest(
     // (depth 0). Directory children never trigger — a 50-link directory must
     // not spawn 50 browser Jobs. triggerInvestigation self-gates on the
     // enabled flag and never throws, so the parked task is never at risk.
+    let investigating = false;
     if (depth === 0) {
-      await triggerInvestigation(deps, result.taskId);
+      investigating = await triggerInvestigation(deps, result.taskId);
     }
     return {
       url: resolved,
       kind: 'unsupported',
       jobId: result.jobId,
       taskId: result.taskId,
+      investigating,
     };
   } catch (error) {
     return {
@@ -300,8 +316,9 @@ function formatEasternTime(date: Date): string {
 /**
  * A `task id8` label, linked to the dashboard task page when a base URL is
  * configured; plain backticked id when it isn't (graceful degradation).
+ * Shared with refreshIngestReply so edited replies keep identical links.
  */
-function taskLink(taskId: string, dashboardBaseUrl?: string): string {
+export function taskLink(taskId: string, dashboardBaseUrl?: string): string {
   const label = `\`${taskId.slice(0, 8)}\``;
   if (!dashboardBaseUrl) return label;
   return `[${label}](${dashboardBaseUrl.replace(/\/+$/, '')}/tasks/${taskId})`;
@@ -341,7 +358,11 @@ function lineForOutcome(
       const ref = outcome.taskId
         ? taskLink(outcome.taskId, dashboardBaseUrl)
         : shortenUrl(outcome.url);
-      return `⚠️ recorded (unsupported) → ${ref}`;
+      // A fired form discovery renders as in-progress; refreshIngestReply
+      // edits this line once the investigator Job reports back.
+      return outcome.investigating
+        ? `🔎 discovering form… → ${ref}`
+        : `⚠️ recorded (unsupported) → ${ref}`;
     }
     case 'duplicate': {
       const target =
@@ -408,7 +429,15 @@ export function replyFor(
     );
   }
   if (lines.length === 0) return 'No job links found in that message.';
+  return renderReplyLines(lines);
+}
 
+/**
+ * Join per-task lines into one Discord message: at most MAX_REPLY_ITEMS
+ * itemized lines + a "…+N more" summary, always under the 2000-char cap.
+ * Shared by replyFor (the initial post) and refreshIngestReply (the edit).
+ */
+export function renderReplyLines(lines: string[]): string {
   const shown = lines.slice(0, MAX_REPLY_ITEMS);
   let omitted = lines.length - shown.length;
   const render = (): string =>
@@ -431,6 +460,30 @@ export interface DiscordPollResult {
   enabled: boolean;
   scanned: number;
   processed: number;
+}
+
+/**
+ * The tasks a message's reply announced (fresh tasks only — duplicates point
+ * at tasks announced elsewhere, and directory children collapse into one
+ * summary line the refresh could not re-render per task). These are the rows
+ * that get the reply's channel/message id so refreshIngestReply can edit it.
+ */
+export function announcedTaskIds(summary: MessageIngestSummary): string[] {
+  const ids = new Set<string>();
+  for (const outcome of summary.outcomes) {
+    if (
+      (outcome.kind === 'ingested' || outcome.kind === 'unsupported') &&
+      outcome.taskId
+    ) {
+      ids.add(outcome.taskId);
+    }
+  }
+  for (const shot of summary.screenshotOutcomes) {
+    if (shot.taskId !== null) {
+      ids.add(shot.taskId);
+    }
+  }
+  return [...ids];
 }
 
 /**
@@ -477,14 +530,34 @@ export async function runDiscordIngestPoll(
       .catch((error) =>
         console.warn('[sower] discord ingest: react failed:', error),
       );
-    await notify
+    const reply = await notify
       .postChannelMessage(
         channelId,
         replyFor(summary, config.DASHBOARD_BASE_URL),
       )
-      .catch((error) =>
-        console.warn('[sower] discord ingest: reply failed:', error),
-      );
+      .catch((error) => {
+        console.warn('[sower] discord ingest: reply failed:', error);
+        return null;
+      });
+    // Remember which reply announced each fresh task, so refreshIngestReply
+    // can re-render + edit it as tasks advance. Best-effort: a failed write
+    // must never fail the poll (the tasks themselves are already safe).
+    if (reply?.id) {
+      const taskIds = announcedTaskIds(summary);
+      if (taskIds.length > 0) {
+        try {
+          await deps.db
+            .update(applicationTasks)
+            .set({ ingestChannelId: channelId, ingestMessageId: reply.id })
+            .where(inArray(applicationTasks.id, taskIds));
+        } catch (error) {
+          console.warn(
+            '[sower] discord ingest: storing reply ref failed:',
+            error,
+          );
+        }
+      }
+    }
     processed += 1;
   }
   return { enabled: true, scanned: messages.length, processed };

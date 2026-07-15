@@ -90,6 +90,12 @@ export interface JobSpec {
    * NEEDS_INPUT and is never auto-submitted.
    */
   discoveredByAgent?: boolean;
+  /**
+   * True once a human verified an agent-discovered form on the dashboard
+   * (POST /tasks/:id/verify-form). Only meaningful alongside
+   * `discoveredByAgent`; the #ingest reply renders it as "form verified".
+   */
+  formVerified?: boolean;
 }
 
 export interface ResolvedAnswer {

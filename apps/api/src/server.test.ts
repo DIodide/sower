@@ -29,6 +29,17 @@ const sourcesState = vi.hoisted(() => ({
   }>,
 }));
 
+/** Tasks refreshIngestReply was asked to re-render the #ingest reply for. */
+const refreshState = vi.hoisted(() => ({ calls: [] as string[] }));
+
+// The refresh primitive is proven in ingest-reply.test.ts; here we only
+// assert the endpoints invoke it (it never throws, so a fake fn suffices).
+vi.mock('./ingest-reply.js', () => ({
+  refreshIngestReply: vi.fn(async (_deps: unknown, taskId: string) => {
+    refreshState.calls.push(taskId);
+  }),
+}));
+
 vi.mock('@sower/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@sower/core')>()),
   canonicalizeUrl: (url: string) => url.toLowerCase().replace(/\/+$/, ''),
@@ -182,6 +193,7 @@ beforeEach(() => {
   };
   platformState.byUrl = {};
   sourcesState.listings = [];
+  refreshState.calls = [];
 });
 
 describe('buildServer', () => {
@@ -664,6 +676,9 @@ describe('buildServer', () => {
       });
       const runSet = runUpdate?.arg as { finishedAt?: unknown } | undefined;
       expect(runSet?.finishedAt).toBeInstanceOf(Date);
+
+      // The #ingest reply that announced the task is refreshed (edited).
+      expect(refreshState.calls).toEqual([TASK_ID]);
     });
 
     it('not_found: updates the run, records INVESTIGATION_DONE, and ingests nothing', async () => {
@@ -935,6 +950,9 @@ describe('buildServer', () => {
         });
         const runSet = runUpdate?.arg as { finishedAt?: unknown } | undefined;
         expect(runSet?.finishedAt).toBeInstanceOf(Date);
+
+        // The #ingest reply that announced the task is refreshed (edited).
+        expect(refreshState.calls).toEqual([TASK_ID]);
       });
 
       it('not found: records FORM_NOT_FOUND, writes no jobSpec, and marks the run not_found', async () => {
@@ -982,6 +1000,9 @@ describe('buildServer', () => {
           result: formNotFound,
           transcript: formTranscript,
         });
+
+        // The reply refresh fires on ANY investigation outcome.
+        expect(refreshState.calls).toEqual([TASK_ID]);
       });
 
       it('formFound with a missing task row: still persists the run, as an error', async () => {
@@ -1069,6 +1090,142 @@ describe('buildServer', () => {
         expect(res.statusCode).toBe(400);
         expect(res.json()).toMatchObject({ error: 'invalid body' });
       }
+    });
+  });
+
+  describe('POST /tasks/:id/verify-form', () => {
+    const TASK_ID = '7d8e9f10-1112-4314-a516-b71819c2d2e2';
+    const discoveredSpec = {
+      platform: 'unknown',
+      tenant: '',
+      externalId: '',
+      title: 'Platform Intern',
+      company: 'WeirdCo',
+      applyUrl: 'https://weirdats.example/jobs/1/apply',
+      questions: [
+        { id: 'first_name', label: 'First name', type: 'text', required: true },
+        { id: 'email', label: 'Email', type: 'text', required: true },
+        { id: 'resume', label: 'Resume', type: 'file', required: true },
+      ],
+      discoveredByAgent: true,
+    };
+
+    function inject(app: ReturnType<typeof buildServer>, id: string = TASK_ID) {
+      return app.inject({
+        method: 'POST',
+        url: `/tasks/${id}/verify-form`,
+        headers: { 'x-api-key': 'test-key' },
+      });
+    }
+
+    it('marks the discovered form verified, records FORM_VERIFIED, and refreshes the reply', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[{ id: TASK_ID, jobSpec: discoveredSpec }]],
+        insertResults: [[]], // FORM_VERIFIED event
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true });
+
+      // formVerified merged into the EXISTING spec (nothing else lost).
+      const taskUpdate = writes.find(
+        (w) => w.method === 'update' && w.table === applicationTasks,
+      );
+      expect(taskUpdate?.arg).toMatchObject({
+        jobSpec: { ...discoveredSpec, formVerified: true },
+      });
+
+      const verifiedEvent = writes
+        .filter((w) => w.method === 'insert' && w.table === events)
+        .map((w) => w.arg as Record<string, unknown>)
+        .find((arg) => arg.type === 'FORM_VERIFIED');
+      expect(verifiedEvent).toMatchObject({
+        taskId: TASK_ID,
+        data: {
+          questionCount: 3,
+          company: 'WeirdCo',
+          title: 'Platform Intern',
+        },
+      });
+
+      // The #ingest reply is edited to the "form verified" line.
+      expect(refreshState.calls).toEqual([TASK_ID]);
+    });
+
+    it('is idempotent: re-verifying rewrites nothing and adds no second event', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [
+          [
+            {
+              id: TASK_ID,
+              jobSpec: { ...discoveredSpec, formVerified: true },
+            },
+          ],
+        ],
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true });
+      expect(writes).toEqual([]);
+      // Still refreshes: recovers a reply whose earlier edit failed.
+      expect(refreshState.calls).toEqual([TASK_ID]);
+    });
+
+    it('responds 400 when the task has no agent-discovered form', async () => {
+      const writes: DbWrite[] = [];
+      for (const jobSpec of [
+        null,
+        { ...discoveredSpec, discoveredByAgent: undefined },
+      ]) {
+        const db = createFakeDb({
+          selectResults: [[{ id: TASK_ID, jobSpec }]],
+          writes,
+        });
+        const { deps } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app);
+
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toEqual({ error: 'no discovered form to verify' });
+      }
+      expect(writes).toEqual([]);
+      expect(refreshState.calls).toEqual([]);
+    });
+
+    it('responds 404 for a missing task and 400 for an invalid id', async () => {
+      const { deps } = createDeps(createFakeDb({ selectResults: [[]] }));
+      const app = buildServer(deps);
+
+      const missing = await inject(app);
+      expect(missing.statusCode).toBe(404);
+      expect(missing.json()).toEqual({ error: 'task not found' });
+
+      const invalid = await inject(app, 'not-a-uuid');
+      expect(invalid.statusCode).toBe(400);
+      expect(invalid.json()).toMatchObject({ error: 'invalid task id' });
+    });
+
+    it('responds 401 without an api key (guarded like every route)', async () => {
+      const { deps } = createDeps(createFakeDb());
+      const app = buildServer(deps);
+      const res = await app.inject({
+        method: 'POST',
+        url: `/tasks/${TASK_ID}/verify-form`,
+      });
+      expect(res.statusCode).toBe(401);
     });
   });
 });

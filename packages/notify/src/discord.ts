@@ -196,12 +196,36 @@ export async function addReaction(
   );
 }
 
-/** Post a plain-text message to a specific channel id (not platform-keyed). */
+/**
+ * Post a plain-text message to a specific channel id (not platform-keyed).
+ * Returns the created message's id so the caller can edit it later (the
+ * ingest poll stores it on the tasks the message announced).
+ */
 export async function postChannelMessage(
   channelId: string,
   text: string,
+): Promise<{ id: string }> {
+  const message = (await discordRequest(
+    'POST',
+    `/channels/${channelId}/messages`,
+    { content: text },
+  )) as DiscordMessageResponse;
+  return { id: message.id };
+}
+
+/**
+ * Edit a previously posted channel message's text content (the #ingest reply
+ * refresh). The edited message keeps the bot as author, so the ingest poll's
+ * self-skip still ignores it — editing is loop-safe.
+ */
+export async function editChannelMessage(
+  channelId: string,
+  messageId: string,
+  content: string,
 ): Promise<void> {
-  await discordRequest('POST', `/channels/${channelId}/messages`, {
-    content: text,
-  });
+  await discordRequest(
+    'PATCH',
+    `/channels/${channelId}/messages/${messageId}`,
+    { content },
+  );
 }

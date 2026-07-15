@@ -52,6 +52,8 @@ describe('schema', () => {
       'attempt',
       'created_at',
       'id',
+      'ingest_channel_id',
+      'ingest_message_id',
       'job_id',
       'job_spec',
       'last_error',
@@ -71,6 +73,9 @@ describe('schema', () => {
     expect(applicationTasks.approvalMessageId.notNull).toBe(false);
     // OTP relay columns are all nullable (only set while awaiting a code).
     expect(applicationTasks.pendingOtp.notNull).toBe(false);
+    // Both nullable: only tasks announced in a #ingest reply carry them.
+    expect(applicationTasks.ingestChannelId.notNull).toBe(false);
+    expect(applicationTasks.ingestMessageId.notNull).toBe(false);
   });
 
   it('defines the events table', () => {

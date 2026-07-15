@@ -17,6 +17,7 @@ import { markApprovalCardSubmitted, registerDiscordRoutes } from './discord.js';
 import { runDiscordIngestPoll } from './discord-ingest.js';
 import { ingestJob } from './ingest.js';
 import { runIngestionPoll } from './ingest-poll.js';
+import { refreshIngestReply } from './ingest-reply.js';
 import { requestOtp, submitOtp } from './otp-actions.js';
 import { processTask } from './process.js';
 import {
@@ -494,6 +495,11 @@ export function buildServer(deps: Deps): FastifyInstance {
           .where(eq(investigationRuns.id, runId));
       }
 
+      // Edit the #ingest reply that announced this task so it reflects the
+      // outcome (form discovered / no form found). Never throws — a Discord
+      // failure must not change the 200 the investigator Job relies on.
+      await refreshIngestReply(deps, taskId);
+
       return reply.code(200).send({ ok: true });
     }
 
@@ -555,9 +561,62 @@ export function buildServer(deps: Deps): FastifyInstance {
         .where(eq(investigationRuns.id, runId));
     }
 
+    // Edit the #ingest reply that announced this screenshot task so it
+    // reflects the investigation outcome. Never throws (see above).
+    await refreshIngestReply(deps, taskId);
+
     return reply
       .code(200)
       .send(foundJobId !== undefined ? { ok: true, foundJobId } : { ok: true });
+  });
+
+  // Human verification of an agent-discovered form (the dashboard's "Verify"
+  // button): marks jobSpec.formVerified, records a FORM_VERIFIED event, and
+  // edits the #ingest reply to the verified line. Idempotent — re-verifying
+  // an already-verified form succeeds without duplicating the event.
+  app.post('/tasks/:id/verify-form', async (request, reply) => {
+    const params = taskParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid task id', issues: params.error.issues });
+    }
+    const taskId = params.data.id;
+    const rows = await deps.db
+      .select()
+      .from(applicationTasks)
+      .where(eq(applicationTasks.id, taskId))
+      .limit(1);
+    const task = rows[0];
+    if (!task) {
+      return reply.code(404).send({ error: 'task not found' });
+    }
+    const spec = task.jobSpec;
+    if (!spec?.discoveredByAgent) {
+      return reply.code(400).send({ error: 'no discovered form to verify' });
+    }
+    if (spec.formVerified !== true) {
+      await deps.db
+        .update(applicationTasks)
+        .set({
+          jobSpec: { ...spec, formVerified: true },
+          updatedAt: new Date(),
+        })
+        .where(eq(applicationTasks.id, taskId));
+      await deps.db.insert(events).values({
+        taskId,
+        type: 'FORM_VERIFIED',
+        data: {
+          questionCount: spec.questions.length,
+          company: spec.company,
+          title: spec.title,
+        },
+      });
+    }
+    // Re-run the refresh even when already verified: it recovers a reply
+    // whose earlier edit failed. Never throws.
+    await refreshIngestReply(deps, taskId);
+    return reply.code(200).send({ ok: true });
   });
 
   app.post('/ingest', async (request, reply) => {

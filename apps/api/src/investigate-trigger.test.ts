@@ -58,7 +58,7 @@ describe('triggerInvestigation', () => {
   it('enabled: inserts a running run row and starts the Job with a TASK_ID override', async () => {
     const { deps, inserts } = fakeDeps();
 
-    await triggerInvestigation(deps, TASK_ID);
+    await expect(triggerInvestigation(deps, TASK_ID)).resolves.toBe(true);
 
     expect(inserts).toEqual([
       {
@@ -81,7 +81,7 @@ describe('triggerInvestigation', () => {
       SCREENSHOT_INVESTIGATION_ENABLED: false,
     });
 
-    await triggerInvestigation(deps, TASK_ID);
+    await expect(triggerInvestigation(deps, TASK_ID)).resolves.toBe(false);
 
     expect(inserts).toEqual([]);
     expect(runJobState.calls).toEqual([]);
@@ -90,7 +90,7 @@ describe('triggerInvestigation', () => {
   it('enabled without GCP project/region: no-op instead of a broken Job name', async () => {
     const { deps, inserts } = fakeDeps({ GCP_PROJECT_ID: undefined });
 
-    await triggerInvestigation(deps, TASK_ID);
+    await expect(triggerInvestigation(deps, TASK_ID)).resolves.toBe(false);
 
     expect(inserts).toEqual([]);
     expect(runJobState.calls).toEqual([]);
@@ -100,7 +100,9 @@ describe('triggerInvestigation', () => {
     runJobState.error = new Error('cloud run down');
     const { deps, inserts } = fakeDeps();
 
-    await expect(triggerInvestigation(deps, TASK_ID)).resolves.toBeUndefined();
+    // Still reports fired: the 'running' run row exists, so the reply's
+    // "discovering form…" line matches what a refresh would render.
+    await expect(triggerInvestigation(deps, TASK_ID)).resolves.toBe(true);
 
     // The run row was still recorded (a visible 'running' breadcrumb).
     expect(inserts).toHaveLength(1);

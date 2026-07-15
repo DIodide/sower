@@ -6,7 +6,13 @@ import {
   buildOtpRequestMessage,
   CARD_COLORS,
 } from './cards.js';
-import { notifyText, postApprovalCard, updateApprovalCard } from './discord.js';
+import {
+  editChannelMessage,
+  notifyText,
+  postApprovalCard,
+  postChannelMessage,
+  updateApprovalCard,
+} from './discord.js';
 
 const card: ApprovalCard = {
   taskId: 'task-123',
@@ -211,6 +217,49 @@ describe('discord REST driver', () => {
       expect(JSON.parse(init.body as string)).toEqual({
         content: 'poll complete: 3 ingested',
       });
+    });
+  });
+
+  describe('postChannelMessage', () => {
+    it('POSTs to the channel and returns the created message id', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ id: 'msg-5' }));
+
+      const message = await postChannelMessage('chan-9', '✅ queued');
+
+      expect(message).toEqual({ id: 'msg-5' });
+      const { url, init } = fetchCall(0);
+      expect(url).toBe('https://discord.com/api/v10/channels/chan-9/messages');
+      expect(init.method).toBe('POST');
+      expect(JSON.parse(init.body as string)).toEqual({ content: '✅ queued' });
+    });
+  });
+
+  describe('editChannelMessage', () => {
+    it('PATCHes the message content in place', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ id: 'msg-5' }));
+
+      await editChannelMessage('chan-9', 'msg-5', '✅ form verified');
+
+      const { url, init } = fetchCall(0);
+      expect(url).toBe(
+        'https://discord.com/api/v10/channels/chan-9/messages/msg-5',
+      );
+      expect(init.method).toBe('PATCH');
+      expect(JSON.parse(init.body as string)).toEqual({
+        content: '✅ form verified',
+      });
+    });
+
+    it('throws a redacted error when the PATCH fails', async () => {
+      fetchMock.mockResolvedValueOnce(
+        new Response('nope: test-token-from-env', { status: 403 }),
+      );
+      const error = await editChannelMessage('chan-9', 'msg-5', 'x').catch(
+        (e: Error) => e,
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain('403');
+      expect((error as Error).message).not.toContain('test-token-from-env');
     });
   });
 });
