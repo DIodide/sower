@@ -205,12 +205,41 @@ function summarize(
   return summary;
 }
 
+/**
+ * Hosts we must NEVER ingest as "job links": our own dashboard (its task links
+ * appear in the bot's replies and resolve to an IAP sign-in page) and the
+ * Google sign-in host they redirect to. Belt to the app-id self-skip in the
+ * poll — even a human-pasted dashboard link should never become a job.
+ */
+function isSelfReferentialUrl(
+  url: string,
+  config: Deps['config'] | undefined,
+): boolean {
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (host === 'accounts.google.com') return true;
+  if (config?.DASHBOARD_BASE_URL) {
+    try {
+      return host === new URL(config.DASHBOARD_BASE_URL).hostname.toLowerCase();
+    } catch {
+      // malformed config — fall through
+    }
+  }
+  return false;
+}
+
 /** Extract every URL from a message and classify+ingest each. */
 export async function ingestMessageLinks(
   deps: Deps,
   text: string,
 ): Promise<MessageIngestSummary> {
-  const urls = extractUrlsFromText(text).slice(0, MAX_URLS_PER_MESSAGE);
+  const urls = extractUrlsFromText(text)
+    .filter((url) => !isSelfReferentialUrl(url, deps.config))
+    .slice(0, MAX_URLS_PER_MESSAGE);
   const outcomes: UrlOutcome[] = [];
   for (const url of urls) {
     outcomes.push(await classifyAndIngest(deps, url, 0));
@@ -423,10 +452,14 @@ export async function runDiscordIngestPoll(
   let processed = 0;
   // Discord returns newest-first; process oldest-first for chronological replies.
   for (const message of [...messages].reverse()) {
-    // We do NOT skip by author: links forwarded by another bot/webhook (RSS,
-    // link-preview, Simplify) should ingest too, and our own reply messages
-    // carry no links so the no-URL guard below drops them. The reaction we add
-    // marks a message processed, so re-polls skip it — no self-processing loop.
+    // Skip OUR OWN messages. The bot's replies embed dashboard task links, so
+    // processing them would re-ingest those links (which resolve to an IAP
+    // sign-in page) and self-feed a loop every poll. We skip by app id, NOT by
+    // the generic bot flag — links forwarded by OTHER bots/webhooks (RSS,
+    // link-preview, Simplify) should still ingest.
+    if (message.author?.id === config.DISCORD_APP_ID) {
+      continue;
+    }
     if (message.reactions?.some((reaction) => reaction.me)) {
       continue;
     }

@@ -559,6 +559,7 @@ describe('runDiscordIngestPoll', () => {
       config: {
         DISCORD_ENABLED: true,
         DISCORD_INGEST_CHANNEL_ID: 'chan-1',
+        DISCORD_APP_ID: 'app-self',
         DASHBOARD_BASE_URL: 'https://dash.test',
       } as unknown as Config,
       notify,
@@ -603,6 +604,38 @@ describe('runDiscordIngestPoll', () => {
     ]);
     expect(replies).toHaveLength(2);
     expect(ingestState.calls).toEqual(['https://gh/1', 'https://gh/1']);
+  });
+
+  it('skips the bot own reply, and never ingests a dashboard/IAP link (no self-loop)', async () => {
+    platformState.byUrl['https://gh/2'] = {
+      platform: 'greenhouse',
+      tenant: 'a',
+      externalId: '2',
+    };
+    const messages = [
+      // The bot's own reply (author.id === app id) — must be skipped entirely,
+      // even though it embeds a dashboard task link.
+      {
+        id: 'm-self',
+        content: '✅ [`abc`](https://dash.test/tasks/abc) queued',
+        author: { id: 'app-self', bot: true },
+      },
+      // A human message that (oddly) contains a dashboard link + a real job link:
+      // the dashboard link is dropped, the job link still ingests.
+      {
+        id: 'm-mixed',
+        content: 'see https://dash.test/tasks/xyz and https://gh/2',
+        author: { id: 'u' },
+      },
+    ];
+    const { deps, reactions } = fakeDeps(messages);
+
+    const result = await runDiscordIngestPoll(deps);
+
+    // m-self skipped (self-authored); m-mixed processed but only the job link.
+    expect(result).toMatchObject({ processed: 1 });
+    expect(reactions).toEqual([{ id: 'm-mixed', emoji: '✅' }]);
+    expect(ingestState.calls).toEqual(['https://gh/2']); // dashboard link dropped
   });
 
   it('processes an image-only message: parked + stored, 🖼️ reaction', async () => {
