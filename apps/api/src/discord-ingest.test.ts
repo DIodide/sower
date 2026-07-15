@@ -91,6 +91,12 @@ vi.mock('@sower/storage', () => ({
   createStorage: () => ({ put: vi.fn(async () => {}) }),
 }));
 
+// The poll re-renders the reply after storing the message id (race fix); stub
+// it here so the poll tests don't drive the real DB-backed renderer.
+vi.mock('./ingest-reply.js', () => ({
+  refreshIngestReply: vi.fn(async () => {}),
+}));
+
 beforeEach(() => {
   platformState.byUrl = {};
   platformState.adapters = new Set(['greenhouse', 'ashby', 'lever', 'workday']);

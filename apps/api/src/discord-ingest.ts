@@ -9,6 +9,7 @@ import {
   ingestMessageAttachments,
 } from './attachment-ingest.js';
 import { ingestJob } from './ingest.js';
+import { refreshIngestReply } from './ingest-reply.js';
 import { triggerInvestigation } from './investigate-trigger.js';
 import {
   extractUrlsFromText,
@@ -618,6 +619,17 @@ export async function runDiscordIngestPoll(
             .update(applicationTasks)
             .set({ ingestChannelId: channelId, ingestMessageId: reply.id })
             .where(inArray(applicationTasks.id, taskIds));
+          // Race fix: a fast ATS parse can finish BEFORE this write lands, so
+          // processTask's post-parse refresh may have already no-op'd (no
+          // message id yet), leaving the reply stuck on the URL label. One
+          // refresh now — with the id stored — upgrades to "Title · Company"
+          // if the parse already completed; if not, processTask's later refresh
+          // (id now present) does. One call re-renders all of the message's
+          // sibling task lines, so a single task id suffices.
+          const firstTaskId = taskIds[0];
+          if (firstTaskId) {
+            await refreshIngestReply(deps, firstTaskId);
+          }
         } catch (error) {
           console.warn(
             '[sower] discord ingest: storing reply ref failed:',
