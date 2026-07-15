@@ -1,4 +1,5 @@
-# Cloud Run Job image for @sower/investigator (Tier-2 screenshot investigation).
+# Cloud Run Job image for @sower/investigator (Tier-2 investigation:
+# screenshot mode + unsupported-link form-discovery mode).
 # NOTE: do NOT prune optional dependencies — @anthropic-ai/claude-agent-sdk
 # ships its Claude Code binary via platform-specific optional deps; removing
 # them breaks the SDK at runtime.
@@ -16,5 +17,14 @@ RUN corepack pnpm install --frozen-lockfile --filter @sower/investigator...
 ENV HOME=/home/node
 ENV CLAUDE_CONFIG_DIR=/tmp/.claude
 RUN mkdir -p /home/node /tmp/.claude && chmod -R 0777 /home/node /tmp/.claude
+
+# Form-discovery mode drives headless Chromium via Playwright: install the
+# browser + its apt system deps at build time (root — fine in the build).
+# Run through the workspace's own playwright so the browser build matches the
+# installed library version; with HOME already /home/node the browser lands
+# in /home/node/.cache/ms-playwright, the same path runtime resolves (and it
+# stays world-writable like the rest of HOME).
+RUN corepack pnpm --filter @sower/investigate exec playwright install --with-deps chromium \
+  && chmod -R 0777 /home/node
 
 CMD ["corepack", "pnpm", "--filter", "@sower/investigator", "start"]

@@ -642,6 +642,28 @@ export default async function TaskPage({
       {/* ---- form & answers ---- */}
       <section id="answers">
         <SectionHeading>Questions &amp; answers</SectionHeading>
+        {spec?.discoveredByAgent ? (
+          <div className="banner banner--attention">
+            <p>
+              <strong>Form discovered by agent — verify before use.</strong>{' '}
+              These questions were machine-extracted from{' '}
+              {spec.applyUrl ? (
+                <a
+                  href={spec.applyUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  the application page
+                </a>
+              ) : (
+                'the application page'
+              )}{' '}
+              of an unsupported platform. Check them against the real form —
+              labels, options, or required flags may be off, and nothing is ever
+              auto-submitted for this task.
+            </p>
+          </div>
+        ) : null}
         {spec && views.length > 0 ? (
           <div className="row" style={{ margin: '0 0 0.75rem' }}>
             <div className="meter" style={{ maxWidth: '16rem' }}>

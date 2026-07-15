@@ -1,4 +1,4 @@
-import { events, investigationRuns, jobs } from '@sower/db';
+import { applicationTasks, events, investigationRuns, jobs } from '@sower/db';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
 import { ingestJob } from './ingest.js';
@@ -726,11 +726,18 @@ describe('buildServer', () => {
       const runInsert = writes.find(
         (w) => w.method === 'insert' && w.table === investigationRuns,
       );
-      expect(runInsert?.arg).toEqual({ taskId: TASK_ID, status: 'running' });
+      expect(runInsert?.arg).toEqual({
+        taskId: TASK_ID,
+        status: 'running',
+        kind: 'screenshot',
+      });
       const runUpdate = writes.find(
         (w) => w.method === 'update' && w.table === investigationRuns,
       );
-      expect(runUpdate?.arg).toMatchObject({ status: 'not_found' });
+      expect(runUpdate?.arg).toMatchObject({
+        status: 'not_found',
+        kind: 'screenshot',
+      });
     });
 
     it('an ingest failure marks the run error but still responds 200 (no Job retry)', async () => {
@@ -764,6 +771,276 @@ describe('buildServer', () => {
         foundJobId: null,
         result: foundResult,
         transcript,
+      });
+    });
+
+    it('accepts an explicit kind:screenshot payload (same as the legacy body)', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[{ id: 'run-1' }]],
+        insertResults: [[]], // INVESTIGATION_DONE event
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, {
+        kind: 'screenshot',
+        result: notFoundResult,
+        transcript,
+      });
+
+      expect(res.statusCode).toBe(200);
+      const runUpdate = writes.find(
+        (w) => w.method === 'update' && w.table === investigationRuns,
+      );
+      expect(runUpdate?.arg).toMatchObject({
+        kind: 'screenshot',
+        status: 'not_found',
+      });
+    });
+
+    describe('kind: form (unsupported-link form discovery)', () => {
+      const jobRow = {
+        id: 'job-u',
+        url: 'https://weirdats.example/jobs/1',
+        platform: 'unknown',
+        tenant: null,
+        externalId: null,
+        company: 'WeirdCo',
+        title: null,
+      };
+      const discoveredForm = {
+        formFound: true,
+        applyUrl: 'https://weirdats.example/jobs/1/apply',
+        company: 'WeirdCo',
+        title: 'Platform Intern',
+        questions: [
+          {
+            id: 'first_name',
+            label: 'First name',
+            type: 'text',
+            required: true,
+          },
+          { id: 'resume', label: 'Resume', type: 'file', required: true },
+          {
+            id: 'work_authorization',
+            label: 'Are you authorized to work in the US?',
+            type: 'select',
+            required: true,
+            options: [
+              { label: 'Yes', value: 'yes' },
+              { label: 'No', value: 'no' },
+            ],
+          },
+        ],
+        confidence: 'high',
+        notes: 'extracted from the apply page',
+      };
+      const formNotFound = {
+        formFound: false,
+        applyUrl: 'https://weirdats.example/jobs/1',
+        questions: [],
+        confidence: 'low',
+        notes: 'behind a login wall',
+      };
+      const formTranscript = [
+        {
+          seq: 0,
+          kind: 'tool_use',
+          tool: 'browser.navigate',
+          input: { url: 'https://weirdats.example/jobs/1' },
+          ts: 1,
+        },
+        {
+          seq: 1,
+          kind: 'tool_result',
+          tool: 'browser.navigate',
+          output: 'HTTP 200',
+          ts: 2,
+        },
+        { seq: 2, kind: 'result', text: 'success', ts: 3 },
+      ];
+
+      it('formFound: writes the agent-discovered jobSpec, records FORM_DISCOVERED, and marks the run found (kind form)', async () => {
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({
+          selectResults: [
+            [{ id: 'run-1' }], // latest investigation run
+            [{ job: jobRow }], // task+job join
+          ],
+          insertResults: [[]], // FORM_DISCOVERED event
+          writes,
+        });
+        const { deps, enqueueProcess } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app, {
+          kind: 'form',
+          result: discoveredForm,
+          transcript: formTranscript,
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toEqual({ ok: true });
+        // Form mode ingests nothing and enqueues nothing — the task stays
+        // parked (NEEDS_INPUT) for human verification.
+        expect(enqueueProcess).not.toHaveBeenCalled();
+        expect(writes.some((w) => w.table === jobs)).toBe(false);
+
+        // The discovered spec landed on THIS task, marked agent-discovered,
+        // with identity from the job row and questions from the agent.
+        const taskUpdate = writes.find(
+          (w) => w.method === 'update' && w.table === applicationTasks,
+        );
+        expect(taskUpdate?.arg).toMatchObject({
+          jobSpec: {
+            platform: 'unknown',
+            tenant: '',
+            externalId: '',
+            title: 'Platform Intern',
+            company: 'WeirdCo',
+            applyUrl: 'https://weirdats.example/jobs/1/apply',
+            questions: discoveredForm.questions,
+            discoveredByAgent: true,
+          },
+        });
+        // No state transition rode along with the spec write.
+        const taskSet = taskUpdate?.arg as Record<string, unknown> | undefined;
+        expect(taskSet?.state).toBeUndefined();
+
+        const discoveredEvent = writes
+          .filter((w) => w.method === 'insert' && w.table === events)
+          .map((w) => w.arg as Record<string, unknown>)
+          .find((arg) => arg.type === 'FORM_DISCOVERED');
+        expect(discoveredEvent).toMatchObject({
+          taskId: TASK_ID,
+          data: {
+            questionCount: 3,
+            company: 'WeirdCo',
+            title: 'Platform Intern',
+            confidence: 'high',
+          },
+        });
+
+        const runUpdate = writes.find(
+          (w) => w.method === 'update' && w.table === investigationRuns,
+        );
+        expect(runUpdate?.arg).toMatchObject({
+          kind: 'form',
+          status: 'found',
+          result: discoveredForm,
+          transcript: formTranscript,
+          error: null,
+        });
+        const runSet = runUpdate?.arg as { finishedAt?: unknown } | undefined;
+        expect(runSet?.finishedAt).toBeInstanceOf(Date);
+      });
+
+      it('not found: records FORM_NOT_FOUND, writes no jobSpec, and marks the run not_found', async () => {
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({
+          selectResults: [[{ id: 'run-1' }]],
+          insertResults: [[]], // FORM_NOT_FOUND event
+          writes,
+        });
+        const { deps, enqueueProcess } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app, {
+          kind: 'form',
+          result: formNotFound,
+          transcript: formTranscript,
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toEqual({ ok: true });
+        expect(enqueueProcess).not.toHaveBeenCalled();
+        // No jobSpec write and no ingest.
+        expect(
+          writes.some(
+            (w) => w.method === 'update' && w.table === applicationTasks,
+          ),
+        ).toBe(false);
+        expect(writes.some((w) => w.table === jobs)).toBe(false);
+
+        const notFoundEvent = writes
+          .filter((w) => w.method === 'insert' && w.table === events)
+          .map((w) => w.arg as Record<string, unknown>)
+          .find((arg) => arg.type === 'FORM_NOT_FOUND');
+        expect(notFoundEvent).toMatchObject({
+          taskId: TASK_ID,
+          data: { notes: 'behind a login wall', confidence: 'low' },
+        });
+
+        const runUpdate = writes.find(
+          (w) => w.method === 'update' && w.table === investigationRuns,
+        );
+        expect(runUpdate?.arg).toMatchObject({
+          kind: 'form',
+          status: 'not_found',
+          result: formNotFound,
+          transcript: formTranscript,
+        });
+      });
+
+      it('formFound with a missing task row: still persists the run, as an error', async () => {
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({
+          selectResults: [
+            [{ id: 'run-1' }], // latest run
+            [], // task+job join: task deleted
+          ],
+          writes,
+        });
+        const { deps } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app, {
+          kind: 'form',
+          result: discoveredForm,
+          transcript: formTranscript,
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(
+          writes.some(
+            (w) => w.method === 'update' && w.table === applicationTasks,
+          ),
+        ).toBe(false);
+        const runUpdate = writes.find(
+          (w) => w.method === 'update' && w.table === investigationRuns,
+        );
+        expect(runUpdate?.arg).toMatchObject({
+          kind: 'form',
+          status: 'error',
+          error: 'task not found; discovered form not written',
+          result: discoveredForm,
+          transcript: formTranscript,
+        });
+      });
+
+      it('responds 400 for a malformed form body', async () => {
+        const { deps } = createDeps(createFakeDb());
+        const app = buildServer(deps);
+        for (const payload of [
+          // screenshot-shaped result under kind form
+          { kind: 'form', result: notFoundResult, transcript: [] },
+          // malformed question (missing label/type/required)
+          {
+            kind: 'form',
+            result: { ...discoveredForm, questions: [{ id: 'x' }] },
+            transcript: [],
+          },
+          // unknown kind
+          { kind: 'bogus', result: formNotFound, transcript: [] },
+          // form result under (implicit) screenshot kind
+          { result: formNotFound, transcript: [] },
+        ]) {
+          const res = await inject(app, payload);
+          expect(res.statusCode).toBe(400);
+          expect(res.json()).toMatchObject({ error: 'invalid body' });
+        }
       });
     });
 

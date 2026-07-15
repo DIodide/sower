@@ -1,10 +1,12 @@
 import { timingSafeEqual } from 'node:crypto';
+import type { JobSpec, Platform } from '@sower/core';
 import {
   apiCalls,
   applicationTasks,
   events,
   type InvestigationRunStatus,
   investigationRuns,
+  type Job,
   jobs,
 } from '@sower/db';
 import { asc, desc, eq } from 'drizzle-orm';
@@ -106,10 +108,82 @@ const transcriptStepSchema = z.object({
   ts: z.number(),
 });
 
-const investigationResultBodySchema = z.object({
-  result: investigationResultSchema,
-  transcript: z.array(transcriptStepSchema),
+// Form-mode result — matches DiscoveredForm in @sower/investigate (re-declared
+// as a type in @sower/db); questions are canonical @sower/core Question[].
+const discoveredQuestionSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  type: z.enum(['text', 'textarea', 'file', 'select', 'multiselect']),
+  required: z.boolean(),
+  options: z
+    .array(
+      z.object({
+        label: z.string(),
+        value: z.union([z.string(), z.number()]),
+      }),
+    )
+    .optional(),
 });
+
+const discoveredFormSchema = z.object({
+  formFound: z.boolean(),
+  applyUrl: z.string().optional(),
+  company: z.string().optional(),
+  title: z.string().optional(),
+  questions: z.array(discoveredQuestionSchema),
+  confidence: z.enum(['high', 'medium', 'low']),
+  notes: z.string(),
+});
+
+// `kind` selects the result schema; absent means 'screenshot' so the
+// pre-`kind` investigator payload keeps working unchanged.
+const investigationResultBodySchema = z.union([
+  z.object({
+    kind: z.literal('screenshot').default('screenshot'),
+    result: investigationResultSchema,
+    transcript: z.array(transcriptStepSchema),
+  }),
+  z.object({
+    kind: z.literal('form'),
+    result: discoveredFormSchema,
+    transcript: z.array(transcriptStepSchema),
+  }),
+]);
+
+const PLATFORM_VALUES: readonly string[] = [
+  'greenhouse',
+  'lever',
+  'ashby',
+  'workday',
+  'unknown',
+] satisfies Platform[];
+
+/** jobs.platform is free text in the DB; JobSpec.platform is the union. */
+function asPlatform(value: string): Platform {
+  return PLATFORM_VALUES.includes(value) ? (value as Platform) : 'unknown';
+}
+
+/**
+ * JobSpec for a form discovered on an UNSUPPORTED job page: questions come
+ * from the agent, identity (platform/tenant/url) from the job row, and
+ * `discoveredByAgent` marks it machine-extracted so the dashboard badges it
+ * "verify before use". The task stays NEEDS_INPUT — never auto-submitted.
+ */
+function buildDiscoveredJobSpec(
+  job: Job,
+  result: z.infer<typeof discoveredFormSchema>,
+): JobSpec {
+  return {
+    platform: asPlatform(job.platform),
+    tenant: job.tenant ?? '',
+    externalId: job.externalId ?? '',
+    title: result.title ?? job.title ?? '',
+    company: result.company ?? job.company ?? undefined,
+    applyUrl: result.applyUrl ?? job.url,
+    questions: result.questions,
+    discoveredByAgent: true,
+  };
+}
 
 /** Constant-time string comparison (length-guarded). */
 function safeEqual(a: string, b: string): boolean {
@@ -317,11 +391,15 @@ export function buildServer(deps: Deps): FastifyInstance {
 
   // Tier-2 investigation callback: the investigator Cloud Run Job POSTs its
   // outcome here (x-api-key gated by the global preHandler like every route
-  // except GET /health and POST /discord/interactions). Persists the full
-  // observability transcript on the task's latest investigation run and, when
-  // a real apply URL was found, feeds it into the normal ingest pipeline.
-  // Idempotent: a Job retry re-updates the latest run and ingestJob dedupes
-  // the URL.
+  // except GET /health and POST /discord/interactions). Two kinds share the
+  // endpoint (body.kind, default 'screenshot'):
+  // - screenshot: persists the transcript on the task's latest run and, when
+  //   a real apply URL was found, feeds it into the normal ingest pipeline.
+  // - form: persists the run and, when a form was discovered on the
+  //   unsupported page, writes an agent-discovered JobSpec onto THIS task
+  //   (which stays NEEDS_INPUT — human-verified, never auto-submitted).
+  // Idempotent: a Job retry re-updates the latest run; ingestJob dedupes the
+  // URL and a re-POSTed form just rewrites the same jobSpec.
   app.post('/tasks/:id/investigation-result', async (request, reply) => {
     const params = taskParamsSchema.safeParse(request.params);
     if (!params.success) {
@@ -336,7 +414,7 @@ export function buildServer(deps: Deps): FastifyInstance {
         .send({ error: 'invalid body', issues: body.error.issues });
     }
     const taskId = params.data.id;
-    const { result, transcript } = body.data;
+    const kind = body.data.kind;
 
     // Latest run for this task (inserted by the trigger); if the trigger's
     // insert was lost (or the Job was started manually), self-heal with one.
@@ -350,10 +428,76 @@ export function buildServer(deps: Deps): FastifyInstance {
     if (runId === undefined) {
       const inserted = await deps.db
         .insert(investigationRuns)
-        .values({ taskId, status: 'running' })
+        .values({ taskId, status: 'running', kind })
         .returning({ id: investigationRuns.id });
       runId = inserted[0]?.id;
     }
+
+    if (body.data.kind === 'form') {
+      const { result, transcript } = body.data;
+      let status: InvestigationRunStatus = result.formFound
+        ? 'found'
+        : 'not_found';
+      let formError: string | null = null;
+
+      if (result.formFound) {
+        const rows = await deps.db
+          .select({ job: jobs })
+          .from(applicationTasks)
+          .innerJoin(jobs, eq(applicationTasks.jobId, jobs.id))
+          .where(eq(applicationTasks.id, taskId))
+          .limit(1);
+        const job = rows[0]?.job;
+        if (job) {
+          const spec = buildDiscoveredJobSpec(job, result);
+          // Write the machine-extracted spec onto THIS task. No state change:
+          // it stays NEEDS_INPUT (unknown platform — a human must verify the
+          // questions and drive any submission).
+          await deps.db
+            .update(applicationTasks)
+            .set({ jobSpec: spec, updatedAt: new Date() })
+            .where(eq(applicationTasks.id, taskId));
+          await deps.db.insert(events).values({
+            taskId,
+            type: 'FORM_DISCOVERED',
+            data: {
+              questionCount: result.questions.length,
+              company: spec.company,
+              title: spec.title,
+              confidence: result.confidence,
+            },
+          });
+        } else {
+          // Transcript persistence must never be lost to a missing task row.
+          status = 'error';
+          formError = 'task not found; discovered form not written';
+        }
+      } else {
+        await deps.db.insert(events).values({
+          taskId,
+          type: 'FORM_NOT_FOUND',
+          data: { notes: result.notes, confidence: result.confidence },
+        });
+      }
+
+      if (runId !== undefined) {
+        await deps.db
+          .update(investigationRuns)
+          .set({
+            kind: 'form',
+            status,
+            result,
+            transcript,
+            error: formError,
+            finishedAt: new Date(),
+          })
+          .where(eq(investigationRuns.id, runId));
+      }
+
+      return reply.code(200).send({ ok: true });
+    }
+
+    const { result, transcript } = body.data;
 
     let status: InvestigationRunStatus = result.found ? 'found' : 'not_found';
     let foundJobId: string | undefined;
@@ -400,6 +544,7 @@ export function buildServer(deps: Deps): FastifyInstance {
       await deps.db
         .update(investigationRuns)
         .set({
+          kind: 'screenshot',
           status,
           result,
           transcript,

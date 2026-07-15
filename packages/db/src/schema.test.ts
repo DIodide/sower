@@ -254,6 +254,7 @@ describe('schema', () => {
       'finished_at',
       'found_job_id',
       'id',
+      'kind',
       'result',
       'started_at',
       'status',
@@ -263,6 +264,9 @@ describe('schema', () => {
     expect(investigationRuns.taskId.notNull).toBe(true);
     expect(investigationRuns.status.notNull).toBe(true);
     expect(investigationRuns.status.default).toBe('running');
+    // Pre-existing rows are screenshot runs; the default keeps them honest.
+    expect(investigationRuns.kind.notNull).toBe(true);
+    expect(investigationRuns.kind.default).toBe('screenshot');
     expect(investigationRuns.startedAt.notNull).toBe(true);
     // All set only as a run progresses/finishes.
     expect(investigationRuns.result.notNull).toBe(false);

@@ -83,6 +83,13 @@ export interface JobSpec {
    * here so the browser tier can resume without re-deriving them.
    */
   meta?: Record<string, unknown>;
+  /**
+   * True when the questions were machine-extracted by the Tier-2 form
+   * discovery agent from an UNSUPPORTED job page (no platform adapter). The
+   * dashboard badges the spec "verify before use"; such a task stays
+   * NEEDS_INPUT and is never auto-submitted.
+   */
+  discoveredByAgent?: boolean;
 }
 
 export interface ResolvedAnswer {

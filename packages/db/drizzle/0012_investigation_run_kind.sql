@@ -1,0 +1,1 @@
+ALTER TABLE "investigation_runs" ADD COLUMN "kind" text DEFAULT 'screenshot' NOT NULL;

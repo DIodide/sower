@@ -36,6 +36,7 @@ const ingestState = vi.hoisted(() => ({
   },
 }));
 const dirState = vi.hoisted(() => ({ byUrl: {} as Record<string, string[]> }));
+const triggerState = vi.hoisted(() => ({ calls: [] as string[] }));
 
 vi.mock('@sower/platforms', () => ({
   detectPlatform: (url: string) =>
@@ -57,6 +58,14 @@ vi.mock('./ingest.js', () => ({
     return ingestState.known.has(input.url)
       ? { duplicate: true, jobId: 'dup', ...ingestState.duplicateMeta }
       : { duplicate: false, jobId: 'job-1', taskId: 'task-1', state: 'QUEUED' };
+  }),
+}));
+
+// Tier-2 form-discovery trigger: recorded so tests can assert exactly which
+// parked tasks fire an investigator Job (the real one self-gates + never throws).
+vi.mock('./investigate-trigger.js', () => ({
+  triggerInvestigation: vi.fn(async (_deps: unknown, taskId: string) => {
+    triggerState.calls.push(taskId);
   }),
 }));
 
@@ -82,6 +91,7 @@ beforeEach(() => {
     originalCreatedAt: new Date('2026-07-13T19:47:00Z'),
   };
   dirState.byUrl = {};
+  triggerState.calls = [];
 });
 
 describe('ingestMessageLinks', () => {
@@ -100,7 +110,7 @@ describe('ingestMessageLinks', () => {
     expect(ingestState.calls).toEqual(['https://gh/1']);
   });
 
-  it('records an unsupported direct link (parked, never dropped)', async () => {
+  it('records an unsupported direct link (parked, never dropped) and triggers form discovery', async () => {
     platformState.byUrl['https://weirdats/x'] = {
       platform: 'unknown',
       tenant: null,
@@ -111,6 +121,55 @@ describe('ingestMessageLinks', () => {
     expect(s.outcomes[0]).toMatchObject({ kind: 'unsupported' });
     // still routed through ingestJob (which records + parks the unknown job)
     expect(ingestState.calls).toEqual(['https://weirdats/x']);
+    // a directly-sent (depth-0) unsupported link fires the investigator Job
+    expect(triggerState.calls).toEqual(['task-1']);
+  });
+
+  it('does NOT trigger form discovery for a supported link or a duplicate', async () => {
+    platformState.byUrl['https://gh/1'] = {
+      platform: 'greenhouse',
+      tenant: 'a',
+      externalId: '1',
+    };
+    platformState.byUrl['https://weirdats/dup'] = {
+      platform: 'unknown',
+      tenant: null,
+      externalId: null,
+    };
+    ingestState.known = new Set(['https://weirdats/dup']); // already parked
+    const s = await ingestMessageLinks(
+      {} as Deps,
+      'https://gh/1 https://weirdats/dup',
+    );
+    expect(s).toMatchObject({ ingested: 1, duplicates: 1 });
+    // Neither the queued job nor the already-known unsupported one re-fires.
+    expect(triggerState.calls).toEqual([]);
+  });
+
+  it("does NOT trigger form discovery for a directory's unsupported children", async () => {
+    platformState.byUrl['https://dir/list'] = {
+      platform: 'unknown',
+      tenant: null,
+      externalId: null,
+    };
+    platformState.byUrl['https://gh/2'] = {
+      platform: 'greenhouse',
+      tenant: 'a',
+      externalId: '2',
+    };
+    // https://weird/child stays unknown (the byUrl fallback) and has no links
+    // of its own, so at depth 1 it is recorded+parked — but never triggered.
+    dirState.byUrl['https://dir/list'] = [
+      'https://gh/2',
+      'https://weird/child',
+    ];
+
+    const s = await ingestMessageLinks({} as Deps, 'board: https://dir/list');
+    expect(s.directories).toBe(1);
+    expect(s.ingested).toBe(1);
+    expect(s.unsupported).toBe(1);
+    // A 50-link directory must not spawn 50 browser Jobs: no trigger at depth 1.
+    expect(triggerState.calls).toEqual([]);
   });
 
   it('expands a directory page into its supported job links', async () => {

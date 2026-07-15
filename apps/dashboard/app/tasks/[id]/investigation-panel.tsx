@@ -1,10 +1,16 @@
-// The "Agent investigation" observability panel for screenshot tasks: the
-// latest investigation_runs row — status, result summary, and the FULL agent
+// The "Agent investigation" observability panel: the latest
+// investigation_runs row — status, result summary, and the FULL agent
 // transcript (every tool call + input, every tool result, the agent's
-// reasoning, and permission denials). Pure presentation, server-component
-// friendly: native <details> handles expand/collapse, no client JS.
+// reasoning, and permission denials). Two run kinds share it: 'screenshot'
+// (vision + web search) and 'form' (headless form discovery of an
+// unsupported link) — the result summary branches on run.kind while the
+// transcript timeline renders identically (browser.* steps are just
+// tool_use/tool_result). Pure presentation, server-component friendly:
+// native <details> handles expand/collapse, no client JS.
 
 import type {
+  DiscoveredForm,
+  InvestigationResult,
   InvestigationRun,
   InvestigationRunStatus,
   TranscriptStep,
@@ -24,6 +30,28 @@ const RUN_STATUS_META: Record<
   not_found: { label: 'Not found', tone: 'neutral' },
   error: { label: 'Error', tone: 'danger' },
 };
+
+/** Header labels for a form-discovery run (result is a DiscoveredForm). */
+const FORM_RUN_STATUS_META: Record<
+  InvestigationRunStatus,
+  { label: string; tone: Tone }
+> = {
+  running: { label: 'Investigating', tone: 'progress' },
+  found: { label: 'Form discovered', tone: 'success' },
+  not_found: { label: 'Not found', tone: 'neutral' },
+  error: { label: 'Error', tone: 'danger' },
+};
+
+/**
+ * The two run kinds store different result shapes in the same jsonb column;
+ * discriminate on the field only DiscoveredForm has, so a mismatched
+ * kind/result pair still renders safely.
+ */
+function isDiscoveredForm(
+  result: InvestigationResult | DiscoveredForm,
+): result is DiscoveredForm {
+  return 'formFound' in result;
+}
 
 const KIND_LABEL: Record<TranscriptStep['kind'], string> = {
   assistant_text: 'agent',
@@ -220,10 +248,127 @@ function StepItem({
   );
 }
 
+const RESULT_GRID_STYLE = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(auto-fill, minmax(11rem, 1fr))',
+  gap: '0.75rem 1.5rem',
+  marginTop: '0.875rem',
+} as const;
+
+function NotesField({ notes }: { notes: string }) {
+  if (!notes) return null;
+  return (
+    <div style={{ gridColumn: '1 / -1', minWidth: 0 }}>
+      <FieldLabel>Notes</FieldLabel>
+      <div style={{ fontSize: '0.875rem' }}>
+        <ExpandableText text={notes} max={400} />
+      </div>
+    </div>
+  );
+}
+
+/** Result summary of a screenshot run (InvestigationResult). */
+function ScreenshotResultSummary({
+  result,
+  foundJobId,
+  foundTaskId,
+}: {
+  result: InvestigationResult;
+  foundJobId: string | null;
+  foundTaskId: string | null;
+}) {
+  return (
+    <div style={RESULT_GRID_STYLE}>
+      <Field label="Apply URL found">
+        <Badge tone={result.found ? 'success' : 'neutral'}>
+          {result.found ? 'yes' : 'no'}
+        </Badge>
+      </Field>
+      {result.applyUrl ? (
+        <Field label="Apply URL">
+          <a
+            href={result.applyUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={result.applyUrl}
+          >
+            {result.applyUrl.replace(/^https?:\/\//, '')} ↗
+          </a>
+        </Field>
+      ) : null}
+      {result.company ? <Field label="Company">{result.company}</Field> : null}
+      {result.title ? <Field label="Title">{result.title}</Field> : null}
+      {result.platform ? (
+        <Field label="Platform">
+          <span className="mono">{result.platform}</span>
+        </Field>
+      ) : null}
+      <Field label="Confidence">
+        <Badge tone={CONFIDENCE_TONE[result.confidence] ?? 'neutral'}>
+          {result.confidence}
+        </Badge>
+      </Field>
+      {foundJobId ? (
+        <Field label="Ingested job">
+          {foundTaskId ? (
+            <Link href={`/tasks/${foundTaskId}`}>
+              → queued as task{' '}
+              <span className="mono">{foundTaskId.slice(0, 8)}</span>
+            </Link>
+          ) : (
+            <span className="hint">
+              job <span className="mono">{foundJobId.slice(0, 8)}</span> (no
+              task yet)
+            </span>
+          )}
+        </Field>
+      ) : null}
+      <NotesField notes={result.notes} />
+    </div>
+  );
+}
+
+/** Result summary of a form-discovery run (DiscoveredForm). */
+function FormResultSummary({ result }: { result: DiscoveredForm }) {
+  const questionCount = result.questions?.length ?? 0;
+  return (
+    <div style={RESULT_GRID_STYLE}>
+      <Field label="Form found">
+        <Badge tone={result.formFound ? 'success' : 'neutral'}>
+          {result.formFound ? 'yes' : 'no'}
+        </Badge>
+      </Field>
+      {result.applyUrl ? (
+        <Field label="Form URL">
+          <a
+            href={result.applyUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={result.applyUrl}
+          >
+            {result.applyUrl.replace(/^https?:\/\//, '')} ↗
+          </a>
+        </Field>
+      ) : null}
+      {result.company ? <Field label="Company">{result.company}</Field> : null}
+      {result.title ? <Field label="Title">{result.title}</Field> : null}
+      <Field label="Questions discovered">
+        <span className="num">{questionCount}</span>
+      </Field>
+      <Field label="Confidence">
+        <Badge tone={CONFIDENCE_TONE[result.confidence] ?? 'neutral'}>
+          {result.confidence}
+        </Badge>
+      </Field>
+      <NotesField notes={result.notes} />
+    </div>
+  );
+}
+
 /**
  * Renders one investigation run. `foundTaskId` is the application task created
  * for the real job ingested from the found apply URL (resolved by the page),
- * so "found" runs link straight to the queued task.
+ * so "found" screenshot runs link straight to the queued task.
  */
 export function InvestigationPanel({
   run,
@@ -232,7 +377,9 @@ export function InvestigationPanel({
   run: InvestigationRun;
   foundTaskId: string | null;
 }) {
-  const meta = RUN_STATUS_META[run.status] ?? RUN_STATUS_META.error;
+  const isForm = run.kind === 'form';
+  const statusMeta = isForm ? FORM_RUN_STATUS_META : RUN_STATUS_META;
+  const meta = statusMeta[run.status] ?? statusMeta.error;
   const startMs = run.startedAt.getTime();
   const duration = run.finishedAt
     ? formatDuration(run.finishedAt.getTime() - startMs)
@@ -264,9 +411,11 @@ export function InvestigationPanel({
 
       {run.status === 'running' ? (
         <p className="hint" style={{ margin: '0.75rem 0 0' }}>
-          <strong>Investigating…</strong> The agent is searching the web for
-          this posting's real application page. The result and full transcript
-          appear here when the run finishes.
+          <strong>Investigating…</strong>{' '}
+          {isForm
+            ? 'The agent is rendering the job page headless and extracting its application form.'
+            : "The agent is searching for this posting's real application page."}{' '}
+          The result and full transcript appear here when the run finishes.
         </p>
       ) : null}
 
@@ -279,71 +428,17 @@ export function InvestigationPanel({
         </div>
       ) : null}
 
-      {/* ---- result summary ---- */}
+      {/* ---- result summary (shape differs by run kind) ---- */}
       {result ? (
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(11rem, 1fr))',
-            gap: '0.75rem 1.5rem',
-            marginTop: '0.875rem',
-          }}
-        >
-          <Field label="Apply URL found">
-            <Badge tone={result.found ? 'success' : 'neutral'}>
-              {result.found ? 'yes' : 'no'}
-            </Badge>
-          </Field>
-          {result.applyUrl ? (
-            <Field label="Apply URL">
-              <a
-                href={result.applyUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                title={result.applyUrl}
-              >
-                {result.applyUrl.replace(/^https?:\/\//, '')} ↗
-              </a>
-            </Field>
-          ) : null}
-          {result.company ? (
-            <Field label="Company">{result.company}</Field>
-          ) : null}
-          {result.title ? <Field label="Title">{result.title}</Field> : null}
-          {result.platform ? (
-            <Field label="Platform">
-              <span className="mono">{result.platform}</span>
-            </Field>
-          ) : null}
-          <Field label="Confidence">
-            <Badge tone={CONFIDENCE_TONE[result.confidence] ?? 'neutral'}>
-              {result.confidence}
-            </Badge>
-          </Field>
-          {run.foundJobId ? (
-            <Field label="Ingested job">
-              {foundTaskId ? (
-                <Link href={`/tasks/${foundTaskId}`}>
-                  → queued as task{' '}
-                  <span className="mono">{foundTaskId.slice(0, 8)}</span>
-                </Link>
-              ) : (
-                <span className="hint">
-                  job <span className="mono">{run.foundJobId.slice(0, 8)}</span>{' '}
-                  (no task yet)
-                </span>
-              )}
-            </Field>
-          ) : null}
-          {result.notes ? (
-            <div style={{ gridColumn: '1 / -1', minWidth: 0 }}>
-              <FieldLabel>Notes</FieldLabel>
-              <div style={{ fontSize: '0.875rem' }}>
-                <ExpandableText text={result.notes} max={400} />
-              </div>
-            </div>
-          ) : null}
-        </div>
+        isDiscoveredForm(result) ? (
+          <FormResultSummary result={result} />
+        ) : (
+          <ScreenshotResultSummary
+            result={result}
+            foundJobId={run.foundJobId}
+            foundTaskId={foundTaskId}
+          />
+        )
       ) : null}
 
       {/* ---- transcript: the observability record ---- */}

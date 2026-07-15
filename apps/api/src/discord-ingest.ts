@@ -7,6 +7,7 @@ import {
   ingestMessageAttachments,
 } from './attachment-ingest.js';
 import { ingestJob } from './ingest.js';
+import { triggerInvestigation } from './investigate-trigger.js';
 import {
   extractUrlsFromText,
   fetchJobLinks,
@@ -129,21 +130,29 @@ async function classifyAndIngest(
     // A single unsupported job (or an unparseable page): record + park it so
     // it's captured and visible, never lost. ingestJob parks unknown platforms.
     const result = await ingestJob(deps, { url: resolved, source: SOURCE });
-    return result.duplicate
-      ? {
-          url: resolved,
-          kind: 'duplicate',
-          jobId: result.jobId,
-          taskId: result.taskId,
-          originalSource: result.originalSource,
-          originalCreatedAt: result.originalCreatedAt,
-        }
-      : {
-          url: resolved,
-          kind: 'unsupported',
-          jobId: result.jobId,
-          taskId: result.taskId,
-        };
+    if (result.duplicate) {
+      return {
+        url: resolved,
+        kind: 'duplicate',
+        jobId: result.jobId,
+        taskId: result.taskId,
+        originalSource: result.originalSource,
+        originalCreatedAt: result.originalCreatedAt,
+      };
+    }
+    // Tier 2: fire form discovery for a directly-sent unsupported link ONLY
+    // (depth 0). Directory children never trigger — a 50-link directory must
+    // not spawn 50 browser Jobs. triggerInvestigation self-gates on the
+    // enabled flag and never throws, so the parked task is never at risk.
+    if (depth === 0) {
+      await triggerInvestigation(deps, result.taskId);
+    }
+    return {
+      url: resolved,
+      kind: 'unsupported',
+      jobId: result.jobId,
+      taskId: result.taskId,
+    };
   } catch (error) {
     return {
       url,

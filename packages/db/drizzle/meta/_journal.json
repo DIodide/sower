@@ -85,6 +85,13 @@
       "when": 1784006036632,
       "tag": "0011_investigation_runs",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1784092177378,
+      "tag": "0012_investigation_run_kind",
+      "breakpoints": true
     }
   ]
 }

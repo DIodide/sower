@@ -1,19 +1,57 @@
 /**
- * Cloud Run Job entrypoint for Tier-2 screenshot investigation.
+ * Cloud Run Job entrypoint for Tier-2 investigation. Two modes, detected from
+ * the task's data:
  *
- * Thin driver: looks up the task's job's latest screenshot document, fetches
- * the image bytes from the vault, runs the @sower/investigate agent, and
- * POSTs `{ result, transcript }` back to the API. All agent logic lives in
- * @sower/investigate.
+ * - screenshot mode: the task's job has a 'screenshot' document — fetch the
+ *   image bytes from the vault, run the @sower/investigate vision agent, and
+ *   POST `{ kind: 'screenshot', result, transcript }` back to the API.
+ * - form mode: no screenshot, but the job is an UNSUPPORTED link
+ *   (platform 'unknown' with a URL) — run @sower/investigate's headless
+ *   form discovery and POST `{ kind: 'form', result, transcript }`.
+ *
+ * Thin driver: all agent logic lives in @sower/investigate.
  *
  * Exit codes: 0 on success (or when there is nothing to do — no token / no
- * screenshot), 1 on failure so Cloud Run Jobs retries.
+ * screenshot and no unsupported link), 1 on failure so Cloud Run Jobs retries.
  */
 import { pathToFileURL } from 'node:url';
 import { applicationTasks, createDb, documents, jobs } from '@sower/db';
-import { investigateScreenshot } from '@sower/investigate';
+import { discoverForm, investigateScreenshot } from '@sower/investigate';
 import { createStorage } from '@sower/storage';
 import { and, desc, eq } from 'drizzle-orm';
+
+interface PostArgs {
+  apiBase: string;
+  apiKey: string;
+  taskId: string;
+  kind: 'screenshot' | 'form';
+  result: unknown;
+  transcript: unknown;
+}
+
+/** POST the outcome back to the API's investigation-result endpoint. */
+async function postResult(args: PostArgs): Promise<void> {
+  const url = `${args.apiBase.replace(/\/$/, '')}/tasks/${args.taskId}/investigation-result`;
+  console.log(`investigator: POSTing ${args.kind} result to ${url}`);
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': args.apiKey,
+    },
+    body: JSON.stringify({
+      kind: args.kind,
+      result: args.result,
+      transcript: args.transcript,
+    }),
+  });
+  if (!response.ok) {
+    const body = await response.text().catch(() => '');
+    throw new Error(
+      `investigation-result POST failed: ${response.status} ${body.slice(0, 500)}`,
+    );
+  }
+}
 
 export async function run(): Promise<number> {
   const taskId = process.env.TASK_ID || process.argv[2];
@@ -42,7 +80,7 @@ export async function run(): Promise<number> {
   try {
     const db = createDb(databaseUrl);
 
-    console.log(`investigator: task ${taskId} — loading task + screenshot`);
+    console.log(`investigator: task ${taskId} — loading task + job`);
     const [task] = await db
       .select()
       .from(applicationTasks)
@@ -59,6 +97,14 @@ export async function run(): Promise<number> {
       .where(eq(jobs.id, task.jobId))
       .limit(1);
 
+    const hintParts: string[] = [];
+    if (job?.company) hintParts.push(`company: ${job.company}`);
+    if (job?.title) hintParts.push(`role title: ${job.title}`);
+    const hint = hintParts.length > 0 ? hintParts.join('; ') : undefined;
+
+    // Mode detection: a screenshot document wins (the classic Tier-2 path);
+    // otherwise an unsupported link (unknown platform + URL) runs form
+    // discovery; otherwise there is nothing this Job can do.
     const [screenshot] = await db
       .select()
       .from(documents)
@@ -67,53 +113,52 @@ export async function run(): Promise<number> {
       )
       .orderBy(desc(documents.createdAt))
       .limit(1);
-    if (!screenshot) {
+
+    if (screenshot) {
       console.log(
-        `investigator: task ${taskId} — no screenshot document for job ${task.jobId}, exiting`,
+        `investigator: task ${taskId} — screenshot mode (document ${screenshot.id}, ${screenshot.storagePath})`,
       );
-      return 0;
-    }
-
-    console.log(
-      `investigator: fetching screenshot ${screenshot.id} (${screenshot.storagePath})`,
-    );
-    const image = await createStorage().get(screenshot.storagePath);
-
-    const hintParts: string[] = [];
-    if (job?.company) hintParts.push(`company: ${job.company}`);
-    if (job?.title) hintParts.push(`role title: ${job.title}`);
-    const hint = hintParts.length > 0 ? hintParts.join('; ') : undefined;
-
-    console.log(
-      `investigator: running investigation (${image.byteLength} bytes, hint=${hint ? 'yes' : 'no'})`,
-    );
-    const outcome = await investigateScreenshot({
-      image,
-      contentType: screenshot.contentType ?? 'image/png',
-      hint,
-    });
-    console.log(
-      `investigator: investigation done — found=${outcome.result.found} confidence=${outcome.result.confidence} steps=${outcome.transcript.length}`,
-    );
-
-    const url = `${apiBase.replace(/\/$/, '')}/tasks/${taskId}/investigation-result`;
-    console.log(`investigator: POSTing result to ${url}`);
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': apiKey,
-      },
-      body: JSON.stringify({
+      const image = await createStorage().get(screenshot.storagePath);
+      console.log(
+        `investigator: running screenshot investigation (${image.byteLength} bytes, hint=${hint ? 'yes' : 'no'})`,
+      );
+      const outcome = await investigateScreenshot({
+        image,
+        contentType: screenshot.contentType ?? 'image/png',
+        hint,
+      });
+      console.log(
+        `investigator: screenshot investigation done — found=${outcome.result.found} confidence=${outcome.result.confidence} steps=${outcome.transcript.length}`,
+      );
+      await postResult({
+        apiBase,
+        apiKey,
+        taskId,
+        kind: 'screenshot',
         result: outcome.result,
         transcript: outcome.transcript,
-      }),
-    });
-    if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      throw new Error(
-        `investigation-result POST failed: ${response.status} ${body.slice(0, 500)}`,
+      });
+    } else if (job?.platform === 'unknown' && job.url) {
+      console.log(
+        `investigator: task ${taskId} — form mode (unsupported link ${job.url}, hint=${hint ? 'yes' : 'no'})`,
       );
+      const outcome = await discoverForm({ url: job.url, hint });
+      console.log(
+        `investigator: form discovery done — formFound=${outcome.result.formFound} questions=${outcome.result.questions.length} confidence=${outcome.result.confidence} steps=${outcome.transcript.length}`,
+      );
+      await postResult({
+        apiBase,
+        apiKey,
+        taskId,
+        kind: 'form',
+        result: outcome.result,
+        transcript: outcome.transcript,
+      });
+    } else {
+      console.log(
+        `investigator: task ${taskId} — no screenshot document and job ${task.jobId} is not an unsupported link (platform=${job?.platform ?? 'missing'}), exiting`,
+      );
+      return 0;
     }
 
     console.log(`investigator: task ${taskId} complete`);

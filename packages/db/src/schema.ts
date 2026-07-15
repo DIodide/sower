@@ -1,4 +1,9 @@
-import type { JobSpec, ResolutionResult, TaskState } from '@sower/core';
+import type {
+  JobSpec,
+  Question,
+  ResolutionResult,
+  TaskState,
+} from '@sower/core';
 import {
   boolean,
   index,
@@ -242,6 +247,23 @@ export interface InvestigationResult {
 }
 
 /**
+ * Outcome of a Tier-2 form discovery of an UNSUPPORTED job link. Mirrors
+ * DiscoveredForm in @sower/investigate — re-declared locally (like
+ * InvestigationResult) so @sower/db stays dependency-light.
+ */
+export interface DiscoveredForm {
+  formFound: boolean;
+  /** The URL where the form lives (after any Apply hop). */
+  applyUrl?: string;
+  company?: string;
+  title?: string;
+  questions: Question[];
+  confidence: 'high' | 'medium' | 'low';
+  /** Incl. "form is JS-rendered/behind login/not found" when relevant. */
+  notes: string;
+}
+
+/**
  * One observability step of the investigation agent run (assistant text,
  * tool call, tool result, ...). Mirrors TranscriptStep in @sower/investigate.
  */
@@ -269,24 +291,38 @@ export type InvestigationRunStatus =
   | 'error';
 
 /**
- * One row per Tier-2 screenshot investigation (Cloud Run Job execution) of a
- * parked screenshot task. `transcript` is the full observability record of
- * the agent run; `foundJobId` links the real job ingested from the located
- * apply URL.
+ * What the investigator Job ran for this task:
+ * - 'screenshot': vision + web search over a posted screenshot; `result` is
+ *   an InvestigationResult.
+ * - 'form': headless-browser form discovery of an UNSUPPORTED job link;
+ *   `result` is a DiscoveredForm.
+ */
+export type InvestigationRunKind = 'screenshot' | 'form';
+
+/**
+ * One row per Tier-2 investigation (Cloud Run Job execution) of a parked
+ * task — a screenshot investigation or an unsupported-link form discovery
+ * (see `kind`). `transcript` is the full observability record of the agent
+ * run; `foundJobId` links the real job ingested from the located apply URL
+ * (screenshot runs only).
  */
 export const investigationRuns = pgTable(
   'investigation_runs',
   {
     id: uuid('id').primaryKey().defaultRandom(),
-    /** The parked screenshot task being investigated. */
+    /** The parked task being investigated. */
     taskId: uuid('task_id')
       .notNull()
       .references(() => applicationTasks.id),
+    kind: text('kind')
+      .$type<InvestigationRunKind>()
+      .notNull()
+      .default('screenshot'),
     status: text('status')
       .$type<InvestigationRunStatus>()
       .notNull()
       .default('running'),
-    result: jsonb('result').$type<InvestigationResult>(),
+    result: jsonb('result').$type<InvestigationResult | DiscoveredForm>(),
     /** Full agent transcript — the observability record. */
     transcript: jsonb('transcript').$type<TranscriptStep[]>(),
     /** Real job ingested from result.applyUrl (found runs only). */
