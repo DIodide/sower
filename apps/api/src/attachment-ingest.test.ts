@@ -41,7 +41,13 @@ vi.mock('./ingest.js', () => ({
     ) => {
       ingestState.calls.push(input);
       if (ingestState.duplicate) {
-        return { duplicate: true, jobId: 'job-1' };
+        return {
+          duplicate: true,
+          jobId: 'job-1',
+          taskId: 'task-orig',
+          originalSource: 'discord',
+          originalCreatedAt: new Date('2026-07-01T12:00:00Z'),
+        };
       }
       return {
         duplicate: false,
@@ -132,6 +138,7 @@ describe('ingestMessageAttachments', () => {
       {
         kind: 'screenshot',
         jobId: 'job-1',
+        taskId: 'task-1',
         filename: 'job posting.png',
         stored: true,
       },
@@ -199,6 +206,7 @@ describe('ingestMessageAttachments', () => {
       {
         kind: 'screenshot',
         jobId: 'job-1',
+        taskId: 'task-1',
         filename: 'job posting.png',
         stored: false,
       },
@@ -279,7 +287,8 @@ describe('ingestMessageAttachments', () => {
       message([imageAttachment()]),
     );
 
-    expect(outcomes[0]).toMatchObject({ jobId: 'job-1' });
+    // The duplicate still surfaces the EXISTING job's task for the reply.
+    expect(outcomes[0]).toMatchObject({ jobId: 'job-1', taskId: 'task-orig' });
     expect(triggerState.calls).toEqual([]);
   });
 
@@ -299,6 +308,7 @@ describe('ingestMessageAttachments', () => {
       {
         kind: 'screenshot',
         jobId: 'job-1',
+        taskId: 'task-1',
         filename: 'job posting.png',
         stored: true,
       },

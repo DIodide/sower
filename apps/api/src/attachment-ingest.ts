@@ -25,6 +25,12 @@ const SOURCE = 'discord';
 export interface AttachmentOutcome {
   kind: 'screenshot';
   jobId: string;
+  /**
+   * Task the screenshot is traceable to: the freshly parked task, or (for a
+   * duplicate) the existing job's earliest task. Null only when a duplicate
+   * job somehow has no task.
+   */
+  taskId: string | null;
   filename: string;
   /** False when the image download/store failed but the task was still parked. */
   stored: boolean;
@@ -168,6 +174,7 @@ export async function ingestMessageAttachments(
     outcomes.push({
       kind: 'screenshot',
       jobId: result.jobId,
+      taskId: result.taskId,
       filename,
       stored: image !== null && storagePath !== null,
     });

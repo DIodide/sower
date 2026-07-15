@@ -3,7 +3,7 @@ import { canonicalizeUrl } from '@sower/core';
 import { applicationTasks, jobs } from '@sower/db';
 import { detectPlatform, getAdapter, resolveUrl } from '@sower/platforms';
 import { computeDedupeKey } from '@sower/sources';
-import { eq } from 'drizzle-orm';
+import { asc, eq } from 'drizzle-orm';
 import { transitionTask } from './transitions.js';
 import type { Deps } from './types.js';
 
@@ -23,8 +23,41 @@ export interface IngestInput {
 }
 
 export type IngestResult =
-  | { duplicate: true; jobId: string }
+  | {
+      duplicate: true;
+      jobId: string;
+      /** Earliest task on the existing job; null if the job somehow has none. */
+      taskId: string | null;
+      /** Provenance of the EXISTING job (its `source` column). */
+      originalSource: string;
+      /** When the existing job was first ingested. */
+      originalCreatedAt: Date;
+    }
   | { duplicate: false; jobId: string; taskId: string; state: TaskState };
+
+/**
+ * Build the enriched duplicate result: the existing job's provenance
+ * (source + createdAt) plus its earliest task id, so callers (e.g. the
+ * Discord ingest reply) can link the original instead of a bare "duplicate".
+ */
+async function duplicateResult(
+  db: Deps['db'],
+  existing: { id: string; source: string; createdAt: Date | null },
+): Promise<IngestResult> {
+  const tasks = await db
+    .select({ id: applicationTasks.id })
+    .from(applicationTasks)
+    .where(eq(applicationTasks.jobId, existing.id))
+    .orderBy(asc(applicationTasks.createdAt))
+    .limit(1);
+  return {
+    duplicate: true,
+    jobId: existing.id,
+    taskId: tasks[0]?.id ?? null,
+    originalSource: existing.source,
+    originalCreatedAt: existing.createdAt ?? new Date(0),
+  };
+}
 
 /**
  * Returns the reason a parsed job must be parked (NEEDS_INPUT, no enqueue)
@@ -67,13 +100,13 @@ export async function ingestJob(
   // rows whose dedupe_key is still NULL (pre-backfill), which the ON CONFLICT
   // arbiter below cannot see.
   const existing = await db
-    .select({ id: jobs.id })
+    .select({ id: jobs.id, source: jobs.source, createdAt: jobs.createdAt })
     .from(jobs)
     .where(eq(jobs.canonicalUrl, canonicalUrl))
     .limit(1);
   const duplicateRow = existing[0];
   if (duplicateRow) {
-    return { duplicate: true, jobId: duplicateRow.id };
+    return duplicateResult(db, duplicateRow);
   }
 
   // Same posting reached via a different URL (e.g. boards.greenhouse.io vs
@@ -98,13 +131,13 @@ export async function ingestJob(
   const job = insertedJobs[0];
   if (!job) {
     const conflicted = await db
-      .select({ id: jobs.id })
+      .select({ id: jobs.id, source: jobs.source, createdAt: jobs.createdAt })
       .from(jobs)
       .where(eq(jobs.dedupeKey, dedupeKey))
       .limit(1);
     const conflictedRow = conflicted[0];
     if (conflictedRow) {
-      return { duplicate: true, jobId: conflictedRow.id };
+      return duplicateResult(db, conflictedRow);
     }
     throw new Error('failed to insert job');
   }

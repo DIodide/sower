@@ -1,6 +1,7 @@
 import { events, investigationRuns, jobs } from '@sower/db';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
+import { ingestJob } from './ingest.js';
 import { buildServer } from './server.js';
 import type { Deps } from './types.js';
 
@@ -164,6 +165,7 @@ const config: Config = {
   DISCORD_ENABLED: false,
   INVESTIGATOR_JOB_NAME: 'sower-investigator',
   SCREENSHOT_INVESTIGATION_ENABLED: false,
+  DASHBOARD_BASE_URL: undefined,
 };
 
 function createDeps(db: Deps['db']) {
@@ -258,7 +260,14 @@ describe('buildServer', () => {
   });
 
   it('POST /ingest responds 200 duplicate for an already-ingested url', async () => {
-    const db = createFakeDb({ selectResults: [[{ id: 'job-1' }]] });
+    // Two selects on the duplicate path: the existing job row (with its
+    // provenance), then its earliest task (empty here -> taskId null).
+    const db = createFakeDb({
+      selectResults: [
+        [{ id: 'job-1', source: 'manual', createdAt: new Date() }],
+        [],
+      ],
+    });
     const { deps, enqueueProcess } = createDeps(db);
     const app = buildServer(deps);
     const res = await app.inject({
@@ -279,7 +288,9 @@ describe('buildServer', () => {
     const db = createFakeDb({
       selectResults: [
         [], // no canonical-url duplicate
-        [{ id: 'job-1' }], // existing row found by dedupe_key
+        // existing row found by dedupe_key
+        [{ id: 'job-1', source: 'manual', createdAt: new Date() }],
+        [{ id: 'task-orig' }], // the existing job's earliest task
       ],
       insertResults: [[]], // ON CONFLICT (dedupe_key) DO NOTHING: no row
     });
@@ -781,6 +792,58 @@ describe('buildServer', () => {
         expect(res.statusCode).toBe(400);
         expect(res.json()).toMatchObject({ error: 'invalid body' });
       }
+    });
+  });
+});
+
+describe('ingestJob duplicate enrichment', () => {
+  it('returns the existing job task, source, and createdAt on a duplicate', async () => {
+    const createdAt = new Date('2026-07-13T19:47:00Z');
+    const db = createFakeDb({
+      selectResults: [
+        // The existing job matched by canonical url, with its provenance.
+        [
+          {
+            id: 'job-1',
+            source: 'SimplifyJobs/Summer2027-Internships',
+            createdAt,
+          },
+        ],
+        [{ id: 'task-orig' }], // its earliest task
+      ],
+    });
+    const { deps, enqueueProcess } = createDeps(db);
+    const result = await ingestJob(deps, {
+      url: 'https://boards.greenhouse.io/acme/jobs/123',
+    });
+    expect(result).toEqual({
+      duplicate: true,
+      jobId: 'job-1',
+      taskId: 'task-orig',
+      originalSource: 'SimplifyJobs/Summer2027-Internships',
+      originalCreatedAt: createdAt,
+    });
+    expect(enqueueProcess).not.toHaveBeenCalled();
+  });
+
+  it('reports taskId null when the existing job somehow has no task', async () => {
+    const createdAt = new Date('2026-07-13T19:47:00Z');
+    const db = createFakeDb({
+      selectResults: [
+        [{ id: 'job-1', source: 'discord', createdAt }],
+        [], // no application_tasks row
+      ],
+    });
+    const { deps } = createDeps(db);
+    const result = await ingestJob(deps, {
+      url: 'https://boards.greenhouse.io/acme/jobs/123',
+    });
+    expect(result).toEqual({
+      duplicate: true,
+      jobId: 'job-1',
+      taskId: null,
+      originalSource: 'discord',
+      originalCreatedAt: createdAt,
     });
   });
 });

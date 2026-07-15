@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
+import type { MessageIngestSummary, UrlOutcome } from './discord-ingest.js';
 import {
   ingestMessageLinks,
   reactionFor,
@@ -28,6 +29,11 @@ const platformState = vi.hoisted(() => ({
 const ingestState = vi.hoisted(() => ({
   known: new Set<string>(),
   calls: [] as string[],
+  duplicateMeta: {
+    taskId: 'task-dup' as string | null,
+    originalSource: 'discord',
+    originalCreatedAt: new Date('2026-07-13T19:47:00Z'),
+  },
 }));
 const dirState = vi.hoisted(() => ({ byUrl: {} as Record<string, string[]> }));
 
@@ -49,7 +55,7 @@ vi.mock('./ingest.js', () => ({
   ingestJob: vi.fn(async (_deps: unknown, input: { url: string }) => {
     ingestState.calls.push(input.url);
     return ingestState.known.has(input.url)
-      ? { duplicate: true, jobId: 'dup' }
+      ? { duplicate: true, jobId: 'dup', ...ingestState.duplicateMeta }
       : { duplicate: false, jobId: 'job-1', taskId: 'task-1', state: 'QUEUED' };
   }),
 }));
@@ -70,6 +76,11 @@ beforeEach(() => {
   platformState.adapters = new Set(['greenhouse', 'ashby', 'lever', 'workday']);
   ingestState.known = new Set();
   ingestState.calls = [];
+  ingestState.duplicateMeta = {
+    taskId: 'task-dup',
+    originalSource: 'discord',
+    originalCreatedAt: new Date('2026-07-13T19:47:00Z'),
+  };
   dirState.byUrl = {};
 });
 
@@ -197,11 +208,23 @@ describe('ingestMessageLinks', () => {
       'https://gh/1 and https://weird/x',
     );
     expect(s).toMatchObject({ urls: 2, duplicates: 1, unsupported: 1 });
+    // The duplicate outcome carries the original's task, source, and time.
+    expect(s.outcomes[0]).toMatchObject({
+      kind: 'duplicate',
+      taskId: 'task-dup',
+      originalSource: 'discord',
+      originalCreatedAt: new Date('2026-07-13T19:47:00Z'),
+    });
+    // Fresh outcomes carry the created task so the reply can link it.
+    expect(s.outcomes[1]).toMatchObject({
+      kind: 'unsupported',
+      taskId: 'task-1',
+    });
   });
 });
 
 describe('reactionFor / replyFor', () => {
-  const base = {
+  const base: MessageIngestSummary = {
     urls: 1,
     ingested: 0,
     duplicates: 0,
@@ -210,7 +233,10 @@ describe('reactionFor / replyFor', () => {
     errors: 0,
     screenshots: 0,
     outcomes: [],
+    screenshotOutcomes: [],
   };
+  const BASE_URL = 'https://sower-dashboard-abc.run.app';
+
   it('picks the highest-signal emoji', () => {
     expect(reactionFor({ ...base, ingested: 1 })).toBe('✅');
     expect(reactionFor({ ...base, directories: 1 })).toBe('🔎');
@@ -218,18 +244,231 @@ describe('reactionFor / replyFor', () => {
     expect(reactionFor({ ...base, duplicates: 1 })).toBe('♻️');
     expect(reactionFor({ ...base })).toBe('❌');
   });
+
   it('marks a screenshot-only message handled (never ❌)', () => {
     expect(reactionFor({ ...base, screenshots: 1 })).toBe('🖼️');
     // A queued link still outranks the screenshot marker.
     expect(reactionFor({ ...base, screenshots: 1, ingested: 1 })).toBe('✅');
   });
-  it('summarizes counts in the reply', () => {
-    expect(replyFor({ ...base, ingested: 2, unsupported: 1 })).toContain(
-      '✅ 2 queued',
+
+  it('links ingested, unsupported, and screenshot outcomes to their tasks', () => {
+    const reply = replyFor(
+      {
+        ...base,
+        urls: 2,
+        ingested: 1,
+        unsupported: 1,
+        screenshots: 1,
+        outcomes: [
+          {
+            url: 'https://gh/1',
+            kind: 'ingested',
+            platform: 'greenhouse',
+            jobId: 'job-1',
+            taskId: 'task-1111-aaaa',
+          },
+          {
+            url: 'https://weird/x',
+            kind: 'unsupported',
+            jobId: 'job-2',
+            taskId: 'task-2222-bbbb',
+          },
+        ],
+        screenshotOutcomes: [
+          {
+            kind: 'screenshot',
+            jobId: 'job-3',
+            taskId: 'task-3333-cccc',
+            filename: 'shot.png',
+            stored: true,
+          },
+        ],
+      },
+      BASE_URL,
     );
-    expect(replyFor({ ...base, screenshots: 1 })).toContain(
-      '🖼️ 1 screenshot recorded — triage on dashboard',
+    expect(reply).toContain(
+      `✅ [\`task-111\`](${BASE_URL}/tasks/task-1111-aaaa) queued · greenhouse`,
     );
+    expect(reply).toContain(
+      `⚠️ recorded (unsupported) → [\`task-222\`](${BASE_URL}/tasks/task-2222-bbbb)`,
+    );
+    expect(reply).toContain(
+      `🖼️ screenshot recorded → [\`task-333\`](${BASE_URL}/tasks/task-3333-cccc)`,
+    );
+  });
+
+  it('links a duplicate to the existing task with original time + repo source', () => {
+    const reply = replyFor(
+      {
+        ...base,
+        duplicates: 1,
+        outcomes: [
+          {
+            url: 'https://gh/1',
+            kind: 'duplicate',
+            jobId: 'job-1',
+            taskId: 'task-orig-1',
+            originalSource: 'SimplifyJobs/Summer2027-Internships',
+            // 19:47 UTC = 3:47 PM in America/New_York (EDT).
+            originalCreatedAt: new Date('2026-07-13T19:47:00Z'),
+          },
+        ],
+      },
+      BASE_URL,
+    );
+    expect(reply).toContain(
+      `♻️ duplicate of [\`task-ori\`](${BASE_URL}/tasks/task-orig-1)`,
+    );
+    expect(reply).toContain('originally added Jul 13, 3:47 PM ET');
+    expect(reply).toContain(
+      '[SimplifyJobs/Summer2027-Internships](https://github.com/SimplifyJobs/Summer2027-Internships)',
+    );
+  });
+
+  it('renders a non-repo duplicate source (discord) as plain text', () => {
+    const reply = replyFor(
+      {
+        ...base,
+        duplicates: 1,
+        outcomes: [
+          {
+            url: 'https://gh/1',
+            kind: 'duplicate',
+            jobId: 'job-1',
+            taskId: 'task-orig-1',
+            originalSource: 'discord',
+            originalCreatedAt: new Date('2026-07-13T19:47:00Z'),
+          },
+        ],
+      },
+      BASE_URL,
+    );
+    expect(reply).toContain('via discord');
+    expect(reply).not.toContain('github.com/discord');
+  });
+
+  it('degrades to backticked task ids when no dashboard base URL is set', () => {
+    const reply = replyFor({
+      ...base,
+      urls: 2,
+      ingested: 1,
+      duplicates: 1,
+      screenshots: 1,
+      outcomes: [
+        {
+          url: 'https://gh/1',
+          kind: 'ingested',
+          platform: 'greenhouse',
+          jobId: 'job-1',
+          taskId: 'task-1111-aaaa',
+        },
+        {
+          url: 'https://gh/2',
+          kind: 'duplicate',
+          jobId: 'job-2',
+          taskId: 'task-orig-1',
+          originalSource: 'discord',
+          originalCreatedAt: new Date('2026-07-13T19:47:00Z'),
+        },
+      ],
+      screenshotOutcomes: [
+        {
+          kind: 'screenshot',
+          jobId: 'job-3',
+          taskId: 'task-3333-cccc',
+          filename: 'shot.png',
+          stored: true,
+        },
+      ],
+    });
+    expect(reply).toContain('✅ `task-111` queued · greenhouse');
+    expect(reply).toContain('♻️ duplicate of `task-ori`');
+    expect(reply).toContain('🖼️ screenshot recorded → `task-333`');
+    expect(reply).toContain('originally added Jul 13, 3:47 PM ET via discord');
+    expect(reply).not.toContain('](');
+  });
+
+  it('summarizes a directory outcome with child counts', () => {
+    const reply = replyFor(
+      {
+        ...base,
+        directories: 1,
+        ingested: 2,
+        unsupported: 1,
+        outcomes: [
+          {
+            url: 'https://dir/list',
+            kind: 'directory',
+            children: [
+              {
+                url: 'https://gh/1',
+                kind: 'ingested',
+                platform: 'greenhouse',
+                jobId: 'j1',
+                taskId: 't1',
+              },
+              {
+                url: 'https://gh/2',
+                kind: 'ingested',
+                platform: 'ashby',
+                jobId: 'j2',
+                taskId: 't2',
+              },
+              {
+                url: 'https://weird/x',
+                kind: 'unsupported',
+                jobId: 'j3',
+                taskId: 't3',
+              },
+            ],
+          },
+        ],
+      },
+      BASE_URL,
+    );
+    expect(reply).toContain(
+      '🔎 3 links from a directory (2 queued, 1 recorded)',
+    );
+  });
+
+  it('itemizes an error with a shortened url', () => {
+    const reply = replyFor(
+      {
+        ...base,
+        errors: 1,
+        outcomes: [
+          {
+            url: 'https://broken.example/jobs/1',
+            kind: 'error',
+            error: 'boom',
+          },
+        ],
+      },
+      BASE_URL,
+    );
+    expect(reply).toContain('❌ broken.example/jobs/1: boom');
+  });
+
+  it('caps a long reply under 2000 chars with a "…+N more" summary', () => {
+    const outcomes: UrlOutcome[] = Array.from({ length: 40 }, (_, i) => ({
+      url: `https://gh/${i}`,
+      kind: 'ingested' as const,
+      platform: 'greenhouse',
+      jobId: `job-${i}`,
+      taskId: `task-${String(i).padStart(4, '0')}-abcdef-ghijkl`,
+    }));
+    const reply = replyFor(
+      { ...base, urls: 40, ingested: 40, outcomes },
+      BASE_URL,
+    );
+    expect(reply.length).toBeLessThanOrEqual(2000);
+    expect(reply).toContain('…+30 more');
+    // 10 itemized lines + the summary line.
+    expect(reply.split('\n')).toHaveLength(11);
+  });
+
+  it('keeps the empty-message reply', () => {
+    expect(replyFor({ ...base }, BASE_URL)).toMatch(/No job links/);
     expect(replyFor({ ...base })).toMatch(/No job links/);
   });
 });
@@ -261,6 +500,7 @@ describe('runDiscordIngestPoll', () => {
       config: {
         DISCORD_ENABLED: true,
         DISCORD_INGEST_CHANNEL_ID: 'chan-1',
+        DASHBOARD_BASE_URL: 'https://dash.test',
       } as unknown as Config,
       notify,
       db,
@@ -330,7 +570,10 @@ describe('runDiscordIngestPoll', () => {
       expect(result).toMatchObject({ enabled: true, scanned: 1, processed: 1 });
       expect(reactions).toEqual([{ id: 'm-shot', emoji: '🖼️' }]);
       expect(replies).toHaveLength(1);
-      expect(replies[0]).toContain('🖼️ 1 screenshot recorded');
+      // The reply links the parked task on the dashboard.
+      expect(replies[0]).toContain(
+        '🖼️ screenshot recorded → [`task-1`](https://dash.test/tasks/task-1)',
+      );
       // Parked via ingestJob and linked to the job via a documents row.
       expect(ingestState.calls).toEqual([CDN_URL]);
       expect(inserted).toHaveLength(1);
@@ -370,10 +613,15 @@ describe('runDiscordIngestPoll', () => {
       const result = await runDiscordIngestPoll(deps);
 
       expect(result).toMatchObject({ enabled: true, scanned: 1, processed: 1 });
-      // The queued link wins the reaction; the reply itemizes both outcomes.
+      // The queued link wins the reaction; the reply itemizes both outcomes,
+      // each linked to its dashboard task.
       expect(reactions).toEqual([{ id: 'm-mixed', emoji: '✅' }]);
-      expect(replies[0]).toContain('✅ 1 queued');
-      expect(replies[0]).toContain('🖼️ 1 screenshot recorded');
+      expect(replies[0]).toContain(
+        '✅ [`task-1`](https://dash.test/tasks/task-1) queued · greenhouse',
+      );
+      expect(replies[0]).toContain(
+        '🖼️ screenshot recorded → [`task-1`](https://dash.test/tasks/task-1)',
+      );
       // Both the text link and the attachment went through ingestJob.
       expect(ingestState.calls).toEqual(['https://gh/1', CDN_URL]);
       expect(inserted).toHaveLength(1);

@@ -70,6 +70,13 @@ const envSchema = z
       ),
     /** Channel the Discord ingest poll reads job links from (opt-in). */
     DISCORD_INGEST_CHANNEL_ID: z.string().optional(),
+    /**
+     * Public base URL of the sower-dashboard Cloud Run service (e.g.
+     * https://sower-dashboard-....run.app). Used to render task links in
+     * Discord ingest replies; when unset the replies degrade gracefully to
+     * plain-text task ids (never crash).
+     */
+    DASHBOARD_BASE_URL: z.string().optional(),
     /** Cloud Run Job that runs Tier-2 screenshot investigation. */
     INVESTIGATOR_JOB_NAME: z.string().default('sower-investigator'),
     /**

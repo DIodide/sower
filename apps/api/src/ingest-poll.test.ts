@@ -66,7 +66,13 @@ vi.mock('./ingest.js', () => ({
   ingestJob: vi.fn(async (_deps: unknown, input: { url: string }) => {
     ingestState.calls.push(input.url);
     return ingestState.known.has(input.url)
-      ? { duplicate: true, jobId: 'dup' }
+      ? {
+          duplicate: true,
+          jobId: 'dup',
+          taskId: 'task-dup',
+          originalSource: 'vanshb03/Summer2027-Internships',
+          originalCreatedAt: new Date('2026-07-01T12:00:00Z'),
+        }
       : { duplicate: false, jobId: 'j', taskId: 't', state: 'QUEUED' };
   }),
 }));

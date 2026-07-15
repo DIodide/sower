@@ -1,6 +1,7 @@
 import { canonicalizeUrl } from '@sower/core';
 import type { DiscordChannelMessage } from '@sower/notify';
 import { detectPlatform, getAdapter, resolveUrl } from '@sower/platforms';
+import type { AttachmentOutcome } from './attachment-ingest.js';
 import {
   imageAttachments,
   ingestMessageAttachments,
@@ -30,9 +31,25 @@ const MAX_DIRECTORY_LINKS = 50;
 const SOURCE = 'discord';
 
 export type UrlOutcome =
-  | { url: string; kind: 'ingested'; platform: string; jobId: string }
-  | { url: string; kind: 'duplicate'; jobId: string }
-  | { url: string; kind: 'unsupported'; jobId: string }
+  | {
+      url: string;
+      kind: 'ingested';
+      platform: string;
+      jobId: string;
+      taskId?: string;
+    }
+  | {
+      url: string;
+      kind: 'duplicate';
+      jobId: string;
+      /** Earliest task on the EXISTING job (null if it somehow has none). */
+      taskId: string | null;
+      /** Where the existing job originally came from (jobs.source). */
+      originalSource: string;
+      /** When the existing job was first ingested. */
+      originalCreatedAt: Date;
+    }
+  | { url: string; kind: 'unsupported'; jobId: string; taskId?: string }
   | { url: string; kind: 'directory'; children: UrlOutcome[] }
   | { url: string; kind: 'error'; error: string };
 
@@ -46,6 +63,8 @@ export interface MessageIngestSummary {
   /** Image attachments stored + parked for dashboard triage. */
   screenshots: number;
   outcomes: UrlOutcome[];
+  /** Per-screenshot outcomes so the reply can link each parked task. */
+  screenshotOutcomes: AttachmentOutcome[];
 }
 
 /** Workday returns platform:'workday' for ANY tenant host; only a /job/ or
@@ -78,12 +97,20 @@ async function classifyAndIngest(
     ) {
       const result = await ingestJob(deps, { url: resolved, source: SOURCE });
       return result.duplicate
-        ? { url: resolved, kind: 'duplicate', jobId: result.jobId }
+        ? {
+            url: resolved,
+            kind: 'duplicate',
+            jobId: result.jobId,
+            taskId: result.taskId,
+            originalSource: result.originalSource,
+            originalCreatedAt: result.originalCreatedAt,
+          }
         : {
             url: resolved,
             kind: 'ingested',
             platform: ref.platform,
             jobId: result.jobId,
+            taskId: result.taskId,
           };
     }
 
@@ -103,8 +130,20 @@ async function classifyAndIngest(
     // it's captured and visible, never lost. ingestJob parks unknown platforms.
     const result = await ingestJob(deps, { url: resolved, source: SOURCE });
     return result.duplicate
-      ? { url: resolved, kind: 'duplicate', jobId: result.jobId }
-      : { url: resolved, kind: 'unsupported', jobId: result.jobId };
+      ? {
+          url: resolved,
+          kind: 'duplicate',
+          jobId: result.jobId,
+          taskId: result.taskId,
+          originalSource: result.originalSource,
+          originalCreatedAt: result.originalCreatedAt,
+        }
+      : {
+          url: resolved,
+          kind: 'unsupported',
+          jobId: result.jobId,
+          taskId: result.taskId,
+        };
   } catch (error) {
     return {
       url,
@@ -127,6 +166,7 @@ function summarize(
     errors: 0,
     screenshots: 0,
     outcomes,
+    screenshotOutcomes: [],
   };
   const tally = (outcome: UrlOutcome): void => {
     switch (outcome.kind) {
@@ -179,7 +219,11 @@ export async function ingestMessage(
 ): Promise<MessageIngestSummary> {
   const summary = await ingestMessageLinks(deps, message.content ?? '');
   const screenshots = await ingestMessageAttachments(deps, message);
-  return { ...summary, screenshots: screenshots.length };
+  return {
+    ...summary,
+    screenshots: screenshots.length,
+    screenshotOutcomes: screenshots,
+  };
 }
 
 /** Emoji that best captures a message's result (the "processed" marker too). */
@@ -194,25 +238,155 @@ export function reactionFor(summary: MessageIngestSummary): string {
   return '❌';
 }
 
-/** A concise human summary for the channel reply. */
-export function replyFor(summary: MessageIngestSummary): string {
-  const parts: string[] = [];
-  if (summary.ingested > 0) parts.push(`✅ ${summary.ingested} queued`);
-  if (summary.directories > 0)
-    parts.push(
-      `🔎 ${summary.directories} director${summary.directories === 1 ? 'y' : 'ies'}`,
+/** Discord hard-caps messages at 2000 chars. */
+const DISCORD_REPLY_MAX_CHARS = 2000;
+/** Itemize at most this many outcomes; the rest collapse into "…+N more". */
+const MAX_REPLY_ITEMS = 10;
+
+const easternTimeFormat = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York',
+  month: 'short',
+  day: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+});
+
+/** "Jul 13, 3:47 PM ET" — normalized: newer ICU emits U+202F before AM/PM. */
+function formatEasternTime(date: Date): string {
+  const formatted = easternTimeFormat
+    .format(date)
+    .replace(/[\u202f\u00a0]/g, ' ');
+  return `${formatted} ET`;
+}
+
+/**
+ * A `task id8` label, linked to the dashboard task page when a base URL is
+ * configured; plain backticked id when it isn't (graceful degradation).
+ */
+function taskLink(taskId: string, dashboardBaseUrl?: string): string {
+  const label = `\`${taskId.slice(0, 8)}\``;
+  if (!dashboardBaseUrl) return label;
+  return `[${label}](${dashboardBaseUrl.replace(/\/+$/, '')}/tasks/${taskId})`;
+}
+
+/**
+ * A job source rendered as markdown: a GitHub-style `owner/repo` links to
+ * github.com, an http(s) URL links to itself, anything else (e.g. `discord`)
+ * stays plain text.
+ */
+function sourceLink(source: string): string {
+  if (/^https?:\/\//i.test(source)) return `[${source}](${source})`;
+  if (/^[\w.-]+\/[\w.-]+$/.test(source)) {
+    return `[${source}](https://github.com/${source})`;
+  }
+  return source;
+}
+
+/** Protocol stripped + truncated so error lines stay compact. */
+function shortenUrl(url: string): string {
+  const stripped = url.replace(/^https?:\/\//i, '');
+  return stripped.length > 60 ? `${stripped.slice(0, 59)}…` : stripped;
+}
+
+function lineForOutcome(
+  outcome: UrlOutcome,
+  dashboardBaseUrl?: string,
+): string {
+  switch (outcome.kind) {
+    case 'ingested': {
+      const ref = outcome.taskId
+        ? taskLink(outcome.taskId, dashboardBaseUrl)
+        : shortenUrl(outcome.url);
+      return `✅ ${ref} queued · ${outcome.platform}`;
+    }
+    case 'unsupported': {
+      const ref = outcome.taskId
+        ? taskLink(outcome.taskId, dashboardBaseUrl)
+        : shortenUrl(outcome.url);
+      return `⚠️ recorded (unsupported) → ${ref}`;
+    }
+    case 'duplicate': {
+      const target =
+        outcome.taskId === null
+          ? ''
+          : ` of ${taskLink(outcome.taskId, dashboardBaseUrl)}`;
+      return `♻️ duplicate${target} · originally added ${formatEasternTime(outcome.originalCreatedAt)} via ${sourceLink(outcome.originalSource)}`;
+    }
+    case 'directory': {
+      let queued = 0;
+      let recorded = 0;
+      let duplicates = 0;
+      let errors = 0;
+      for (const child of outcome.children) {
+        if (child.kind === 'ingested') queued += 1;
+        else if (child.kind === 'unsupported') recorded += 1;
+        else if (child.kind === 'duplicate') duplicates += 1;
+        else if (child.kind === 'error') errors += 1;
+      }
+      const extras = [
+        duplicates > 0 ? `, ${duplicates} duplicate` : '',
+        errors > 0 ? `, ${errors} error` : '',
+      ].join('');
+      return `🔎 ${outcome.children.length} links from a directory (${queued} queued, ${recorded} recorded${extras})`;
+    }
+    case 'error':
+      return `❌ ${shortenUrl(outcome.url)}: ${outcome.error}`;
+  }
+}
+
+function lineForScreenshot(
+  outcome: AttachmentOutcome,
+  dashboardBaseUrl?: string,
+): string {
+  const ref =
+    outcome.taskId === null
+      ? `\`${outcome.jobId.slice(0, 8)}\``
+      : taskLink(outcome.taskId, dashboardBaseUrl);
+  const suffix = outcome.stored ? '' : ' (image not stored)';
+  return `🖼️ screenshot recorded → ${ref}${suffix}`;
+}
+
+/**
+ * A per-outcome reply for the channel: every outcome gets one line linking it
+ * to its dashboard task (markdown links when DASHBOARD_BASE_URL is set, plain
+ * backticked ids otherwise), capped at MAX_REPLY_ITEMS lines + a "…+N more"
+ * summary so the whole message stays under Discord's 2000-char limit.
+ */
+export function replyFor(
+  summary: MessageIngestSummary,
+  dashboardBaseUrl?: string,
+): string {
+  const lines = summary.outcomes.map((outcome) =>
+    lineForOutcome(outcome, dashboardBaseUrl),
+  );
+  for (const shot of summary.screenshotOutcomes) {
+    lines.push(lineForScreenshot(shot, dashboardBaseUrl));
+  }
+  // A summary built without per-screenshot outcomes still reports the count.
+  if (summary.screenshots > summary.screenshotOutcomes.length) {
+    const extra = summary.screenshots - summary.screenshotOutcomes.length;
+    lines.push(
+      `🖼️ ${extra} screenshot${extra === 1 ? '' : 's'} recorded — triage on dashboard`,
     );
-  if (summary.unsupported > 0)
-    parts.push(`⚠️ ${summary.unsupported} unsupported (recorded)`);
-  if (summary.screenshots > 0)
-    parts.push(
-      `🖼️ ${summary.screenshots} screenshot${summary.screenshots === 1 ? '' : 's'} recorded — triage on dashboard`,
-    );
-  if (summary.duplicates > 0) parts.push(`♻️ ${summary.duplicates} duplicate`);
-  if (summary.errors > 0) parts.push(`❌ ${summary.errors} error`);
-  return parts.length > 0
-    ? parts.join(' · ')
-    : 'No job links found in that message.';
+  }
+  if (lines.length === 0) return 'No job links found in that message.';
+
+  const shown = lines.slice(0, MAX_REPLY_ITEMS);
+  let omitted = lines.length - shown.length;
+  const render = (): string =>
+    omitted > 0 ? `${shown.join('\n')}\n…+${omitted} more` : shown.join('\n');
+  let reply = render();
+  // Even 10 lines can exceed the cap (long links): drop items until it fits.
+  while (reply.length > DISCORD_REPLY_MAX_CHARS && shown.length > 1) {
+    shown.pop();
+    omitted += 1;
+    reply = render();
+  }
+  if (reply.length > DISCORD_REPLY_MAX_CHARS) {
+    // Pathological single line: hard-truncate as a last resort.
+    reply = `${reply.slice(0, DISCORD_REPLY_MAX_CHARS - 1)}…`;
+  }
+  return reply;
 }
 
 export interface DiscordPollResult {
@@ -262,7 +436,10 @@ export async function runDiscordIngestPoll(
         console.warn('[sower] discord ingest: react failed:', error),
       );
     await notify
-      .postChannelMessage(channelId, replyFor(summary))
+      .postChannelMessage(
+        channelId,
+        replyFor(summary, config.DASHBOARD_BASE_URL),
+      )
       .catch((error) =>
         console.warn('[sower] discord ingest: reply failed:', error),
       );
