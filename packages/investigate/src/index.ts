@@ -10,7 +10,7 @@
  *
  * Security posture: the agent fetches arbitrary web pages, so every page is a
  * potential prompt-injection vector. Two containment layers:
- *   1. The subprocess env is a minimal allowlist (see SUBPROCESS_ENV_KEYS) —
+ *   1. The subprocess env is a minimal allowlist (see agent-runner.ts) —
  *      DB/API/GCP secrets never reach the agent process.
  *   2. The tool surface is restricted to WebSearch/WebFetch via the SDK's
  *      `tools` base-set option, with shell/file/code built-ins additionally
@@ -20,6 +20,20 @@
  */
 import { query, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
+import {
+  buildSubprocessEnv,
+  consumeAgentStream,
+  DENIED_TOOLS,
+  parseAgentJson,
+  type TranscriptStep,
+} from './agent-runner.js';
+
+export type { TranscriptStep } from './agent-runner.js';
+export {
+  type DiscoveredForm,
+  discoverForm,
+  type FormDiscoveryOutcome,
+} from './discover-form.js';
 
 export interface InvestigationResult {
   /** true ONLY if a real application URL was located. */
@@ -33,82 +47,15 @@ export interface InvestigationResult {
   notes: string;
 }
 
-export interface TranscriptStep {
-  seq: number;
-  kind: 'assistant_text' | 'tool_use' | 'tool_result' | 'result' | 'system';
-  /** WebSearch / WebFetch / ... (on 'system' steps: the denied tool). */
-  tool?: string;
-  /** tool_use input (e.g. {query} or {url}). */
-  input?: unknown;
-  /**
-   * tool_result output (or, on 'permission_denied' system steps, the
-   * denial message), truncated to ~8000 chars.
-   */
-  output?: string;
-  /** assistant reasoning text. */
-  text?: string;
-  ts: number;
-}
-
 export interface InvestigationOutcome {
   result: InvestigationResult;
   transcript: TranscriptStep[];
 }
 
 const DEFAULT_MAX_TURNS = 12;
-const OUTPUT_TRUNCATE_CHARS = 8000;
 
 /** The only tools the investigation agent may use. */
 const INVESTIGATION_TOOLS = ['WebSearch', 'WebFetch'];
-
-/**
- * Shell/file/code built-ins removed from the agent's context entirely
- * (defense in depth on top of the restricted `tools` base set: a bare name
- * in `disallowedTools` removes the tool and blocks harness-internal calls
- * in every permission mode).
- */
-const DENIED_TOOLS = [
-  'Task',
-  'Agent',
-  'Bash',
-  'BashOutput',
-  'KillShell',
-  'Read',
-  'Write',
-  'Edit',
-  'MultiEdit',
-  'NotebookEdit',
-  'Glob',
-  'Grep',
-  'LS',
-  'Skill',
-  'REPL',
-  'TodoWrite',
-  'ExitPlanMode',
-];
-
-/**
- * Env vars forwarded to the agent subprocess — nothing else. The SDK `env`
- * option REPLACES the subprocess environment (it is not merged with
- * process.env), so secrets like DATABASE_URL, INGEST_API_KEY, and GCP_* /
- * vault vars in the parent process never reach the agent, even if a
- * prompt-injected page convinces it to try dumping its environment.
- */
-const SUBPROCESS_ENV_KEYS = [
-  'CLAUDE_CODE_OAUTH_TOKEN',
-  'PATH',
-  'HOME',
-  'CLAUDE_CONFIG_DIR',
-];
-
-function buildSubprocessEnv(): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const key of SUBPROCESS_ENV_KEYS) {
-    const value = process.env[key];
-    if (value !== undefined) env[key] = value;
-  }
-  return env;
-}
 
 const investigationResultSchema = z.object({
   found: z.boolean(),
@@ -137,119 +84,6 @@ function buildPrompt(hint?: string): string {
     lines.push(`Caller hint: ${hint}`);
   }
   return lines.join('\n');
-}
-
-function truncateOutput(text: string): string {
-  if (text.length <= OUTPUT_TRUNCATE_CHARS) return text;
-  return `${text.slice(0, OUTPUT_TRUNCATE_CHARS)}… [truncated ${text.length - OUTPUT_TRUNCATE_CHARS} chars]`;
-}
-
-/** Render a tool_result content payload (string or content-block array) as text. */
-function renderToolResultContent(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((block) => {
-        if (block && typeof block === 'object') {
-          const b = block as { type?: unknown; text?: unknown };
-          if (b.type === 'text' && typeof b.text === 'string') return b.text;
-          return JSON.stringify(block);
-        }
-        return String(block);
-      })
-      .join('\n');
-  }
-  return JSON.stringify(content) ?? '';
-}
-
-/**
- * Scan free text for top-level JSON objects (brace matching, string-aware)
- * and return each one that parses.
- */
-function findJsonObjects(text: string): unknown[] {
-  const objects: unknown[] = [];
-  for (let i = 0; i < text.length; i++) {
-    if (text[i] !== '{') continue;
-    let depth = 0;
-    let inString = false;
-    let escaped = false;
-    for (let j = i; j < text.length; j++) {
-      const ch = text[j];
-      if (inString) {
-        if (escaped) escaped = false;
-        else if (ch === '\\') escaped = true;
-        else if (ch === '"') inString = false;
-      } else if (ch === '"') {
-        inString = true;
-      } else if (ch === '{') {
-        depth++;
-      } else if (ch === '}') {
-        depth--;
-        if (depth === 0) {
-          try {
-            objects.push(JSON.parse(text.slice(i, j + 1)));
-            i = j;
-          } catch {
-            // not valid JSON — keep scanning from the next '{'
-          }
-          break;
-        }
-      }
-    }
-  }
-  return objects;
-}
-
-/**
- * Extract the final InvestigationResult from the agent's output text:
- * prefer the last fenced ```json block, fall back to the last parseable
- * JSON object anywhere in the text, validate with zod.
- */
-function parseInvestigationResult(
-  text: string,
-): InvestigationResult | undefined {
-  const fenced = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map(
-    (m) => m[1] ?? '',
-  );
-  // Candidates in priority order: fenced blocks (last first), then raw text.
-  const candidates = [...fenced.reverse(), text];
-  for (const candidate of candidates) {
-    const objects = findJsonObjects(candidate);
-    for (let i = objects.length - 1; i >= 0; i--) {
-      const parsed = investigationResultSchema.safeParse(objects[i]);
-      if (parsed.success) {
-        const d = parsed.data;
-        return {
-          found: d.found,
-          applyUrl: d.applyUrl ?? undefined,
-          company: d.company ?? undefined,
-          title: d.title ?? undefined,
-          platform: d.platform ?? undefined,
-          confidence: d.confidence,
-          notes: d.notes,
-        };
-      }
-    }
-  }
-  return undefined;
-}
-
-/** Minimal structural view of the content blocks the SDK stream yields. */
-interface ContentBlockish {
-  type?: unknown;
-  text?: unknown;
-  id?: unknown;
-  name?: unknown;
-  input?: unknown;
-  tool_use_id?: unknown;
-  content?: unknown;
-}
-
-function contentBlocksOf(message: unknown): ContentBlockish[] {
-  if (!message || typeof message !== 'object') return [];
-  const inner = (message as { message?: { content?: unknown } }).message;
-  const content = inner?.content;
-  return Array.isArray(content) ? (content as ContentBlockish[]) : [];
 }
 
 export async function investigateScreenshot(input: {
@@ -318,97 +152,23 @@ export async function investigateScreenshot(input: {
   });
 
   const transcript: TranscriptStep[] = [];
-  let seq = 0;
-  // tool_use id -> tool name, so tool_result steps can name their tool.
-  const toolNamesById = new Map<string, string>();
-  const assistantTexts: string[] = [];
-  let resultText: string | undefined;
-
-  for await (const message of stream) {
-    const ts = Date.now();
-    if (message.type === 'assistant') {
-      for (const block of contentBlocksOf(message)) {
-        if (block.type === 'text' && typeof block.text === 'string') {
-          assistantTexts.push(block.text);
-          transcript.push({
-            seq: seq++,
-            kind: 'assistant_text',
-            text: block.text,
-            ts,
-          });
-        } else if (block.type === 'tool_use') {
-          const tool = typeof block.name === 'string' ? block.name : undefined;
-          if (typeof block.id === 'string' && tool) {
-            toolNamesById.set(block.id, tool);
-          }
-          transcript.push({
-            seq: seq++,
-            kind: 'tool_use',
-            tool,
-            input: block.input,
-            ts,
-          });
-        }
-      }
-    } else if (message.type === 'user') {
-      for (const block of contentBlocksOf(message)) {
-        if (block.type === 'tool_result') {
-          const tool =
-            typeof block.tool_use_id === 'string'
-              ? toolNamesById.get(block.tool_use_id)
-              : undefined;
-          transcript.push({
-            seq: seq++,
-            kind: 'tool_result',
-            tool,
-            output: truncateOutput(renderToolResultContent(block.content)),
-            ts,
-          });
-        }
-      }
-    } else if (message.type === 'result') {
-      const m = message as { subtype?: unknown; result?: unknown };
-      if (typeof m.result === 'string') {
-        resultText = m.result;
-      }
-      transcript.push({
-        seq: seq++,
-        kind: 'result',
-        text: typeof m.subtype === 'string' ? m.subtype : undefined,
-        output:
-          typeof m.result === 'string' ? truncateOutput(m.result) : undefined,
-        ts,
-      });
-    } else if (message.type === 'system') {
-      const m = message as {
-        subtype?: unknown;
-        tool_name?: unknown;
-        message?: unknown;
-      };
-      // 'permission_denied' system messages record blocked tool calls —
-      // keep the tool name and denial message so denials are observable.
-      const denied = m.subtype === 'permission_denied';
-      transcript.push({
-        seq: seq++,
-        kind: 'system',
-        text: typeof m.subtype === 'string' ? m.subtype : undefined,
-        tool:
-          denied && typeof m.tool_name === 'string' ? m.tool_name : undefined,
-        output: denied && typeof m.message === 'string' ? m.message : undefined,
-        ts,
-      });
-    }
-  }
+  const capture = await consumeAgentStream(stream, transcript);
 
   // The final answer usually lands in the result message; fall back to
   // assistant text (latest first) if the result text doesn't parse.
-  const sources = [
-    ...(resultText ? [resultText] : []),
-    ...assistantTexts.reverse(),
-  ];
-  for (const source of sources) {
-    const result = parseInvestigationResult(source);
-    if (result) return { result, transcript };
-  }
-  return { result: { ...PARSE_FAILURE_RESULT }, transcript };
+  const result = parseAgentJson(capture, (candidate) => {
+    const parsed = investigationResultSchema.safeParse(candidate);
+    if (!parsed.success) return undefined;
+    const d = parsed.data;
+    return {
+      found: d.found,
+      applyUrl: d.applyUrl ?? undefined,
+      company: d.company ?? undefined,
+      title: d.title ?? undefined,
+      platform: d.platform ?? undefined,
+      confidence: d.confidence,
+      notes: d.notes,
+    } satisfies InvestigationResult;
+  });
+  return { result: result ?? { ...PARSE_FAILURE_RESULT }, transcript };
 }
