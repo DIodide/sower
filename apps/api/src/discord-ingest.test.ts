@@ -31,6 +31,9 @@ const platformState = vi.hoisted(() => ({
     { platform: string; tenant: string | null; externalId: string | null }
   >,
   adapters: new Set<string>(),
+  /** resolveUrl mock: redirect map (input → final URL) + call log. */
+  resolveTo: {} as Record<string, string>,
+  resolveCalls: [] as string[],
 }));
 const ingestState = vi.hoisted(() => ({
   known: new Set<string>(),
@@ -42,6 +45,8 @@ const ingestState = vi.hoisted(() => ({
   },
 }));
 const dirState = vi.hoisted(() => ({ byUrl: {} as Record<string, string[]> }));
+/** Raw page HTML the mocked fetchPageHtml serves (the REAL sniff runs on it). */
+const pageState = vi.hoisted(() => ({ byUrl: {} as Record<string, string> }));
 const triggerState = vi.hoisted(() => ({
   calls: [] as string[],
   /** What the mocked trigger reports back (true = investigation fired). */
@@ -59,7 +64,10 @@ vi.mock('@sower/platforms', () => ({
     platformState.adapters.has(platform)
       ? { discover: async () => ({}) }
       : null,
-  resolveUrl: async (url: string) => url,
+  resolveUrl: async (url: string) => {
+    platformState.resolveCalls.push(url);
+    return platformState.resolveTo[url] ?? url;
+  },
 }));
 
 vi.mock('./ingest.js', () => ({
@@ -80,10 +88,22 @@ vi.mock('./investigate-trigger.js', () => ({
   }),
 }));
 
-// Keep the real extractUrlsFromText; only stub the network fetchJobLinks.
+// Keep the real pure helpers (extractUrlsFromText, sniffGreenhouseJob, …);
+// only the network fetch and the link filter (fed by dirState) are stubbed.
 vi.mock('./link-extract.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./link-extract.js')>()),
-  fetchJobLinks: vi.fn(async (url: string) => dirState.byUrl[url] ?? []),
+  fetchPageHtml: vi.fn(async (url: string) => {
+    const html = pageState.byUrl[url];
+    if (html !== undefined) {
+      return { html, url };
+    }
+    // Directory fixtures configure links without HTML: serve a blank page so
+    // classify proceeds to (the mocked) extractJobLinks. No fixture → no page.
+    return dirState.byUrl[url] ? { html: '', url } : null;
+  }),
+  extractJobLinks: vi.fn(
+    (_html: string, url: string) => dirState.byUrl[url] ?? [],
+  ),
 }));
 
 // Screenshot ingest vaults image bytes; never touch the real vault in tests.
@@ -100,6 +120,9 @@ vi.mock('./ingest-reply.js', () => ({
 beforeEach(() => {
   platformState.byUrl = {};
   platformState.adapters = new Set(['greenhouse', 'ashby', 'lever', 'workday']);
+  platformState.resolveTo = {};
+  platformState.resolveCalls = [];
+  pageState.byUrl = {};
   ingestState.known = new Set();
   ingestState.calls = [];
   ingestState.duplicateMeta = {
@@ -269,7 +292,7 @@ describe('ingestMessageLinks', () => {
     });
   });
 
-  it('unwraps a redirect shim and ingests the embedded target', async () => {
+  it('unwraps a redirect shim, then short-circuits without resolving', async () => {
     const target = 'https://boards.greenhouse.io/acme/jobs/77';
     platformState.byUrl[target] = {
       platform: 'greenhouse',
@@ -285,6 +308,105 @@ describe('ingestMessageLinks', () => {
       url: target,
     });
     expect(ingestState.calls).toEqual([target]);
+    // The unwrapped target detects as supported → no resolve round-trip.
+    expect(platformState.resolveCalls).toEqual([]);
+  });
+
+  it('ingests a supported URL WITHOUT resolving, so a custom-domain redirect cannot hide the platform', async () => {
+    const gh = 'https://job-boards.greenhouse.io/stripe/jobs/7031337';
+    platformState.byUrl[gh] = {
+      platform: 'greenhouse',
+      tenant: 'stripe',
+      externalId: '7031337',
+    };
+    // If classify DID resolve, the redirect would land off-greenhouse and the
+    // (unknown) stripe.com URL would be parked — the pre-resolve detect must
+    // prevent resolveUrl from ever being called.
+    platformState.resolveTo[gh] =
+      'https://stripe.com/jobs/search?gh_jid=7031337';
+    const s = await ingestMessageLinks({} as Deps, gh);
+    expect(s.ingested).toBe(1);
+    expect(s.outcomes[0]).toMatchObject({
+      kind: 'ingested',
+      platform: 'greenhouse',
+      url: gh,
+    });
+    expect(ingestState.calls).toEqual([gh]);
+    expect(platformState.resolveCalls).toEqual([]);
+  });
+
+  it('still resolves an unknown URL (shortener) before detecting', async () => {
+    const short = 'https://t.co/abc123';
+    const target = 'https://boards.greenhouse.io/acme/jobs/9';
+    platformState.resolveTo[short] = target;
+    platformState.byUrl[target] = {
+      platform: 'greenhouse',
+      tenant: 'acme',
+      externalId: '9',
+    };
+    const s = await ingestMessageLinks({} as Deps, short);
+    expect(platformState.resolveCalls).toEqual([short]);
+    expect(s.ingested).toBe(1);
+    expect(s.outcomes[0]).toMatchObject({
+      kind: 'ingested',
+      platform: 'greenhouse',
+      url: target,
+    });
+  });
+
+  it('sniffs a greenhouse embed out of a custom-domain page and ingests the canonical board URL', async () => {
+    const url = 'https://acme-example.com/careers/senior-baker';
+    // unknown pre- AND post-resolve (the byUrl fallback), so classify fetches
+    // the page; the REAL sniffGreenhouseJob runs over this HTML.
+    pageState.byUrl[url] =
+      '<div id="grnhse_app"></div>' +
+      '<script src="https://boards.greenhouse.io/embed/job_app?for=acme&amp;token=4001"></script>';
+    const canonical = 'https://job-boards.greenhouse.io/acme/jobs/4001';
+    const s = await ingestMessageLinks({} as Deps, url);
+    expect(s.ingested).toBe(1);
+    expect(s.outcomes[0]).toMatchObject({
+      kind: 'ingested',
+      platform: 'greenhouse',
+      url: canonical,
+    });
+    expect(ingestState.calls).toEqual([canonical]);
+  });
+
+  it('dedupes a sniffed custom-domain page onto the existing canonical job', async () => {
+    const url = 'https://acme-example.com/careers/senior-baker';
+    pageState.byUrl[url] =
+      '<a href="https://job-boards.greenhouse.io/acme/jobs/4001">Apply</a>';
+    const canonical = 'https://job-boards.greenhouse.io/acme/jobs/4001';
+    ingestState.known = new Set([canonical]);
+    const s = await ingestMessageLinks({} as Deps, url);
+    expect(s.duplicates).toBe(1);
+    expect(s.outcomes[0]).toMatchObject({ kind: 'duplicate', url: canonical });
+  });
+
+  it('recovers a gh_jid stripped by the resolve redirect (sniffs with the original URL)', async () => {
+    // Live-observed shape: stripe.com/jobs/search?gh_jid=N 302s to a slug URL
+    // WITHOUT gh_jid. The page HTML only names the tenant (board root link),
+    // so the job id must come from the ORIGINAL pasted URL.
+    const pasted = 'https://acme-example.com/jobs/search?gh_jid=42';
+    const stripped = 'https://acme-example.com/jobs/listing/senior-baker';
+    platformState.resolveTo[pasted] = stripped;
+    pageState.byUrl[stripped] =
+      '<a href="https://boards.greenhouse.io/acme">our job board</a>';
+    const s = await ingestMessageLinks({} as Deps, pasted);
+    expect(s.ingested).toBe(1);
+    expect(s.outcomes[0]).toMatchObject({
+      kind: 'ingested',
+      platform: 'greenhouse',
+      url: 'https://job-boards.greenhouse.io/acme/jobs/42',
+    });
+  });
+
+  it('records a custom-domain page with no greenhouse marker (sniff → null → park)', async () => {
+    const url = 'https://acme-example.com/careers/senior-baker';
+    pageState.byUrl[url] = '<html><body>join our team</body></html>';
+    const s = await ingestMessageLinks({} as Deps, url);
+    expect(s.unsupported).toBe(1);
+    expect(ingestState.calls).toEqual([url]);
   });
 
   it('counts a duplicate and handles a mixed message', async () => {

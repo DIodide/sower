@@ -20,6 +20,7 @@ const ALL_STATES: TaskState[] = [
   'CONFIRMED',
   'FAILED',
   'DUPLICATE',
+  'DISCARDED',
 ];
 
 const ALL_EVENTS: TaskEvent[] = [
@@ -37,6 +38,21 @@ const ALL_EVENTS: TaskEvent[] = [
   'CONFIRM',
   'FAIL',
   'RETRY',
+  'DISCARD',
+];
+
+/** Every state a task may be DISCARDed from (all non-terminal states except
+ * SUBMITTED — a sent application can't be removed from the queue). */
+const DISCARDABLE_STATES: TaskState[] = [
+  'INGESTED',
+  'PARSED',
+  'QUEUED',
+  'PREPARING',
+  'NEEDS_INPUT',
+  'REVIEW',
+  'AWAITING_OTP',
+  'FILLING',
+  'FAILED',
 ];
 
 const VALID_TRANSITIONS: Array<[TaskState, TaskEvent, TaskState]> = [
@@ -62,6 +78,11 @@ const VALID_TRANSITIONS: Array<[TaskState, TaskEvent, TaskState]> = [
   ['SUBMITTED', 'FAIL', 'FAILED'],
   ['NEEDS_INPUT', 'RETRY', 'QUEUED'],
   ['NEEDS_INPUT', 'FAIL', 'FAILED'],
+  ...DISCARDABLE_STATES.map((state): [TaskState, TaskEvent, TaskState] => [
+    state,
+    'DISCARD',
+    'DISCARDED',
+  ]),
 ];
 
 function isValid(state: TaskState, event: TaskEvent): boolean {
@@ -140,6 +161,27 @@ describe('transition', () => {
     expect(transition('FILLING', 'NEED_OTP')).toBe('AWAITING_OTP');
     expect(transition('AWAITING_OTP', 'RETRY')).toBe('FILLING');
   });
+
+  it('supports DISCARD from every non-terminal state except SUBMITTED', () => {
+    for (const state of DISCARDABLE_STATES) {
+      expect(transition(state, 'DISCARD')).toBe('DISCARDED');
+    }
+  });
+
+  it('refuses DISCARD once an application was sent (SUBMITTED/CONFIRMED)', () => {
+    for (const state of ['SUBMITTED', 'CONFIRMED'] as TaskState[]) {
+      expect(() => transition(state, 'DISCARD')).toThrow(
+        InvalidTransitionError,
+      );
+      expect(canTransition(state, 'DISCARD')).toBe(false);
+    }
+  });
+
+  it('DISCARDED is terminal: no event leaves it', () => {
+    for (const event of ALL_EVENTS) {
+      expect(canTransition('DISCARDED', event)).toBe(false);
+    }
+  });
 });
 
 describe('canTransition', () => {
@@ -159,9 +201,10 @@ describe('ALLOWED table', () => {
     }
   });
 
-  it('terminal states DUPLICATE and CONFIRMED have no outbound transitions', () => {
+  it('terminal states DUPLICATE, CONFIRMED, and DISCARDED have no outbound transitions', () => {
     expect(Object.keys(ALLOWED.DUPLICATE)).toHaveLength(0);
     expect(Object.keys(ALLOWED.CONFIRMED)).toHaveLength(0);
+    expect(Object.keys(ALLOWED.DISCARDED)).toHaveLength(0);
   });
 
   it('every state except INGESTED is reachable from some transition', () => {

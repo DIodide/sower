@@ -4,13 +4,14 @@ import { useActionState } from 'react';
 import type { ActionResult } from './actions';
 import {
   approveTask,
+  discardTask,
   requeueTask,
   startSessionCapture,
   verifyDiscoveredForm,
 } from './actions';
 
 const LABELS: Record<
-  'requeue' | 'approve' | 'start' | 'verify',
+  'requeue' | 'approve' | 'start' | 'verify' | 'discard',
   { idle: string; className: string; title: string }
 > = {
   approve: {
@@ -36,6 +37,12 @@ const LABELS: Record<
     title:
       'Confirms that you, a human, checked the machine-extracted questions against the real application form — marks the form verified and updates the Discord ingest reply',
   },
+  discard: {
+    idle: 'Discard task',
+    className: 'btn btn--danger',
+    title:
+      'Removes this task from the queue — nothing will run for it anymore (the record and history are kept)',
+  },
 };
 
 export function TaskActions({
@@ -43,7 +50,7 @@ export function TaskActions({
   mode,
 }: {
   taskId: string;
-  mode: 'requeue' | 'approve' | 'start' | 'verify';
+  mode: 'requeue' | 'approve' | 'start' | 'verify' | 'discard';
 }) {
   const [result, formAction, pending] = useActionState<
     ActionResult | null,
@@ -52,6 +59,7 @@ export function TaskActions({
     if (mode === 'approve') return approveTask(taskId);
     if (mode === 'start') return startSessionCapture(taskId);
     if (mode === 'verify') return verifyDiscoveredForm(taskId);
+    if (mode === 'discard') return discardTask(taskId);
     return requeueTask(taskId);
   }, null);
 

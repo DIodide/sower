@@ -11,11 +11,11 @@ import { getAdapter } from '@sower/platforms';
 import { asc, desc, eq, inArray } from 'drizzle-orm';
 import {
   formatEasternDate,
-  isIngestableJobUrl,
   renderReplyLines,
   taskLabel,
   taskLink,
 } from './discord-ingest.js';
+import { isIngestableJobUrl } from './link-extract.js';
 import type { Deps } from './types.js';
 
 /**
@@ -83,6 +83,12 @@ export function renderTaskLine(
     dashboardBaseUrl,
   );
   const date = job.createdAt ? ` · ${formatEasternDate(job.createdAt)}` : '';
+
+  // Discarded wins over everything: a human removed the task from the queue,
+  // so no lifecycle line (queued/investigating/…) applies anymore.
+  if (task.state === 'DISCARDED') {
+    return `🗑️ ${ref} · discarded${date}`;
+  }
 
   // Screenshot tasks: the run kind is authoritative; the CDN host covers
   // parked screenshots that never got an investigation run.

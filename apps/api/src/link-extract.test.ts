@@ -4,6 +4,9 @@ import {
   extractAnchorHrefs,
   extractUrlsFromText,
   fetchJobLinks,
+  fetchPageHtml,
+  isIngestableJobUrl,
+  sniffGreenhouseJob,
   unwrapRedirectShim,
 } from './link-extract.js';
 
@@ -140,5 +143,148 @@ describe('fetchJobLinks', () => {
     const spy = vi.spyOn(globalThis, 'fetch');
     expect(await fetchJobLinks('http://169.254.169.254/')).toEqual([]);
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe('fetchPageHtml', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('returns the HTML with the final URL, and null for non-HTML/private targets', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('<p>hi</p>', {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      }),
+    );
+    expect(await fetchPageHtml('https://dir.example/board')).toEqual({
+      html: '<p>hi</p>',
+      url: 'https://dir.example/board',
+    });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('{}', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    expect(await fetchPageHtml('https://dir.example/api')).toBeNull();
+    expect(await fetchPageHtml('http://169.254.169.254/')).toBeNull();
+  });
+});
+
+describe('isIngestableJobUrl', () => {
+  it('is true for non-workday platforms unconditionally', () => {
+    expect(
+      isIngestableJobUrl('greenhouse', 'https://boards.greenhouse.io/a/jobs/1'),
+    ).toBe(true);
+    expect(isIngestableJobUrl('lever', 'not a url')).toBe(true);
+  });
+
+  it('requires a /job/ or /details/ path for workday', () => {
+    expect(
+      isIngestableJobUrl(
+        'workday',
+        'https://caci.wd1.myworkdayjobs.com/External/job/Jessup/SWE_1',
+      ),
+    ).toBe(true);
+    expect(
+      isIngestableJobUrl(
+        'workday',
+        'https://caci.wd1.myworkdayjobs.com/External/login',
+      ),
+    ).toBe(false);
+    expect(isIngestableJobUrl('workday', 'not a url')).toBe(false);
+  });
+});
+
+describe('sniffGreenhouseJob', () => {
+  const PAGE = 'https://stripe.com/jobs/listing/backend-engineer/7031337';
+
+  it('finds tenant + job id in a classic job_app embed (entity-escaped &amp;)', () => {
+    const html =
+      '<div id="grnhse_app"></div>' +
+      '<script src="https://boards.greenhouse.io/embed/job_app?for=stripe&amp;token=7031337&amp;b=https%3A%2F%2Fstripe.com"></script>';
+    expect(sniffGreenhouseJob(html, PAGE)).toEqual({
+      tenant: 'stripe',
+      jobId: '7031337',
+    });
+  });
+
+  it('finds a JSON-escaped (\\u0026) embed inside an inline script', () => {
+    const html =
+      '{"embed":"https://boards.greenhouse.io/embed/job_app?for=databricks\\u0026token=999"}';
+    expect(sniffGreenhouseJob(html, PAGE)).toEqual({
+      tenant: 'databricks',
+      jobId: '999',
+    });
+  });
+
+  it('finds a single job-boards.greenhouse.io/<tenant>/jobs/<id> link', () => {
+    const html =
+      '<a href="https://job-boards.greenhouse.io/stripe/jobs/7031337">Apply</a>';
+    expect(sniffGreenhouseJob(html, 'https://stripe.com/jobs/x')).toEqual({
+      tenant: 'stripe',
+      jobId: '7031337',
+    });
+  });
+
+  it('finds a boards.eu.greenhouse.io board link too', () => {
+    const html =
+      '<a href="https://boards.eu.greenhouse.io/acme/jobs/123">Apply</a>';
+    expect(sniffGreenhouseJob(html, 'https://acme.eu/careers/x')).toEqual({
+      tenant: 'acme',
+      jobId: '123',
+    });
+  });
+
+  it('combines a gh_jid page param with a board link naming the tenant', () => {
+    const html =
+      '<a href="https://boards.greenhouse.io/acme/jobs/999">other role</a>';
+    expect(
+      sniffGreenhouseJob(html, 'https://acme.com/jobs/search?gh_jid=42'),
+    ).toEqual({ tenant: 'acme', jobId: '42' });
+  });
+
+  it('combines a gh_jid page param with a token-less job_app embed', () => {
+    const html =
+      '<iframe src="https://boards.greenhouse.io/embed/job_app?for=acme"></iframe>';
+    expect(
+      sniffGreenhouseJob(html, 'https://acme.com/careers?gh_jid=456'),
+    ).toEqual({ tenant: 'acme', jobId: '456' });
+  });
+
+  it('prefers the page gh_jid over an embed token (the page pins the job)', () => {
+    const html =
+      '<script src="https://boards.greenhouse.io/embed/job_app?for=acme&amp;token=111"></script>';
+    expect(
+      sniffGreenhouseJob(html, 'https://acme.com/careers?gh_jid=222'),
+    ).toEqual({ tenant: 'acme', jobId: '222' });
+  });
+
+  it('returns null for a directory page with SEVERAL distinct board links', () => {
+    const html = [
+      '<a href="https://boards.greenhouse.io/acme/jobs/1">a</a>',
+      '<a href="https://boards.greenhouse.io/acme/jobs/2">b</a>',
+    ].join('');
+    expect(sniffGreenhouseJob(html, 'https://acme.com/careers')).toBeNull();
+  });
+
+  it('treats repeated links to the SAME job as one job, not a directory', () => {
+    const html = [
+      '<a href="https://boards.greenhouse.io/acme/jobs/1">apply</a>',
+      '<a href="https://job-boards.greenhouse.io/acme/jobs/1">apply again</a>',
+    ].join('');
+    expect(sniffGreenhouseJob(html, 'https://acme.com/careers')).toEqual({
+      tenant: 'acme',
+      jobId: '1',
+    });
+  });
+
+  it('returns null when the page has no greenhouse marker', () => {
+    const html = '<html><body><a href="/apply">Apply here</a></body></html>';
+    expect(sniffGreenhouseJob(html, 'https://acme.com/careers/x')).toBeNull();
+    // gh_jid alone (no marker naming the tenant) cannot build a board URL.
+    expect(
+      sniffGreenhouseJob(html, 'https://acme.com/careers?gh_jid=7'),
+    ).toBeNull();
   });
 });

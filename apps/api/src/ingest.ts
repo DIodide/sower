@@ -4,6 +4,7 @@ import { applicationTasks, jobs } from '@sower/db';
 import { detectPlatform, getAdapter, resolveUrl } from '@sower/platforms';
 import { computeDedupeKey } from '@sower/sources';
 import { asc, eq } from 'drizzle-orm';
+import { isIngestableJobUrl } from './link-extract.js';
 import { transitionTask } from './transitions.js';
 import type { Deps } from './types.js';
 
@@ -79,8 +80,17 @@ function parkReason(ref: PlatformRef): string | null {
 }
 
 /**
+ * True when an adapter can discover this ref straight from the URL's
+ * tenant+id via the platform API — i.e. no live GET is needed to ingest it.
+ */
+function isDiscoverableRef(ref: PlatformRef, url: string): boolean {
+  return parkReason(ref) === null && isIngestableJobUrl(ref.platform, url);
+}
+
+/**
  * Shared ingest pipeline used by POST /ingest and POST /sources/simplify/poll:
- * resolve -> canonicalize -> detect platform -> dedupe -> insert job + task ->
+ * detect platform (resolving the URL first ONLY when the input is not already
+ * a supported posting) -> canonicalize -> dedupe -> insert job + task ->
  * PARSE_OK -> PARSED, then either PARK -> NEEDS_INPUT (nothing can process it,
  * no enqueue) or ENQUEUE -> QUEUED + queue.enqueueProcess.
  */
@@ -90,8 +100,19 @@ export async function ingestJob(
 ): Promise<IngestResult> {
   const { db, queue } = deps;
 
-  const resolvedUrl =
-    input.resolve === false ? input.url : await resolveUrl(input.url);
+  // Detect on the INPUT url before any live GET: a supported ATS URL is
+  // discovered via the platform API from the tenant+id in the URL itself, so
+  // resolving adds nothing — and can LOSE the platform identity entirely when
+  // the board redirects to the company's own domain (custom-domain greenhouse
+  // tenants: job-boards.greenhouse.io/stripe/… → stripe.com/jobs/…). Unknown
+  // URLs (shorteners, custom domains) still resolve exactly as before.
+  let resolvedUrl = input.url;
+  if (
+    input.resolve !== false &&
+    !isDiscoverableRef(detectPlatform(canonicalizeUrl(input.url)), input.url)
+  ) {
+    resolvedUrl = await resolveUrl(input.url);
+  }
   const canonicalUrl = canonicalizeUrl(resolvedUrl);
   const ref = detectPlatform(canonicalUrl);
   const dedupeKey = computeDedupeKey(ref, canonicalUrl);

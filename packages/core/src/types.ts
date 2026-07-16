@@ -12,7 +12,8 @@ export type TaskState =
   | 'SUBMITTED'
   | 'CONFIRMED'
   | 'FAILED'
-  | 'DUPLICATE';
+  | 'DUPLICATE'
+  | 'DISCARDED';
 
 export type TaskEvent =
   | 'PARSE_OK'
@@ -28,7 +29,8 @@ export type TaskEvent =
   | 'SUBMIT_OK'
   | 'CONFIRM'
   | 'FAIL'
-  | 'RETRY';
+  | 'RETRY'
+  | 'DISCARD';
 
 export interface QuestionOption {
   label: string;

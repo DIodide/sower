@@ -368,6 +368,36 @@ export async function verifyDiscoveredForm(
 }
 
 /**
+ * Discard a task via the api service: a human removes it from the queue
+ * (terminal DISCARDED state; refused for SUBMITTED/CONFIRMED). Revalidates
+ * the task page plus the queue and home lists the row disappears from.
+ */
+export async function discardTask(taskId: string): Promise<ActionResult> {
+  const idParse = uuidSchema.safeParse(taskId);
+  if (!idParse.success) return { ok: false, message: 'invalid task id.' };
+  const result = await callApi(idParse.data, 'discard');
+  revalidatePath(`/tasks/${idParse.data}`);
+  revalidatePath('/queue');
+  revalidatePath('/');
+  return result;
+}
+
+/**
+ * Manually start the browser agent (form-discovery investigation) on an
+ * unsupported maybe-job via the api service. The api gates eligibility
+ * (unknown platform or a recorded screenshot) and reports whether the agent
+ * actually fired (it self-gates on SCREENSHOT_INVESTIGATION_ENABLED).
+ */
+export async function investigateTask(taskId: string): Promise<ActionResult> {
+  const idParse = uuidSchema.safeParse(taskId);
+  if (!idParse.success) return { ok: false, message: 'invalid task id.' };
+  const result = await callApi(idParse.data, 'investigate');
+  revalidatePath(`/tasks/${idParse.data}`);
+  revalidatePath('/queue');
+  return result;
+}
+
+/**
  * Deliver a one-time code to an AWAITING_OTP task via the api service, which
  * stores it and resumes the task (AWAITING_OTP -> FILLING). Mirrors the
  * Discord modal path; either can satisfy the same wait.
@@ -389,6 +419,8 @@ export async function submitOtp(
 
 const apiResponseSchema = z.object({
   state: z.string().optional(),
+  ok: z.boolean().optional(),
+  fired: z.boolean().optional(),
   skipped: z.boolean().optional(),
   dryRun: z.boolean().optional(),
   mode: z.enum(['dry-run', 'workday-fill']).optional(),
@@ -411,7 +443,14 @@ const apiResponseSchema = z.object({
  */
 async function callApi(
   taskId: string,
-  action: 'requeue' | 'approve' | 'otp' | 'start' | 'verify-form',
+  action:
+    | 'requeue'
+    | 'approve'
+    | 'otp'
+    | 'start'
+    | 'verify-form'
+    | 'discard'
+    | 'investigate',
   jsonBody?: Record<string, unknown>,
 ): Promise<ActionResult> {
   const base = process.env.API_BASE_URL;
@@ -489,6 +528,27 @@ async function callApi(
       message:
         'form verified — recorded on the task and the Discord ingest reply now shows it as verified.',
     };
+  }
+
+  if (action === 'discard') {
+    return {
+      ok: true,
+      message: 'task discarded — removed from the queue.',
+    };
+  }
+
+  if (action === 'investigate') {
+    return body.fired
+      ? {
+          ok: true,
+          message:
+            'browser agent started — it is discovering the application form now; results land on this task.',
+        }
+      : {
+          ok: false,
+          message:
+            'the browser agent did not start — investigation is disabled on the api service (SCREENSHOT_INVESTIGATION_ENABLED).',
+        };
   }
 
   if (action === 'otp') {

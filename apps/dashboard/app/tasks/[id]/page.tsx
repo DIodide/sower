@@ -324,6 +324,16 @@ function NextStep({
           </p>
         </div>
       );
+    case 'DISCARDED':
+      return (
+        <div className="banner banner--neutral">
+          <p>
+            <strong>Discarded.</strong> This task was removed from the queue —
+            nothing will run for it anymore. The record and history are kept
+            below.
+          </p>
+        </div>
+      );
     default:
       return (
         <div className="banner banner--progress">
@@ -582,6 +592,14 @@ export default async function TaskPage({
             </div>
           ) : null}
         </div>
+
+        {/* ---- action row: discard (hidden once sent or already discarded) ---- */}
+        {!['SUBMITTED', 'CONFIRMED', 'DISCARDED'].includes(task.state) ? (
+          <>
+            <hr className="divider-soft" />
+            <TaskActions taskId={task.id} mode="discard" />
+          </>
+        ) : null}
       </header>
 
       {/* ---- what's next ---- */}
@@ -651,7 +669,7 @@ export default async function TaskPage({
                 form. Nothing is ever auto-submitted for this task.
               </p>
             </div>
-          ) : (
+          ) : task.state === 'DISCARDED' ? null : (
             <div className="banner banner--attention">
               <div style={{ flex: '1 1 20rem' }}>
                 <p style={{ marginBottom: '0.625rem' }}>

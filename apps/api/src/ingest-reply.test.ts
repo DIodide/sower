@@ -265,6 +265,60 @@ describe('renderTaskLine (screenshot states)', () => {
   });
 });
 
+describe('renderTaskLine (discarded)', () => {
+  const asRow = (r: ReturnType<typeof row>, state: string) =>
+    ({
+      ...r,
+      task: { ...r.task, state },
+    }) as unknown as Parameters<typeof renderTaskLine>[0];
+
+  it('renders the discarded line (with the date) for a discarded task', () => {
+    const line = renderTaskLine(
+      asRow(
+        row('disc-1xx', { title: 'Data Scientist', company: 'TickPick' }),
+        'DISCARDED',
+      ),
+      undefined,
+      BASE_URL,
+    );
+    expect(line).toBe(
+      `🗑️ [Data Scientist · TickPick](${BASE_URL}/tasks/disc-1xx) · discarded · ${DATE}`,
+    );
+  });
+
+  it('wins over queued/screenshot/investigation lines', () => {
+    // A queued greenhouse task that was discarded no longer reads "queued"...
+    const queued = renderTaskLine(
+      asRow(
+        row('disc-2xx', {
+          platform: 'greenhouse',
+          tenant: 'acme',
+          url: 'https://boards.greenhouse.io/acme/jobs/1',
+        }),
+        'DISCARDED',
+      ),
+      undefined,
+      BASE_URL,
+    );
+    expect(queued).toContain('· discarded');
+    expect(queued).not.toContain('queued');
+
+    // ...and a discarded screenshot task no longer reads "investigating".
+    const shot = renderTaskLine(
+      asRow(
+        row('disc-3xx', {
+          url: 'https://cdn.discordapp.com/attachments/1/2/shot.png',
+        }),
+        'DISCARDED',
+      ),
+      { kind: 'screenshot', status: 'running' },
+      BASE_URL,
+    );
+    expect(shot).toContain('· discarded');
+    expect(shot).not.toContain('investigating');
+  });
+});
+
 describe('renderTaskLine (link labels)', () => {
   const asRow = (r: ReturnType<typeof row>) =>
     r as unknown as Parameters<typeof renderTaskLine>[0];

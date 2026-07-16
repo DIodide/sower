@@ -1,15 +1,16 @@
 import { timingSafeEqual } from 'node:crypto';
-import type { JobSpec, Platform } from '@sower/core';
+import { canTransition, type JobSpec, type Platform } from '@sower/core';
 import {
   apiCalls,
   applicationTasks,
+  documents,
   events,
   type InvestigationRunStatus,
   investigationRuns,
   type Job,
   jobs,
 } from '@sower/db';
-import { asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq } from 'drizzle-orm';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { registerAnswerLibraryRoutes } from './answer-library.js';
@@ -18,6 +19,7 @@ import { runDiscordIngestPoll } from './discord-ingest.js';
 import { ingestJob } from './ingest.js';
 import { runIngestionPoll } from './ingest-poll.js';
 import { refreshIngestReply } from './ingest-reply.js';
+import { triggerInvestigation } from './investigate-trigger.js';
 import { requestOtp, submitOtp } from './otp-actions.js';
 import { processTask } from './process.js';
 import {
@@ -28,6 +30,7 @@ import {
   startSessionCapture,
 } from './sessions-actions.js';
 import { approveTask, requeueTask } from './task-actions.js';
+import { transitionTask } from './transitions.js';
 import type { Deps } from './types.js';
 
 const ingestBodySchema = z.object({
@@ -45,6 +48,11 @@ const taskParamsSchema = z.object({
 
 const otpBodySchema = z.object({
   code: z.string().min(4).max(20),
+});
+
+// Bulk discard body (the dashboard Queue page's "Discard selected").
+const bulkDiscardBodySchema = z.object({
+  taskIds: z.array(z.string().uuid()).min(1).max(100),
 });
 
 const tenantParamsSchema = z.object({
@@ -304,6 +312,160 @@ export function buildServer(deps: Deps): FastifyInstance {
       return reply.code(200).send({ skipped: true, state: outcome.state });
     }
     return reply.code(200).send({ state: outcome.state });
+  });
+
+  // Discard a task: a human removes it from the queue (terminal DISCARDED
+  // state). Allowed from every non-terminal state EXCEPT SUBMITTED/CONFIRMED —
+  // an application already sent can't be "removed from the queue". Idempotent:
+  // re-discarding a DISCARDED task is a 200 no-op.
+  app.post('/tasks/:id/discard', async (request, reply) => {
+    const parsed = taskParamsSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid task id', issues: parsed.error.issues });
+    }
+    const taskId = parsed.data.id;
+    const rows = await deps.db
+      .select({ state: applicationTasks.state })
+      .from(applicationTasks)
+      .where(eq(applicationTasks.id, taskId))
+      .limit(1);
+    const row = rows[0];
+    if (!row) {
+      return reply.code(404).send({ error: 'task not found' });
+    }
+    if (row.state === 'DISCARDED') {
+      // Already discarded — still refresh the #ingest reply (recovers a line
+      // whose earlier edit failed). Never throws.
+      await refreshIngestReply(deps, taskId);
+      return reply.code(200).send({ ok: true });
+    }
+    if (!canTransition(row.state, 'DISCARD')) {
+      return reply
+        .code(409)
+        .send({ error: `cannot discard a task in state '${row.state}'` });
+    }
+    await transitionTask(deps.db, taskId, row.state, 'DISCARD', {
+      reason: 'manual',
+    });
+    // Best-effort: the reply line for this task flips to "discarded".
+    await refreshIngestReply(deps, taskId);
+    return reply.code(200).send({ ok: true });
+  });
+
+  // Bulk discard (the Queue page's checkbox form). Per-task tolerant: a
+  // missing or undiscardable task lands in `skipped` with a reason and never
+  // fails the batch. refreshIngestReply is cheap and idempotent, so it simply
+  // runs once per discarded task.
+  app.post('/tasks/discard', async (request, reply) => {
+    const parsed = bulkDiscardBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid body', issues: parsed.error.issues });
+    }
+    let discarded = 0;
+    const skipped: { id: string; reason: string }[] = [];
+    for (const taskId of parsed.data.taskIds) {
+      const rows = await deps.db
+        .select({ state: applicationTasks.state })
+        .from(applicationTasks)
+        .where(eq(applicationTasks.id, taskId))
+        .limit(1);
+      const row = rows[0];
+      if (!row) {
+        skipped.push({ id: taskId, reason: 'task not found' });
+        continue;
+      }
+      if (row.state === 'DISCARDED') {
+        skipped.push({ id: taskId, reason: 'already discarded' });
+        continue;
+      }
+      if (!canTransition(row.state, 'DISCARD')) {
+        skipped.push({
+          id: taskId,
+          reason: `cannot discard a task in state '${row.state}'`,
+        });
+        continue;
+      }
+      try {
+        await transitionTask(deps.db, taskId, row.state, 'DISCARD', {
+          reason: 'manual',
+        });
+        discarded += 1;
+        await refreshIngestReply(deps, taskId);
+      } catch (error) {
+        skipped.push({
+          id: taskId,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return reply.code(200).send({ ok: true, discarded, skipped });
+  });
+
+  // Manually start the browser agent (Tier-2 form-discovery investigation) on
+  // a maybe-job the pipeline can't process. Eligible when the task is still
+  // actionable (not DISCARDED/SUBMITTED/CONFIRMED) and the agent can help:
+  // the job's platform is 'unknown' (unsupported) OR the job was recorded
+  // from a screenshot (a kind='screenshot' document exists for it).
+  // triggerInvestigation self-gates on config and never throws; `fired`
+  // reports whether a run actually started.
+  app.post('/tasks/:id/investigate', async (request, reply) => {
+    const parsed = taskParamsSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid task id', issues: parsed.error.issues });
+    }
+    const taskId = parsed.data.id;
+    const rows = await deps.db
+      .select({ task: applicationTasks, job: jobs })
+      .from(applicationTasks)
+      .innerJoin(jobs, eq(applicationTasks.jobId, jobs.id))
+      .where(eq(applicationTasks.id, taskId))
+      .limit(1);
+    const row = rows[0];
+    if (!row) {
+      return reply.code(404).send({ error: 'task not found' });
+    }
+    const state = row.task.state;
+    if (
+      state === 'DISCARDED' ||
+      state === 'SUBMITTED' ||
+      state === 'CONFIRMED'
+    ) {
+      return reply
+        .code(400)
+        .send({ error: `cannot investigate a task in state '${state}'` });
+    }
+    let eligible = row.job.platform === 'unknown';
+    if (!eligible) {
+      // Supported platform: only a screenshot-recorded job needs the agent.
+      const shots = await deps.db
+        .select({ id: documents.id })
+        .from(documents)
+        .where(
+          and(
+            eq(documents.jobId, row.job.id),
+            eq(documents.kind, 'screenshot'),
+          ),
+        )
+        .limit(1);
+      eligible = shots[0] !== undefined;
+    }
+    if (!eligible) {
+      return reply.code(400).send({
+        error: `task is not eligible for investigation: platform '${row.job.platform}' is supported and the job has no screenshot`,
+      });
+    }
+    const fired = await triggerInvestigation(deps, taskId);
+    if (fired) {
+      // Best-effort: the #ingest reply shows "discovering form…" right away.
+      await refreshIngestReply(deps, taskId);
+    }
+    return reply.code(200).send({ ok: true, fired });
   });
 
   // Approve a REVIEW task: fill but never SUBMIT. Greenhouse/lever/ashby build

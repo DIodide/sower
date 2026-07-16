@@ -1,6 +1,6 @@
 import type { TaskState } from '@sower/core';
 import { applicationTasks, jobs } from '@sower/db';
-import { and, count, desc, eq, inArray, type SQL } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, ne, type SQL } from 'drizzle-orm';
 import Link from 'next/link';
 import { getDb } from '../lib/db';
 import {
@@ -78,7 +78,12 @@ export default async function Page({
       (sum, s) => sum + (countByState.get(s) ?? 0),
       0,
     );
-  const totalTasks = stateCounts.reduce((sum, r) => sum + r.n, 0);
+  // Discarded tasks are removed from the queue: they count toward nothing
+  // here and are hidden from the default list (an explicit ?state=DISCARDED
+  // filter still shows them).
+  const totalTasks = stateCounts
+    .filter((r) => r.state !== 'DISCARDED')
+    .reduce((sum, r) => sum + r.n, 0);
 
   const conditions: SQL[] = [];
   if (stateFilter) {
@@ -87,6 +92,8 @@ export default async function Page({
     conditions.push(
       inArray(applicationTasks.state, BUCKETS[viewFilter].states),
     );
+  } else {
+    conditions.push(ne(applicationTasks.state, 'DISCARDED'));
   }
   if (platformFilter) conditions.push(eq(jobs.platform, platformFilter));
 

@@ -1,3 +1,4 @@
+import type { PlatformRef } from '@sower/core';
 import { canonicalizeUrl } from '@sower/core';
 import { applicationTasks } from '@sower/db';
 import type { DiscordChannelMessage } from '@sower/notify';
@@ -12,8 +13,11 @@ import { ingestJob } from './ingest.js';
 import { refreshIngestReply } from './ingest-reply.js';
 import { triggerInvestigation } from './investigate-trigger.js';
 import {
+  extractJobLinks,
   extractUrlsFromText,
-  fetchJobLinks,
+  fetchPageHtml,
+  isIngestableJobUrl,
+  sniffGreenhouseJob,
   unwrapRedirectShim,
 } from './link-extract.js';
 import type { Deps } from './types.js';
@@ -82,63 +86,97 @@ export interface MessageIngestSummary {
   screenshotOutcomes: AttachmentOutcome[];
 }
 
-/** Workday returns platform:'workday' for ANY tenant host; only a /job/ or
- *  /details/ path is an actual posting we can discover. Everything else
- *  (login/careers landing) falls through to directory-expand-or-record.
- *  Exported so refreshIngestReply classifies a stored job the same way. */
-export function isIngestableJobUrl(platform: string, url: string): boolean {
-  if (platform !== 'workday') return true;
-  try {
-    return /\/(job|details)\//i.test(new URL(url).pathname);
-  } catch {
-    return false;
-  }
+/** True when detectPlatform found a posting an adapter can discover as-is. */
+function isSupportedJobRef(ref: PlatformRef, url: string): boolean {
+  return (
+    getAdapter(ref.platform) !== null &&
+    ref.tenant !== null &&
+    isIngestableJobUrl(ref.platform, url)
+  );
 }
 
-/** Classify one URL and route it: supported→ingest, unknown→expand-or-record. */
+/** Ingest a supported-platform URL and map the result to its outcome. */
+async function ingestSupported(
+  deps: Deps,
+  url: string,
+  platform: string,
+): Promise<UrlOutcome> {
+  const result = await ingestJob(deps, { url, source: SOURCE });
+  return result.duplicate
+    ? {
+        url,
+        kind: 'duplicate',
+        jobId: result.jobId,
+        taskId: result.taskId,
+        originalSource: result.originalSource,
+        originalCreatedAt: result.originalCreatedAt,
+      }
+    : {
+        url,
+        kind: 'ingested',
+        platform,
+        jobId: result.jobId,
+        taskId: result.taskId,
+      };
+}
+
+/**
+ * Classify one URL and route it, in order: supported-pre-resolve →
+ * resolve+detect → greenhouse-sniff → directory-expand → record+park.
+ */
 async function classifyAndIngest(
   deps: Deps,
   url: string,
   depth: number,
 ): Promise<UrlOutcome> {
   try {
-    const resolved = await resolveUrl(unwrapRedirectShim(url));
+    const unwrapped = unwrapRedirectShim(url);
+
+    // Detect BEFORE resolving: a supported ATS URL carries tenant+id, and its
+    // adapter discovers via the platform API, so following redirects adds
+    // nothing — and LOSES the identity when the board redirects to the
+    // company's own domain (job-boards.greenhouse.io/stripe/jobs/… →
+    // stripe.com/jobs/…). Shorteners (t.co, lnkd.in) detect as unknown here
+    // and still resolve below.
+    const preRef = detectPlatform(canonicalizeUrl(unwrapped));
+    if (isSupportedJobRef(preRef, unwrapped)) {
+      return await ingestSupported(deps, unwrapped, preRef.platform);
+    }
+
+    const resolved = await resolveUrl(unwrapped);
     const ref = detectPlatform(canonicalizeUrl(resolved));
 
     // Supported platform with a resolvable tenant → normal ingest (enqueues).
-    if (
-      getAdapter(ref.platform) &&
-      ref.tenant !== null &&
-      isIngestableJobUrl(ref.platform, resolved)
-    ) {
-      const result = await ingestJob(deps, { url: resolved, source: SOURCE });
-      return result.duplicate
-        ? {
-            url: resolved,
-            kind: 'duplicate',
-            jobId: result.jobId,
-            taskId: result.taskId,
-            originalSource: result.originalSource,
-            originalCreatedAt: result.originalCreatedAt,
-          }
-        : {
-            url: resolved,
-            kind: 'ingested',
-            platform: ref.platform,
-            jobId: result.jobId,
-            taskId: result.taskId,
-          };
+    if (isSupportedJobRef(ref, resolved)) {
+      return await ingestSupported(deps, resolved, ref.platform);
     }
 
-    // Unknown/unsupported at the top level → maybe it's a directory page.
+    // Still unknown at the top level → fetch the page ONCE and inspect it:
+    // first sniff for a greenhouse job embedded on a custom domain (ingest
+    // the canonical board URL so it dedupes with board-hosted pastes), then
+    // fall back to treating the page as a directory of job links.
     if (depth === 0) {
-      const links = await fetchJobLinks(resolved);
-      if (links.length > 0) {
-        const children: UrlOutcome[] = [];
-        for (const link of links.slice(0, MAX_DIRECTORY_LINKS)) {
-          children.push(await classifyAndIngest(deps, link, depth + 1));
+      const page = await fetchPageHtml(resolved);
+      if (page) {
+        // The gh_jid marker may live on the fetched page URL, the resolved
+        // URL, or the original one — redirects routinely strip it (live:
+        // stripe.com/jobs/search?gh_jid=N 302s to a slug URL without it).
+        // The sniff is pure, so try each candidate URL against the HTML.
+        const sniffed = [...new Set([page.url, resolved, unwrapped])]
+          .map((candidate) => sniffGreenhouseJob(page.html, candidate))
+          .find((hit) => hit !== null);
+        if (sniffed) {
+          const canonical = `https://job-boards.greenhouse.io/${sniffed.tenant}/jobs/${sniffed.jobId}`;
+          return await ingestSupported(deps, canonical, 'greenhouse');
         }
-        return { url: resolved, kind: 'directory', children };
+        const links = extractJobLinks(page.html, page.url);
+        if (links.length > 0) {
+          const children: UrlOutcome[] = [];
+          for (const link of links.slice(0, MAX_DIRECTORY_LINKS)) {
+            children.push(await classifyAndIngest(deps, link, depth + 1));
+          }
+          return { url: resolved, kind: 'directory', children };
+        }
       }
     }
 

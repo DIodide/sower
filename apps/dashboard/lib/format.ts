@@ -88,6 +88,9 @@ export const STATE_META: Record<TaskState, StateMeta> = {
   CONFIRMED: { label: 'Confirmed', tone: 'success', bucket: 'done' },
   FAILED: { label: 'Failed', tone: 'danger', bucket: 'stalled' },
   DUPLICATE: { label: 'Duplicate', tone: 'neutral', bucket: 'stalled' },
+  // Deliberately removed from the queue by a human; hidden from the default
+  // task list (not listed in any BUCKETS entry — reachable via ?state=).
+  DISCARDED: { label: 'Discarded', tone: 'neutral', bucket: 'stalled' },
 };
 
 const FALLBACK_META: StateMeta = {

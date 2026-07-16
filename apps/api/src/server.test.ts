@@ -16,6 +16,8 @@ const platformState = vi.hoisted(() => ({
     string,
     { platform: string; tenant: string | null; externalId: string | null }
   >,
+  /** URLs the mocked resolveUrl was asked to resolve (identity resolve). */
+  resolveCalls: [] as string[],
 }));
 
 const sourcesState = vi.hoisted(() => ({
@@ -40,6 +42,22 @@ vi.mock('./ingest-reply.js', () => ({
   }),
 }));
 
+/** Tasks the manual investigate endpoint asked triggerInvestigation to run. */
+const investigateState = vi.hoisted(() => ({
+  calls: [] as string[],
+  /** What the mocked trigger reports back (self-gated off => false). */
+  fired: true,
+}));
+
+// The trigger itself is proven in investigate-trigger.test.ts; here we only
+// assert the endpoint gates + invokes it (it never throws).
+vi.mock('./investigate-trigger.js', () => ({
+  triggerInvestigation: vi.fn(async (_deps: unknown, taskId: string) => {
+    investigateState.calls.push(taskId);
+    return investigateState.fired;
+  }),
+}));
+
 vi.mock('@sower/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@sower/core')>()),
   canonicalizeUrl: (url: string) => url.toLowerCase().replace(/\/+$/, ''),
@@ -48,7 +66,10 @@ vi.mock('@sower/core', async (importOriginal) => ({
 vi.mock('@sower/platforms', () => ({
   detectPlatform: (url: string) =>
     platformState.byUrl[url] ?? platformState.ref,
-  resolveUrl: async (url: string) => url,
+  resolveUrl: async (url: string) => {
+    platformState.resolveCalls.push(url);
+    return url;
+  },
   // Only greenhouse has an adapter in this mock (the real registry also
   // registers ashby/lever — covered by @sower/platforms registry.test.ts).
   getAdapter: (platform: string) =>
@@ -192,8 +213,11 @@ beforeEach(() => {
     externalId: 'swe-1',
   };
   platformState.byUrl = {};
+  platformState.resolveCalls = [];
   sourcesState.listings = [];
   refreshState.calls = [];
+  investigateState.calls = [];
+  investigateState.fired = true;
 });
 
 describe('buildServer', () => {
@@ -1228,6 +1252,343 @@ describe('buildServer', () => {
       expect(res.statusCode).toBe(401);
     });
   });
+
+  describe('POST /tasks/:id/discard', () => {
+    const TASK_ID = '7d8e9f10-1112-4314-a516-b71819c2d2e2';
+
+    function inject(app: ReturnType<typeof buildServer>, id: string = TASK_ID) {
+      return app.inject({
+        method: 'POST',
+        url: `/tasks/${id}/discard`,
+        headers: { 'x-api-key': 'test-key' },
+      });
+    }
+
+    it('discards an active task: DISCARD transition + event, then refreshes the reply', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[{ state: 'NEEDS_INPUT' }]],
+        insertResults: [[]], // DISCARD event
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true });
+
+      const taskUpdate = writes.find(
+        (w) => w.method === 'update' && w.table === applicationTasks,
+      );
+      expect(taskUpdate?.arg).toMatchObject({ state: 'DISCARDED' });
+
+      const discardEvent = writes
+        .filter((w) => w.method === 'insert' && w.table === events)
+        .map((w) => w.arg as Record<string, unknown>)
+        .find((arg) => arg.type === 'DISCARD');
+      expect(discardEvent).toMatchObject({
+        taskId: TASK_ID,
+        fromState: 'NEEDS_INPUT',
+        toState: 'DISCARDED',
+        data: { reason: 'manual' },
+      });
+
+      // The #ingest reply line flips to "discarded".
+      expect(refreshState.calls).toEqual([TASK_ID]);
+    });
+
+    it('is idempotent: an already-DISCARDED task is a 200 no-op (but still refreshes)', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[{ state: 'DISCARDED' }]],
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true });
+      expect(writes).toEqual([]);
+      // Recovers a reply whose earlier edit failed.
+      expect(refreshState.calls).toEqual([TASK_ID]);
+    });
+
+    it('responds 409 for a sent application (SUBMITTED/CONFIRMED)', async () => {
+      for (const state of ['SUBMITTED', 'CONFIRMED']) {
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({ selectResults: [[{ state }]], writes });
+        const { deps } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app);
+
+        expect(res.statusCode).toBe(409);
+        expect(res.json()).toEqual({
+          error: `cannot discard a task in state '${state}'`,
+        });
+        expect(writes).toEqual([]);
+      }
+      expect(refreshState.calls).toEqual([]);
+    });
+
+    it('responds 404 for a missing task and 400 for an invalid id', async () => {
+      const { deps } = createDeps(createFakeDb({ selectResults: [[]] }));
+      const app = buildServer(deps);
+
+      const missing = await inject(app);
+      expect(missing.statusCode).toBe(404);
+      expect(missing.json()).toEqual({ error: 'task not found' });
+
+      const invalid = await inject(app, 'not-a-uuid');
+      expect(invalid.statusCode).toBe(400);
+      expect(invalid.json()).toMatchObject({ error: 'invalid task id' });
+    });
+
+    it('responds 401 without an api key (guarded like every route)', async () => {
+      const { deps } = createDeps(createFakeDb());
+      const app = buildServer(deps);
+      const res = await app.inject({
+        method: 'POST',
+        url: `/tasks/${TASK_ID}/discard`,
+      });
+      expect(res.statusCode).toBe(401);
+    });
+  });
+
+  describe('POST /tasks/discard (bulk)', () => {
+    const ID_A = '7d8e9f10-1112-4314-a516-b71819c2d2e2';
+    const ID_B = 'a1b2c3d4-e5f6-4788-99aa-bbccddeeff00';
+    const ID_C = '00112233-4455-4677-8899-aabbccddeeff';
+
+    function inject(app: ReturnType<typeof buildServer>, payload: unknown) {
+      return app.inject({
+        method: 'POST',
+        url: '/tasks/discard',
+        headers: { 'x-api-key': 'test-key' },
+        payload: payload as Record<string, unknown>,
+      });
+    }
+
+    it('is tolerant per task: discards what it can and reports the rest as skipped', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [
+          [{ state: 'QUEUED' }], // A: discardable
+          [{ state: 'SUBMITTED' }], // B: sent — skipped
+          [], // C: missing — skipped
+        ],
+        insertResults: [[]], // A's DISCARD event
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, { taskIds: [ID_A, ID_B, ID_C] });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        ok: true,
+        discarded: 1,
+        skipped: [
+          { id: ID_B, reason: "cannot discard a task in state 'SUBMITTED'" },
+          { id: ID_C, reason: 'task not found' },
+        ],
+      });
+
+      // Exactly one task transitioned...
+      const taskUpdates = writes.filter(
+        (w) => w.method === 'update' && w.table === applicationTasks,
+      );
+      expect(taskUpdates).toHaveLength(1);
+      expect(taskUpdates[0]?.arg).toMatchObject({ state: 'DISCARDED' });
+      const discardEvents = writes
+        .filter((w) => w.method === 'insert' && w.table === events)
+        .map((w) => w.arg as Record<string, unknown>)
+        .filter((arg) => arg.type === 'DISCARD');
+      expect(discardEvents).toHaveLength(1);
+      expect(discardEvents[0]).toMatchObject({ taskId: ID_A });
+      // ...and only that task's reply was refreshed.
+      expect(refreshState.calls).toEqual([ID_A]);
+    });
+
+    it('reports an already-discarded task as skipped (nothing rewritten)', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[{ state: 'DISCARDED' }]],
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, { taskIds: [ID_A] });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        ok: true,
+        discarded: 0,
+        skipped: [{ id: ID_A, reason: 'already discarded' }],
+      });
+      expect(writes).toEqual([]);
+    });
+
+    it('responds 400 for an invalid body (missing/empty/non-uuid/oversized)', async () => {
+      const { deps } = createDeps(createFakeDb());
+      const app = buildServer(deps);
+      for (const payload of [
+        {},
+        { taskIds: [] },
+        { taskIds: ['not-a-uuid'] },
+        { taskIds: Array.from({ length: 101 }, () => ID_A) },
+      ]) {
+        const res = await inject(app, payload);
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toMatchObject({ error: 'invalid body' });
+      }
+    });
+
+    it('responds 401 without an api key (guarded like every route)', async () => {
+      const { deps } = createDeps(createFakeDb());
+      const app = buildServer(deps);
+      const res = await app.inject({
+        method: 'POST',
+        url: '/tasks/discard',
+        payload: { taskIds: [ID_A] },
+      });
+      expect(res.statusCode).toBe(401);
+    });
+  });
+
+  describe('POST /tasks/:id/investigate', () => {
+    const TASK_ID = '7d8e9f10-1112-4314-a516-b71819c2d2e2';
+
+    function taskJobRow(overrides: { state?: string; platform?: string } = {}) {
+      return {
+        task: { id: TASK_ID, state: overrides.state ?? 'NEEDS_INPUT' },
+        job: {
+          id: 'job-u',
+          platform: overrides.platform ?? 'unknown',
+          url: 'https://weirdats.example/jobs/1',
+        },
+      };
+    }
+
+    function inject(app: ReturnType<typeof buildServer>, id: string = TASK_ID) {
+      return app.inject({
+        method: 'POST',
+        url: `/tasks/${id}/investigate`,
+        headers: { 'x-api-key': 'test-key' },
+      });
+    }
+
+    it('fires the browser agent for an unsupported (platform unknown) task', async () => {
+      const db = createFakeDb({ selectResults: [[taskJobRow()]] });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, fired: true });
+      expect(investigateState.calls).toEqual([TASK_ID]);
+      // The reply reflects "discovering form…" right away.
+      expect(refreshState.calls).toEqual([TASK_ID]);
+    });
+
+    it('reports fired:false when the trigger self-gates off (and skips the refresh)', async () => {
+      investigateState.fired = false;
+      const db = createFakeDb({ selectResults: [[taskJobRow()]] });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, fired: false });
+      expect(investigateState.calls).toEqual([TASK_ID]);
+      expect(refreshState.calls).toEqual([]);
+    });
+
+    it('fires for a supported-platform task whose job has a screenshot document', async () => {
+      const db = createFakeDb({
+        selectResults: [
+          [taskJobRow({ platform: 'greenhouse' })],
+          [{ id: 'doc-1' }], // kind='screenshot' document exists
+        ],
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, fired: true });
+      expect(investigateState.calls).toEqual([TASK_ID]);
+    });
+
+    it('responds 400 for a supported-platform task without a screenshot', async () => {
+      const db = createFakeDb({
+        selectResults: [
+          [taskJobRow({ platform: 'greenhouse' })],
+          [], // no screenshot documents
+        ],
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app);
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({
+        error:
+          "task is not eligible for investigation: platform 'greenhouse' is supported and the job has no screenshot",
+      });
+      expect(investigateState.calls).toEqual([]);
+    });
+
+    it('responds 400 for a DISCARDED/SUBMITTED/CONFIRMED task', async () => {
+      for (const state of ['DISCARDED', 'SUBMITTED', 'CONFIRMED']) {
+        const db = createFakeDb({ selectResults: [[taskJobRow({ state })]] });
+        const { deps } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app);
+
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toEqual({
+          error: `cannot investigate a task in state '${state}'`,
+        });
+      }
+      expect(investigateState.calls).toEqual([]);
+    });
+
+    it('responds 404 for a missing task and 400 for an invalid id', async () => {
+      const { deps } = createDeps(createFakeDb({ selectResults: [[]] }));
+      const app = buildServer(deps);
+
+      const missing = await inject(app);
+      expect(missing.statusCode).toBe(404);
+      expect(missing.json()).toEqual({ error: 'task not found' });
+
+      const invalid = await inject(app, 'not-a-uuid');
+      expect(invalid.statusCode).toBe(400);
+      expect(invalid.json()).toMatchObject({ error: 'invalid task id' });
+    });
+
+    it('responds 401 without an api key (guarded like every route)', async () => {
+      const { deps } = createDeps(createFakeDb());
+      const app = buildServer(deps);
+      const res = await app.inject({
+        method: 'POST',
+        url: `/tasks/${TASK_ID}/investigate`,
+      });
+      expect(res.statusCode).toBe(401);
+      expect(investigateState.calls).toEqual([]);
+    });
+  });
 });
 
 describe('ingestJob duplicate enrichment', () => {
@@ -1279,5 +1640,55 @@ describe('ingestJob duplicate enrichment', () => {
       originalSource: 'discord',
       originalCreatedAt: createdAt,
     });
+  });
+});
+
+describe('ingestJob pre-resolve detection', () => {
+  it('skips resolveUrl when the input URL already detects as a supported posting', async () => {
+    // Default mock ref: greenhouse/acme — discoverable straight from the URL.
+    const db = createFakeDb({
+      selectResults: [[]], // no duplicate
+      insertResults: [[{ id: 'job-1' }], [{ id: 'task-1' }]],
+    });
+    const { deps, enqueueProcess } = createDeps(db);
+    const result = await ingestJob(deps, {
+      url: 'https://job-boards.greenhouse.io/acme/jobs/123',
+    });
+    expect(result).toMatchObject({ duplicate: false, state: 'QUEUED' });
+    expect(enqueueProcess).toHaveBeenCalledWith('task-1');
+    // The whole point: the board URL is never GETed, so a custom-domain
+    // redirect (job-boards.greenhouse.io/stripe → stripe.com) cannot strip
+    // the platform identity before detection.
+    expect(platformState.resolveCalls).toEqual([]);
+  });
+
+  it('still resolves an unknown-platform URL before detecting', async () => {
+    platformState.ref = { platform: 'unknown', tenant: null, externalId: null };
+    const db = createFakeDb({
+      selectResults: [[]],
+      insertResults: [[{ id: 'job-2' }], [{ id: 'task-2' }]],
+    });
+    const { deps } = createDeps(db);
+    const result = await ingestJob(deps, {
+      url: 'https://example.com/careers/some-job',
+    });
+    expect(result).toMatchObject({ duplicate: false, state: 'NEEDS_INPUT' });
+    expect(platformState.resolveCalls).toEqual([
+      'https://example.com/careers/some-job',
+    ]);
+  });
+
+  it('never resolves when resolve:false, even for an unknown URL', async () => {
+    platformState.ref = { platform: 'unknown', tenant: null, externalId: null };
+    const db = createFakeDb({
+      selectResults: [[]],
+      insertResults: [[{ id: 'job-3' }], [{ id: 'task-3' }]],
+    });
+    const { deps } = createDeps(db);
+    await ingestJob(deps, {
+      url: 'https://cdn.discordapp.com/attachments/1/2/shot.png',
+      resolve: false,
+    });
+    expect(platformState.resolveCalls).toEqual([]);
   });
 });
