@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useActionState, useState } from 'react';
+import { useActionState } from 'react';
 import { SECTIONS } from '../../../lib/format';
 import type { ActionResult } from './actions';
 import {
@@ -87,27 +87,21 @@ const LABELS: Record<Mode, { idle: string; className: string; title: string }> =
     },
   };
 
-/** Modes carrying an optional free-text note. Two-step confirm: the first
- *  click only reveals the note input (and a confirm label); the second click
- *  performs the action. */
-const NOTE_MODES: Partial<
-  Record<Mode, { placeholder: string; confirm: string }>
-> = {
+/** Modes carrying an optional free-text note. The input is ALWAYS visible
+ *  next to the button and the action fires on the FIRST press — the note is
+ *  optional and can be typed before (or never). A hide-until-clicked reveal
+ *  proved backwards: it hid the field until after the decision was made. */
+const NOTE_MODES: Partial<Record<Mode, { placeholder: string }>> = {
   discard: {
     placeholder: 'why? (optional — saved with the discard)',
-    confirm: 'Confirm discard',
   },
   'mark-applied': {
     placeholder: 'where/how? (optional)',
-    confirm: 'Confirm — mark applied',
   },
 };
 
 export function TaskActions({ taskId, mode }: { taskId: string; mode: Mode }) {
   const router = useRouter();
-  // Two-step confirm for the note-carrying modes: armed = the input is
-  // revealed and the next click really performs the action.
-  const [armed, setArmed] = useState(false);
   const [result, formAction, pending] = useActionState<
     ActionResult | null,
     FormData
@@ -146,28 +140,19 @@ export function TaskActions({ taskId, mode }: { taskId: string; mode: Mode }) {
 
   const label = LABELS[mode];
   const noteMode = NOTE_MODES[mode];
-  const twoStep = noteMode !== undefined && !armed;
   return (
     <form action={formAction}>
       <div className="row">
         <button
-          // Step one only arms the confirm — nothing submits yet.
-          type={twoStep ? 'button' : 'submit'}
+          type="submit"
           disabled={pending}
           className={label.className}
           title={label.title}
-          onClick={twoStep ? () => setArmed(true) : undefined}
         >
-          {pending
-            ? 'Working…'
-            : armed && noteMode
-              ? noteMode.confirm
-              : label.idle}
+          {pending ? 'Working…' : label.idle}
         </button>
-        {noteMode && armed ? (
+        {noteMode ? (
           <input
-            // biome-ignore lint/a11y/noAutofocus: the input appears because the user just clicked the button beside it — focus continues their action
-            autoFocus
             type="text"
             name="note"
             className="field discard-note"
