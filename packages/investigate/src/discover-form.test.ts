@@ -2,6 +2,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { chromium } from 'playwright';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { JobMetadata, RawExtraction } from './discover-form.js';
+import { detectHandoffUrl } from './discover-form.js';
 import { discoverForm } from './index.js';
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
@@ -289,6 +290,9 @@ describe('discoverForm', () => {
     expect(result.descriptionMarkdown).toBe(
       DEFAULT_METADATA.descriptionMarkdown,
     );
+    // No supported-ATS hop and no explicit deadline in the JD.
+    expect(result.handoffUrl).toBeUndefined();
+    expect(result.deadline).toBeUndefined();
 
     // The context is hardened: real-Chrome UA (no HeadlessChrome), normal
     // viewport, locale, and a webdriver-masking init script.
@@ -669,6 +673,73 @@ describe('discoverForm', () => {
     expect(iframeStep?.output).toContain(frameUrl);
     expect(iframeStep?.output).toContain('greenhouse');
     expect(queryMock).not.toHaveBeenCalled();
+    // The embed src names no posting (?for= without &token=) — an ingest
+    // could not identify the job, so no machine-readable handoff is offered.
+    expect(result.handoffUrl).toBeUndefined();
+  });
+
+  it('sets handoffUrl (minus the /apply suffix) when the apply hop lands on a Workday page', async () => {
+    const workdayApplyUrl =
+      'https://salesforce.wd12.myworkdayjobs.com/External_Career_Site/job/California---San-Francisco/Summer-2027-Intern---APM_JR-322948/apply';
+    fakePlaywright({
+      extractions: [
+        { ...EMPTY_EXTRACTION, applyCandidate: 'Apply' },
+        // The Workday sign-in wall: no native controls the extractor keeps.
+        { ...EMPTY_EXTRACTION, hasPasswordField: true },
+      ],
+      urls: ['https://careers.example.com/jobs/apm-intern', workdayApplyUrl],
+    });
+
+    const { result, transcript } = await discoverForm({
+      url: 'https://careers.example.com/jobs/apm-intern',
+    });
+
+    // The scraped metadata still comes through on the formFound:false result…
+    expect(result.formFound).toBe(false);
+    expect(result.company).toBe('Example Co');
+    expect(result.title).toBe('Software Engineer Intern');
+    // …and the supported-platform landing is machine-readable: the posting
+    // URL, i.e. the final page minus its trailing /apply flow segment.
+    expect(result.handoffUrl).toBe(
+      'https://salesforce.wd12.myworkdayjobs.com/External_Career_Site/job/California---San-Francisco/Summer-2027-Intern---APM_JR-322948',
+    );
+    const handoffStep = transcript.find(
+      (s) => s.kind === 'system' && s.text === 'supported_ats_handoff',
+    );
+    expect(handoffStep?.output).toContain(result.handoffUrl as string);
+  });
+
+  it('sets handoffUrl from a fully-identified greenhouse embed iframe', async () => {
+    const frameUrl =
+      'https://boards.greenhouse.io/embed/job_app?for=example&token=4567';
+    fakePlaywright({
+      extractions: [{ ...EMPTY_EXTRACTION, iframeCount: 1 }],
+      frames: [{ url: frameUrl }],
+    });
+
+    const { result } = await discoverForm({
+      url: 'https://jobs.example.com/posting/123',
+    });
+
+    expect(result.formFound).toBe(false);
+    expect(result.handoffUrl).toBe(frameUrl);
+  });
+
+  it('parses an explicit deadline out of the scraped JD markdown (never inferred)', async () => {
+    fakePlaywright({
+      extractions: [EMPTY_EXTRACTION],
+      metadata: {
+        ...DEFAULT_METADATA,
+        descriptionMarkdown:
+          '# APM Intern\n\nGreat role.\n\n**Apply by January 9, 2027.**',
+      },
+    });
+
+    const { result } = await discoverForm({
+      url: 'https://jobs.example.com/posting/123',
+    });
+
+    expect(result.deadline).toBe('2027-01-09T00:00:00.000Z');
   });
 
   it('returns formFound:false when navigation fails (never throws)', async () => {
@@ -722,5 +793,62 @@ describe('discoverForm', () => {
     expect(transcript.some((s) => s.tool === 'browser.extract')).toBe(true);
     expect(transcript.some((s) => s.kind === 'result')).toBe(true);
     expect(browser.close).toHaveBeenCalled();
+  });
+});
+
+describe('detectHandoffUrl', () => {
+  it('strips the trailing /apply flow path from a workday posting URL', () => {
+    expect(
+      detectHandoffUrl(
+        'https://salesforce.wd12.myworkdayjobs.com/External_Career_Site/job/CA/APM-Intern_JR1/apply/autofillWithResume',
+      ),
+    ).toBe(
+      'https://salesforce.wd12.myworkdayjobs.com/External_Career_Site/job/CA/APM-Intern_JR1',
+    );
+  });
+
+  it('refuses a workday URL whose cleaned path names no posting (login-only)', () => {
+    expect(
+      detectHandoffUrl(
+        'https://acme.wd1.myworkdayjobs.com/External_Career_Site/login',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('passes a greenhouse board posting URL through unchanged', () => {
+    expect(
+      detectHandoffUrl('https://job-boards.greenhouse.io/stripe/jobs/7954688'),
+    ).toBe('https://job-boards.greenhouse.io/stripe/jobs/7954688');
+  });
+
+  it('keeps the identity query of a greenhouse embed URL (drops the hash)', () => {
+    expect(
+      detectHandoffUrl(
+        'https://boards.greenhouse.io/embed/job_app?for=acme&token=99#app',
+      ),
+    ).toBe('https://boards.greenhouse.io/embed/job_app?for=acme&token=99');
+  });
+
+  it('strips /apply from lever and /application from ashby posting URLs', () => {
+    expect(detectHandoffUrl('https://jobs.lever.co/acme/uuid-1/apply')).toBe(
+      'https://jobs.lever.co/acme/uuid-1',
+    );
+    expect(
+      detectHandoffUrl('https://jobs.ashbyhq.com/acme/uuid-2/application'),
+    ).toBe('https://jobs.ashbyhq.com/acme/uuid-2');
+  });
+
+  it('returns undefined for unsupported hosts and unparseable URLs', () => {
+    expect(
+      detectHandoffUrl('https://careers.example.com/jobs/1/apply'),
+    ).toBeUndefined();
+    // Lookalike host — NOT {tenant}.wd{N}.myworkdayjobs.com.
+    expect(
+      detectHandoffUrl(
+        'https://evil.example.myworkdayjobs.com.attacker.io/x/job/y/z',
+      ),
+    ).toBeUndefined();
+    expect(detectHandoffUrl('not a url')).toBeUndefined();
+    expect(detectHandoffUrl('file:///etc/passwd')).toBeUndefined();
   });
 });

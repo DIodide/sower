@@ -99,6 +99,36 @@ describe('GreenhouseAdapter.discover', () => {
     expect(spec.applyUrl).toBe('https://stripe.com/jobs/search?gh_jid=7954688');
   });
 
+  it('leaves deadline unset when application_deadline is null (the fixture)', async () => {
+    // The fixture proves the boards API DOES expose the field — as null.
+    expect(fixture.application_deadline).toBeNull();
+    const spec = await adapter.discover(ref, url);
+    expect(spec.deadline).toBeUndefined();
+  });
+
+  it('maps a published application_deadline to spec.deadline (UTC midnight)', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ...fixture,
+        application_deadline: '2026-08-15T23:59:00-04:00',
+      }),
+    });
+    const spec = await adapter.discover(ref, url);
+    expect(spec.deadline).toBe('2026-08-15T00:00:00.000Z');
+  });
+
+  it('ignores an unparseable application_deadline instead of guessing', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ ...fixture, application_deadline: 'rolling' }),
+    });
+    const spec = await adapter.discover(ref, url);
+    expect(spec.deadline).toBeUndefined();
+  });
+
   it('falls back to offices[].name for location only when location.name is absent', async () => {
     fetchMock.mockResolvedValue({
       ok: true,

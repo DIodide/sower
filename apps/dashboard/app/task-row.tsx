@@ -46,6 +46,11 @@ export interface TaskRowData {
   employmentType: string | null;
   /** Unsupported row with no agent currently running — offer Investigate. */
   canInvestigate: boolean;
+  /** Compact deadline chip label ("Jul 30"); null = no chip (no deadline,
+   *  or a Sent/Archive row where it would be noise). */
+  deadline: string | null;
+  /** Deadline within 7 days (or past) — the chip gets the red tint. */
+  deadlineSoon: boolean;
   /** Precomputed on the server so hydration never disagrees on "now". */
   updatedRel: string;
   updatedAbs: string;
@@ -185,7 +190,8 @@ export function TaskRow({ row }: { row: TaskRowData }) {
   const statusTitle =
     row.phrase +
     (row.statusNote ? ` — ${row.statusNote}` : '') +
-    (row.employmentType ? ` · ${row.employmentType}` : '');
+    (row.employmentType ? ` · ${row.employmentType}` : '') +
+    (row.deadline ? ` · deadline ${row.deadline}` : '');
 
   return (
     <div className="grid-row">
@@ -222,6 +228,18 @@ export function TaskRow({ row }: { row: TaskRowData }) {
           ) : null}
           {row.employmentType ? (
             <span className="faint"> · {row.employmentType}</span>
+          ) : null}
+          {row.deadline ? (
+            <span
+              className={
+                row.deadlineSoon
+                  ? 'deadline-chip deadline-chip--soon'
+                  : 'deadline-chip'
+              }
+              title={`Application deadline: ${row.deadline}`}
+            >
+              ⏰ {row.deadline}
+            </span>
           ) : null}
         </span>
       </span>

@@ -36,6 +36,14 @@ export const jobs = pgTable('jobs', {
    * concurrent double-ingest cannot create two rows for the same posting.
    */
   dedupeKey: text('dedupe_key').unique(),
+  /**
+   * Application deadline (UTC midnight of the published date). Nullable —
+   * most postings state none. Written ONLY from explicit sources (an ATS
+   * deadline field or an "apply by <date>" statement in the JD, see
+   * extractDeadline in @sower/core), and only when currently null, so a
+   * recorded deadline is never silently rewritten.
+   */
+  deadline: timestamp('deadline', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
 });
 
@@ -280,6 +288,17 @@ export interface DiscoveredForm {
   descriptionMarkdown?: string;
   /** Employment type when the page exposes one (future extraction). */
   employmentType?: string;
+  /**
+   * ISO UTC-midnight application deadline parsed from an explicit
+   * "apply by <date>"-style statement in the scraped JD (never inferred).
+   */
+  deadline?: string;
+  /**
+   * When the apply flow landed on (or embedded) a SUPPORTED ATS host
+   * (workday/greenhouse/lever/ashby): the cleaned posting URL there, so the
+   * result endpoint can ingest it as a real supported task.
+   */
+  handoffUrl?: string;
   questions: Question[];
   confidence: 'high' | 'medium' | 'low';
   /** Incl. "form is JS-rendered/behind login/not found" when relevant. */

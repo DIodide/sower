@@ -1,6 +1,7 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   canTransition,
+  deadlineFromIsoDate,
   type JobSpec,
   type Platform,
   type TaskPriority,
@@ -32,6 +33,7 @@ import { triggerInvestigation } from './investigate-trigger.js';
 import { requestOtp, submitOtp } from './otp-actions.js';
 import {
   backfillJobFields,
+  persistJobDeadline,
   processTask,
   recordJobDescription,
 } from './process.js';
@@ -253,6 +255,14 @@ const discoveredFormSchema = z.object({
   // Not extracted by @sower/investigate yet — accepted now so the endpoint
   // needs no change when the agent starts reporting it.
   employmentType: z.string().max(200).optional(),
+  // Explicit application deadline (ISO; @sower/core extractDeadline output).
+  // Unparseable values are ignored at persist time, never guessed at.
+  deadline: z.string().max(64).optional(),
+  // Cleaned supported-ATS posting URL when the apply flow landed on one
+  // (workday/greenhouse/lever/ashby — see detectHandoffUrl). Deliberately
+  // NOT .url(): a malformed value must not cost us the transcript; ingestJob
+  // failing on it lands in the run's error column instead.
+  handoffUrl: z.string().max(2000).optional(),
   questions: z.array(discoveredQuestionSchema),
   confidence: z.enum(['high', 'medium', 'low']),
   notes: z.string(),
@@ -308,6 +318,12 @@ function buildDiscoveredJobSpec(
   };
   if (result.employmentType) {
     spec.employmentType = result.employmentType;
+  }
+  if (result.deadline) {
+    const deadline = deadlineFromIsoDate(result.deadline);
+    if (deadline) {
+      spec.deadline = deadline;
+    }
   }
   return spec;
 }
@@ -861,16 +877,33 @@ export function buildServer(deps: Deps): FastifyInstance {
         ? 'found'
         : 'not_found';
       let formError: string | null = null;
+      let handoff:
+        | { taskId?: string; jobId: string; duplicate: boolean }
+        | undefined;
 
-      if (result.formFound) {
-        const rows = await deps.db
-          .select({ job: jobs })
-          .from(applicationTasks)
-          .innerJoin(jobs, eq(applicationTasks.jobId, jobs.id))
-          .where(eq(applicationTasks.id, taskId))
-          .limit(1);
-        const job = rows[0]?.job;
-        if (job) {
+      // The task+job row is needed on EVERY outcome: the scraped metadata
+      // (title/company/JD markdown/deadline) persists regardless of whether
+      // a fillable form was found. Dropping it in the formFound:false case
+      // was a live data-loss bug — a correct scrape of the Salesforce
+      // posting (whose apply hop dead-ended on a Workday sign-in) and of a
+      // Google-Forms page (widgets aren't native controls) both left
+      // jobs.title/company NULL and the JD unrecorded.
+      const rows = await deps.db
+        .select({ task: applicationTasks, job: jobs })
+        .from(applicationTasks)
+        .innerJoin(jobs, eq(applicationTasks.jobId, jobs.id))
+        .where(eq(applicationTasks.id, taskId))
+        .limit(1);
+      const row = rows[0];
+      if (!row) {
+        // Transcript persistence must never be lost to a missing task row.
+        status = 'error';
+        formError = result.formFound
+          ? 'task not found; discovered form not written'
+          : 'task not found; scraped metadata not written';
+      } else {
+        const job = row.job;
+        if (result.formFound) {
           const spec = buildDiscoveredJobSpec(job, result);
           // Write the machine-extracted spec onto THIS task. No state change:
           // it stays NEEDS_INPUT (unknown platform — a human must verify the
@@ -889,31 +922,91 @@ export function buildServer(deps: Deps): FastifyInstance {
               confidence: result.confidence,
             },
           });
-          // An unsupported-link ingest records no title/company, so the
-          // dashboard showed "— untitled role" — fill the blanks from the
-          // agent's finding (never overwriting ingest-recorded values), and
-          // store the scraped JD markdown as a versioned job_descriptions
-          // row exactly like processTask does for adapter descriptions.
-          await backfillJobFields(deps.db, job, {
-            company: result.company,
-            title: result.title,
-          });
-          await recordJobDescription(
-            deps.db,
-            job.id,
-            result.descriptionMarkdown,
-          );
         } else {
-          // Transcript persistence must never be lost to a missing task row.
-          status = 'error';
-          formError = 'task not found; discovered form not written';
+          await deps.db.insert(events).values({
+            taskId,
+            type: 'FORM_NOT_FOUND',
+            data: { notes: result.notes, confidence: result.confidence },
+          });
+          // No form ⇒ no fresh spec to hang employmentType on — store it
+          // into an EXISTING spec only (a questions-less minimal spec would
+          // masquerade as a discovered form); with none, skip it. The
+          // title/company/JD/deadline persistence below is what matters.
+          if (result.employmentType && row.task.jobSpec) {
+            await deps.db
+              .update(applicationTasks)
+              .set({
+                jobSpec: {
+                  ...row.task.jobSpec,
+                  employmentType: result.employmentType,
+                },
+                updatedAt: new Date(),
+              })
+              .where(eq(applicationTasks.id, taskId));
+          }
         }
-      } else {
-        await deps.db.insert(events).values({
-          taskId,
-          type: 'FORM_NOT_FOUND',
-          data: { notes: result.notes, confidence: result.confidence },
+
+        // Persist the scraped metadata on BOTH outcomes. An unsupported-link
+        // ingest records no title/company, so the dashboard showed
+        // "— untitled role" — fill the blanks from the agent's finding
+        // (never overwriting ingest-recorded values), store the scraped JD
+        // markdown as a versioned job_descriptions row exactly like
+        // processTask does for adapter descriptions, and record an explicit
+        // deadline (agent-reported or parsed from the JD) when the jobs row
+        // has none yet.
+        await backfillJobFields(deps.db, job, {
+          company: result.company,
+          title: result.title,
         });
+        await recordJobDescription(deps.db, job.id, result.descriptionMarkdown);
+        await persistJobDeadline(deps.db, job, {
+          deadline: result.deadline,
+          description: result.descriptionMarkdown,
+        });
+
+        // Supported-platform handoff: the apply flow landed on an ATS an
+        // adapter CAN ingest (the Workday popup case). Feed it through the
+        // normal ingest pipeline — dedupe makes a re-POST safe — and, when a
+        // NEW supported task results, annotate THIS task's timeline. The
+        // original task deliberately stays parked with its metadata: a
+        // Workday task needs a captured session, so the human stays in the
+        // loop and can discard this one once the real task is queued.
+        if (result.handoffUrl) {
+          try {
+            const ingested = await ingestJob(deps, {
+              url: result.handoffUrl,
+              source: 'discord-investigation',
+            });
+            const platformRows = await deps.db
+              .select({ platform: jobs.platform })
+              .from(jobs)
+              .where(eq(jobs.id, ingested.jobId))
+              .limit(1);
+            const platform = platformRows[0]?.platform ?? 'unknown';
+            if (!ingested.duplicate && platform !== 'unknown') {
+              await deps.db.insert(events).values({
+                taskId,
+                type: 'HANDOFF',
+                data: {
+                  handoffUrl: result.handoffUrl,
+                  jobId: ingested.jobId,
+                  taskId: ingested.taskId,
+                  platform,
+                },
+              });
+            }
+            handoff = {
+              jobId: ingested.jobId,
+              ...(ingested.taskId ? { taskId: ingested.taskId } : {}),
+              duplicate: ingested.duplicate,
+            };
+          } catch (error) {
+            // An ingest hiccup must not force a Cloud Run Job retry: record
+            // it on the run (metadata above is already persisted) and 200.
+            status = 'error';
+            formError = error instanceof Error ? error.message : String(error);
+          }
+        }
       }
 
       if (runId !== undefined) {
@@ -935,7 +1028,9 @@ export function buildServer(deps: Deps): FastifyInstance {
       // failure must not change the 200 the investigator Job relies on.
       await refreshIngestReply(deps, taskId);
 
-      return reply.code(200).send({ ok: true });
+      return reply
+        .code(200)
+        .send(handoff !== undefined ? { ok: true, handoff } : { ok: true });
     }
 
     const { result, transcript } = body.data;

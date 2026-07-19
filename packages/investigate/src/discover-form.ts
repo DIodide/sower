@@ -33,6 +33,7 @@
  */
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Question } from '@sower/core';
+import { extractDeadline } from '@sower/core';
 import {
   type Browser,
   type BrowserContext,
@@ -67,6 +68,20 @@ export interface DiscoveredForm {
    * Never agent-generated. Capped at ~20k chars (truncation noted in notes).
    */
   descriptionMarkdown?: string;
+  /**
+   * ISO UTC-midnight application deadline parsed from an EXPLICIT
+   * "apply by <date>"-style statement in the scraped description markdown
+   * (@sower/core extractDeadline). Never inferred, never agent-generated.
+   */
+  deadline?: string;
+  /**
+   * When the final page (after Apply hops/popups) or a cross-origin iframe
+   * src lives on a SUPPORTED ATS host (workday/greenhouse/lever/ashby): the
+   * cleaned posting URL there (apply/login flow segments stripped), so the
+   * caller can ingest it directly as a real supported task. The final page
+   * URL wins over an iframe src when both qualify.
+   */
+  handoffUrl?: string;
   questions: Question[];
   confidence: 'high' | 'medium' | 'low';
   /** Incl. "form is JS-rendered/behind login/blocked by site" when relevant. */
@@ -667,6 +682,77 @@ function detectAtsHost(
   return undefined;
 }
 
+/** Apply/login flow path segments stripped from a handoff URL. */
+const HANDOFF_FLOW_SEGMENTS = new Set([
+  'apply',
+  'application',
+  'login',
+  'signin',
+  'sign-in',
+]);
+
+const WORKDAY_HANDOFF_HOST_RE = /^[a-z0-9-]+\.wd\d+\.myworkdayjobs\.com$/;
+
+/**
+ * Supported-ATS handoff: when a URL (the final page after Apply hops/popups,
+ * or a cross-origin iframe src) lives on a host a platform adapter can
+ * ingest — workday `{tenant}.wd{N}.myworkdayjobs.com`, greenhouse
+ * `boards.greenhouse.io`/`job-boards.greenhouse.io`, lever `jobs.lever.co`,
+ * ashby `jobs.ashbyhq.com` — return the cleaned POSTING url: the path is cut
+ * at the first apply/login flow segment (the workday apply flow appends
+ * `/apply` to the posting path) and the hash dropped; the query is kept
+ * (greenhouse embed URLs carry their identity in `?for=&token=`). Returns
+ * undefined when the URL is not on a supported host or the cleaned path is
+ * not an obvious posting URL — the handoff must never point at a site root.
+ */
+export function detectHandoffUrl(url: string): string | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    return undefined;
+  }
+  const host = parsed.hostname.toLowerCase();
+  const segments = parsed.pathname
+    .split('/')
+    .filter((segment) => segment.length > 0);
+  const flowIndex = segments.findIndex((segment) =>
+    HANDOFF_FLOW_SEGMENTS.has(segment.toLowerCase()),
+  );
+  const cleaned = flowIndex === -1 ? segments : segments.slice(0, flowIndex);
+
+  let isPostingUrl = false;
+  if (WORKDAY_HANDOFF_HOST_RE.test(host)) {
+    // Posting paths read {site}/(job|details)/{path...}; a cleaned URL that
+    // lost the job path (e.g. a bare {site}/login) is NOT a posting.
+    const routeIndex = cleaned.findIndex(
+      (segment) => segment === 'job' || segment === 'details',
+    );
+    isPostingUrl = routeIndex >= 1 && routeIndex < cleaned.length - 1;
+  } else if (
+    host === 'boards.greenhouse.io' ||
+    host === 'job-boards.greenhouse.io'
+  ) {
+    isPostingUrl =
+      (cleaned.length >= 3 && cleaned[1] === 'jobs') ||
+      (cleaned[0] === 'embed' &&
+        cleaned[1] === 'job_app' &&
+        parsed.searchParams.get('for') !== null &&
+        parsed.searchParams.get('token') !== null);
+  } else if (host === 'jobs.lever.co' || host === 'jobs.ashbyhq.com') {
+    isPostingUrl = cleaned.length >= 2;
+  }
+  if (!isPostingUrl) {
+    return undefined;
+  }
+  parsed.pathname = `/${cleaned.join('/')}`;
+  parsed.hash = '';
+  return parsed.toString();
+}
+
 /** Real-Chrome UA (no "HeadlessChrome"), major matched to the engine. */
 function chromeUserAgent(browserVersion: string): string {
   const major = Number.parseInt(browserVersion.split('.')[0] ?? '', 10);
@@ -803,6 +889,8 @@ type RenderResult =
       applyUrl: string;
       metadata?: JobMetadata;
       iframeNotes: string[];
+      /** Cleaned supported-ATS posting URL (final page or iframe src). */
+      handoffUrl?: string;
     }
   | { ok: false; notes: string };
 
@@ -991,6 +1079,12 @@ async function renderAndExtract(
       }
     }
 
+    // Supported-ATS handoff: the apply flow often lands on a platform an
+    // adapter CAN ingest (a Workday popup, a hosted board). The final page
+    // URL is checked here; a qualifying cross-origin iframe src below fills
+    // in only when the page itself didn't qualify.
+    let handoffUrl = detectHandoffUrl(page.url());
+
     // Still no form on the final page → look inside iframes: extract in
     // same-origin frames (custom career sites embedding their own form);
     // for cross-origin frames record the src — and when it's a supported
@@ -1055,8 +1149,19 @@ async function renderAndExtract(
             : `a cross-origin iframe is present (${frameUrl}) — the application form may live inside it`;
           iframeNotes.push(note);
           step({ kind: 'system', text: 'cross_origin_iframe', output: note });
+          if (handoffUrl === undefined) {
+            handoffUrl = detectHandoffUrl(frameUrl);
+          }
         }
       }
+    }
+
+    if (handoffUrl !== undefined) {
+      step({
+        kind: 'system',
+        text: 'supported_ats_handoff',
+        output: `the apply flow reached a supported ATS — handoff url: ${handoffUrl}`,
+      });
     }
 
     if (blockedHosts.size > 0) {
@@ -1073,6 +1178,7 @@ async function renderAndExtract(
       applyUrl: page.url(),
       metadata,
       iframeNotes,
+      handoffUrl,
     };
   } catch (error) {
     // Browser-phase runtime failure (page crash, evaluate on a closed page,
@@ -1208,6 +1314,7 @@ async function interpretExtraction(args: {
   applyUrl: string;
   metadata?: JobMetadata;
   iframeNotes: string[];
+  handoffUrl?: string;
   hint?: string;
   maxTurns?: number;
   transcript: TranscriptStep[];
@@ -1239,6 +1346,11 @@ async function interpretExtraction(args: {
   const programmaticCompany = args.metadata?.company || undefined;
   const programmaticTitle = args.metadata?.title || undefined;
   const descriptionMarkdown = args.metadata?.descriptionMarkdown || undefined;
+  // PROGRAMMATIC, like the markdown itself: an explicit "apply by <date>"
+  // statement in the scraped JD, never the agent's word.
+  const deadline = descriptionMarkdown
+    ? (extractDeadline(descriptionMarkdown) ?? undefined)
+    : undefined;
 
   const capture = await consumeAgentStream(stream, args.transcript);
   const parsed = parseAgentJson(capture, (candidate) => {
@@ -1252,6 +1364,8 @@ async function interpretExtraction(args: {
       company: programmaticCompany,
       title: programmaticTitle,
       descriptionMarkdown,
+      deadline,
+      handoffUrl: args.handoffUrl,
       questions: [],
       confidence: 'low',
       notes: appendProgrammaticNotes('could not parse agent output', args),
@@ -1281,6 +1395,8 @@ async function interpretExtraction(args: {
     company: parsed.company || programmaticCompany,
     title: parsed.title || programmaticTitle,
     descriptionMarkdown,
+    deadline,
+    handoffUrl: args.handoffUrl,
     questions,
     confidence: parsed.confidence,
     notes: appendProgrammaticNotes(parsed.notes, args),
@@ -1346,16 +1462,22 @@ export async function discoverForm(input: {
   }
 
   // Nothing to interpret — never run the agent on an empty extraction, but
-  // still surface the programmatically scraped metadata.
+  // still surface the programmatically scraped metadata (and any
+  // supported-ATS handoff — the Workday sign-in wall lands exactly here).
   if (rendered.extraction.controls.length === 0) {
+    const descriptionMarkdown =
+      rendered.metadata?.descriptionMarkdown || undefined;
     return {
       result: {
         formFound: false,
         applyUrl: rendered.applyUrl,
         company: rendered.metadata?.company || undefined,
         title: rendered.metadata?.title || undefined,
-        descriptionMarkdown:
-          rendered.metadata?.descriptionMarkdown || undefined,
+        descriptionMarkdown,
+        deadline: descriptionMarkdown
+          ? (extractDeadline(descriptionMarkdown) ?? undefined)
+          : undefined,
+        handoffUrl: rendered.handoffUrl,
         questions: [],
         confidence: 'low',
         notes: appendProgrammaticNotes(noFormNotes(rendered.extraction), {
@@ -1372,6 +1494,7 @@ export async function discoverForm(input: {
     applyUrl: rendered.applyUrl,
     metadata: rendered.metadata,
     iframeNotes: rendered.iframeNotes,
+    handoffUrl: rendered.handoffUrl,
     hint: input.hint,
     maxTurns: input.maxTurns,
     transcript,

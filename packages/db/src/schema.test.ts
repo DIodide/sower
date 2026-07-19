@@ -26,6 +26,7 @@ describe('schema', () => {
       'canonical_url',
       'company',
       'created_at',
+      'deadline',
       'dedupe_key',
       'external_id',
       'id',
@@ -42,6 +43,9 @@ describe('schema', () => {
     // rely on ON CONFLICT (dedupe_key) DO NOTHING.
     expect(jobs.dedupeKey.notNull).toBe(false);
     expect(jobs.dedupeKey.isUnique).toBe(true);
+    // Nullable timestamptz: most postings publish no deadline.
+    expect(jobs.deadline.notNull).toBe(false);
+    expect(jobs.deadline.columnType).toBe('PgTimestamp');
   });
 
   it('defines the application_tasks table', () => {

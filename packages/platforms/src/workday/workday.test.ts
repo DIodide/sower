@@ -139,6 +139,39 @@ describe('WorkdayAdapter.discover', () => {
     expect(spec.applyUrl).toContain('myworkdayjobs.com');
   });
 
+  it('leaves deadline unset when the posting has no endDate (the fixture)', async () => {
+    const spec = await adapter.discover(ref, url);
+    expect(spec.deadline).toBeUndefined();
+  });
+
+  it('maps an explicit cxs endDate to spec.deadline (UTC midnight)', async () => {
+    const info = fixture.jobPostingInfo as Record<string, unknown>;
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ...fixture,
+        jobPostingInfo: { ...info, endDate: '2026-08-01' },
+      }),
+    });
+    const spec = await adapter.discover(ref, url);
+    expect(spec.deadline).toBe('2026-08-01T00:00:00.000Z');
+  });
+
+  it('ignores an unparseable endDate instead of guessing', async () => {
+    const info = fixture.jobPostingInfo as Record<string, unknown>;
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ...fixture,
+        jobPostingInfo: { ...info, endDate: 'until filled' },
+      }),
+    });
+    const spec = await adapter.discover(ref, url);
+    expect(spec.deadline).toBeUndefined();
+  });
+
   it('records the discover call when a recorder is supplied', async () => {
     // Use a real Response so the recorder can clone and capture the body.
     fetchMock.mockResolvedValue(

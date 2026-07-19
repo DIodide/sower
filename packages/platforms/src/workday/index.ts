@@ -1,4 +1,5 @@
 import type { JobSpec, PlatformRef, ResolvedAnswer } from '@sower/core';
+import { deadlineFromIsoDate } from '@sower/core';
 import type {
   PlatformAdapter,
   SubmitFile,
@@ -37,6 +38,8 @@ interface WorkdayJobPostingInfo {
   jobReqId?: string | null;
   jobPostingId?: string | null;
   externalUrl?: string | null;
+  /** Posting end date (the application deadline) when the tenant sets one. */
+  endDate?: string | null;
   questionnaireId?: string | null;
   secondaryQuestionnaireId?: string | null;
   canApply?: boolean | null;
@@ -226,6 +229,14 @@ export class WorkdayAdapter implements PlatformAdapter {
     const location = info.location?.trim();
     if (location) {
       spec.location = location;
+    }
+    // Explicit posting end date = the application deadline (PARSED, never
+    // inferred; most postings carry none). Normalized to UTC midnight.
+    if (info.endDate) {
+      const deadline = deadlineFromIsoDate(info.endDate);
+      if (deadline) {
+        spec.deadline = deadline;
+      }
     }
     // Workday's jobDescription is raw HTML; the shared helper strips tags (and
     // defensively re-strips any tag reconstructed from encoded entities).

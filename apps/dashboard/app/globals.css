@@ -1337,6 +1337,20 @@ details.filter-pop > summary::-webkit-details-marker {
   white-space: nowrap;
 }
 
+/* Compact "⏰ Jul 30" application-deadline chip after the status phrase —
+   faint by default, red-tinted when the deadline is within 7 days (or
+   past). Deliberately quiet: sections keep their priority sort. */
+.deadline-chip {
+  margin-left: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+
+.deadline-chip--soon {
+  color: var(--danger-fg);
+}
+
 /* Recovery actions (Retry/Restore/Investigate) are ALWAYS visible; only the
    destructive Discard (.tr-reveal) hides until hover/focus — via opacity so
    it stays tabbable. */

@@ -24,7 +24,14 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import type { ReactNode } from 'react';
 import { getDb } from '../../../lib/db';
-import { eventLabel, formatLocal, type Tone } from '../../../lib/format';
+import {
+  eventLabel,
+  formatDeadline,
+  formatLocal,
+  isDeadlineSoon,
+  relativeTime,
+  type Tone,
+} from '../../../lib/format';
 import { PriorityControl } from '../../../lib/priority-control';
 import {
   Empty,
@@ -555,6 +562,11 @@ export default async function TaskPage({
       ? `${location} · ${locationType}`
       : location
     : locationType;
+  // First-class deadline: the jobs column is authoritative; the spec's value
+  // covers the window before a process run persisted it.
+  const deadlineDate =
+    job?.deadline ?? (spec?.deadline ? new Date(spec.deadline) : null);
+  const deadlineSoon = isDeadlineSoon(deadlineDate);
   // Workday parks account-required until a browser session is captured; that
   // NEEDS_INPUT is a "capture a session" state, not an "answer questions" one.
   const needsSession =
@@ -735,6 +747,19 @@ export default async function TaskPage({
             )}
           </MetaItem>
           <MetaItem label="Source">{job?.source ?? '—'}</MetaItem>
+          {/* Application deadline — red-tinted inside 7 days, faint
+              otherwise; absent for the (many) postings that state none. */}
+          {deadlineDate && !Number.isNaN(deadlineDate.getTime()) ? (
+            <MetaItem label="Deadline">
+              <span
+                className={deadlineSoon ? undefined : 'faint'}
+                style={deadlineSoon ? { color: 'var(--danger-fg)' } : undefined}
+              >
+                {formatDeadline(deadlineDate)}
+                <span className="faint"> · {relativeTime(deadlineDate)}</span>
+              </span>
+            </MetaItem>
+          ) : null}
           {/* Job facts from the spec — absent fields render no cell at all. */}
           {spec?.employmentType ? (
             <MetaItem label="Type">{spec.employmentType}</MetaItem>

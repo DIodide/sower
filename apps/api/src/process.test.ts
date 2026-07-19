@@ -18,6 +18,7 @@ const adapterState = vi.hoisted(() => ({
   title: undefined as string | undefined,
   description: undefined as string | undefined,
   employmentType: undefined as string | undefined,
+  deadline: undefined as string | undefined,
   formAccess: undefined as 'public' | 'account-required' | undefined,
 }));
 
@@ -81,6 +82,9 @@ vi.mock('@sower/platforms', () => ({
               : {}),
             ...(adapterState.employmentType !== undefined
               ? { employmentType: adapterState.employmentType }
+              : {}),
+            ...(adapterState.deadline !== undefined
+              ? { deadline: adapterState.deadline }
               : {}),
             ...(adapterState.formAccess !== undefined
               ? { formAccess: adapterState.formAccess }
@@ -188,6 +192,7 @@ interface FakeJobRow {
   externalId: string | null;
   company: string | null;
   title: string | null;
+  deadline: Date | null;
 }
 
 interface FakeDescriptionRow {
@@ -213,6 +218,8 @@ function createFakeTaskDb(initial: {
   bank?: Array<{ normalizedLabel: string; value: unknown; company: string }>;
   /** Platform of the job row; defaults to greenhouse. */
   platform?: string;
+  /** Pre-existing jobs.deadline (never overwritten by the persist rule). */
+  deadline?: Date | null;
   /** Pre-existing event history (e.g. a RESTORE from a human un-discard). */
   events?: FakeEventRow[];
   /** Job tenant override; pass null for a tenant-less (parked) greenhouse job. */
@@ -263,6 +270,7 @@ function createFakeTaskDb(initial: {
           : 'swe-1',
     company: initial.company ?? null,
     title: initial.title ?? null,
+    deadline: initial.deadline ?? null,
   };
   const eventRows: FakeEventRow[] = [...(initial.events ?? [])];
   const descriptionRows: FakeDescriptionRow[] = initial.descriptions ?? [];
@@ -278,6 +286,7 @@ function createFakeTaskDb(initial: {
     'url',
     'canonicalUrl',
     'dedupeKey',
+    'deadline',
   ]);
   const isJobUpdate = (setArg: Record<string, unknown>) => {
     const keys = Object.keys(setArg);
@@ -497,6 +506,7 @@ beforeEach(() => {
   adapterState.title = undefined;
   adapterState.description = undefined;
   adapterState.employmentType = undefined;
+  adapterState.deadline = undefined;
   adapterState.formAccess = undefined;
   answersState.result = { resolved: [], missing: [] };
   answersState.lastOpts = undefined;
@@ -1238,6 +1248,69 @@ describe('processTask Contract D (description versioning)', () => {
     await processTask(createDeps(db), 'task-1');
 
     expect(descriptionRows).toHaveLength(0);
+  });
+});
+
+describe('processTask deadline persistence (jobs.deadline)', () => {
+  it("writes the spec's explicit ATS deadline onto a deadline-less jobs row", async () => {
+    const { db, job } = createFakeTaskDb({ state: 'QUEUED' });
+    adapterState.deadline = '2026-08-01T00:00:00.000Z';
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome.kind).toBe('processed');
+    expect(job.deadline).toEqual(new Date('2026-08-01T00:00:00.000Z'));
+  });
+
+  it('parses an explicit "apply by <date>" out of the JD text when the spec has no field', async () => {
+    const { db, job } = createFakeTaskDb({ state: 'QUEUED' });
+    adapterState.description =
+      'Join us! Applications close on March 1, 2027. Benefits: snacks.';
+
+    await processTask(createDeps(db), 'task-1');
+
+    expect(job.deadline).toEqual(new Date('2027-03-01T00:00:00.000Z'));
+  });
+
+  it('prefers the explicit spec field over the JD text', async () => {
+    const { db, job } = createFakeTaskDb({ state: 'QUEUED' });
+    adapterState.deadline = '2026-08-01';
+    adapterState.description = 'Apply by January 9, 2027.';
+
+    await processTask(createDeps(db), 'task-1');
+
+    expect(job.deadline).toEqual(new Date('2026-08-01T00:00:00.000Z'));
+  });
+
+  it('never overwrites a deadline the jobs row already has', async () => {
+    const recorded = new Date('2026-06-15T00:00:00.000Z');
+    const { db, job } = createFakeTaskDb({
+      state: 'QUEUED',
+      deadline: recorded,
+    });
+    adapterState.deadline = '2026-08-01T00:00:00.000Z';
+
+    await processTask(createDeps(db), 'task-1');
+
+    expect(job.deadline).toBe(recorded);
+  });
+
+  it('writes nothing when neither the spec nor the JD names a deadline', async () => {
+    const { db, job } = createFakeTaskDb({ state: 'QUEUED' });
+    adapterState.description = 'A great role with no stated deadline.';
+
+    await processTask(createDeps(db), 'task-1');
+
+    expect(job.deadline).toBeNull();
+  });
+
+  it('ignores an unparseable spec deadline instead of guessing', async () => {
+    const { db, job } = createFakeTaskDb({ state: 'QUEUED' });
+    adapterState.deadline = 'until filled';
+
+    await processTask(createDeps(db), 'task-1');
+
+    expect(job.deadline).toBeNull();
   });
 });
 

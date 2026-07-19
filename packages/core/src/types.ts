@@ -87,6 +87,14 @@ export interface JobSpec {
   employmentType?: string;
   /** Workplace arrangement when exposed: Remote / Hybrid / On-site etc. */
   locationType?: string;
+  /**
+   * Application deadline as an ISO 8601 UTC-midnight timestamp
+   * (`2026-07-30T00:00:00.000Z`). PARSED, never inferred: set only from an
+   * explicit ATS field (workday cxs endDate, greenhouse
+   * application_deadline) or an explicit "apply by <date>"-style statement
+   * in the JD text (extractDeadline). Persisted onto jobs.deadline.
+   */
+  deadline?: string;
   /** Department (or team) the posting belongs to, when exposed. */
   department?: string;
   /**

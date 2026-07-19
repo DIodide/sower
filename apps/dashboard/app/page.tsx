@@ -22,8 +22,10 @@ import { getDb } from '../lib/db';
 import {
   BUCKETS,
   type Bucket,
+  deadlineChipLabel,
   formatLocal,
   isBucket,
+  isDeadlineSoon,
   relativeTime,
   rowLabel,
   STATE_META,
@@ -66,6 +68,12 @@ const ARCHIVE_STATES: readonly TaskState[] = [
   'DUPLICATE',
   'DISCARDED',
 ];
+
+/** Rows whose deadline chip would be noise: already sent, or archived. */
+const DEADLINE_HIDDEN_STATES = new Set<string>([
+  ...SENT_STATES,
+  ...ARCHIVE_STATES,
+]);
 
 function isTaskState(value: string): value is TaskState {
   return (TASK_STATES as string[]).includes(value);
@@ -207,6 +215,7 @@ export default async function Page({
     title: jobs.title,
     platform: jobs.platform,
     url: jobs.url,
+    deadline: jobs.deadline,
   };
 
   // Two row queries: the action bucket ("Waiting on you") is NEVER capped —
@@ -374,6 +383,11 @@ export default async function Page({
     if (discard?.auto) phrase = 'Auto discarded';
     const statusNote = discard?.note ?? null;
     const employmentType = row.jobSpec?.employmentType?.trim() || null;
+    // Compact deadline chip — only while the task can still be acted on
+    // (never on Sent or Archive rows). Precomputed on the server so
+    // hydration never disagrees on "now".
+    const showDeadline =
+      row.deadline !== null && !DEADLINE_HIDDEN_STATES.has(row.state);
     return {
       id: row.id,
       state: row.state,
@@ -391,6 +405,8 @@ export default async function Page({
           ? employmentType
           : null,
       canInvestigate,
+      deadline: showDeadline ? deadlineChipLabel(row.deadline) : null,
+      deadlineSoon: showDeadline ? isDeadlineSoon(row.deadline) : false,
       updatedRel: relativeTime(row.updatedAt),
       updatedAbs: formatLocal(row.updatedAt),
     };

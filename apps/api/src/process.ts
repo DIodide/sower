@@ -7,7 +7,7 @@ import type {
   ResolutionResult,
   TaskState,
 } from '@sower/core';
-import { transition } from '@sower/core';
+import { deadlineFromIsoDate, extractDeadline, transition } from '@sower/core';
 import {
   answers,
   applicationTasks,
@@ -191,6 +191,7 @@ export async function processTask(
     // FAIL/retry rather than silently dropping the discovered data.
     await backfillJobFields(db, job, jobSpec);
     await recordJobDescription(db, job.id, jobSpec.description);
+    await persistJobDeadline(db, job, jobSpec);
 
     // Auto-discard full-time roles: the user hunts internships, so a posting
     // whose employment type says full-time (and whose title/type nowhere says
@@ -510,6 +511,37 @@ export async function backfillJobFields(
     return;
   }
   await db.update(jobs).set(updates).where(eq(jobs.id, job.id));
+}
+
+/**
+ * Persist the job's application deadline onto jobs.deadline — CONSERVATIVE
+ * on both ends. Source: the spec's explicit ATS deadline field first
+ * (normalized via deadlineFromIsoDate), else an explicit "apply by <date>"
+ * statement in the description text (extractDeadline in @sower/core; parsed,
+ * never inferred). Written ONLY when the jobs row has no deadline yet — a
+ * recorded deadline is never silently rewritten. Exported for the
+ * form-discovery result endpoint, which persists the agent-scraped
+ * deadline/JD markdown through the same rule.
+ */
+export async function persistJobDeadline(
+  db: Deps['db'],
+  job: { id: string; deadline: Date | null | undefined },
+  spec: { deadline?: string; description?: string },
+): Promise<void> {
+  if (job.deadline !== null && job.deadline !== undefined) {
+    return;
+  }
+  const iso =
+    (spec.deadline ? deadlineFromIsoDate(spec.deadline) : null) ??
+    (spec.description ? extractDeadline(spec.description) : null);
+  if (iso === null) {
+    return;
+  }
+  const deadline = new Date(iso);
+  if (Number.isNaN(deadline.getTime())) {
+    return;
+  }
+  await db.update(jobs).set({ deadline }).where(eq(jobs.id, job.id));
 }
 
 /**

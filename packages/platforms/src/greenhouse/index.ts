@@ -5,6 +5,7 @@ import type {
   QuestionOption,
   ResolvedAnswer,
 } from '@sower/core';
+import { deadlineFromIsoDate } from '@sower/core';
 import type {
   PlatformAdapter,
   SubmitFile,
@@ -73,6 +74,8 @@ interface GreenhouseJobPayload {
   departments?: Array<{ name?: string | null }> | null;
   offices?: Array<{ name?: string | null }> | null;
   absolute_url: string;
+  /** Board-published application deadline (null on most postings). */
+  application_deadline?: string | null;
   /** HTML-entity-encoded HTML description (present only with ?content=true). */
   content?: string | null;
   questions?: GreenhouseQuestion[] | null;
@@ -233,6 +236,14 @@ export class GreenhouseAdapter implements PlatformAdapter {
       .filter((name): name is string => Boolean(name));
     if (departmentNames.length > 0) {
       spec.department = departmentNames.join(' · ');
+    }
+    // The board's explicit application_deadline (null on most postings, e.g.
+    // the fixture) — PARSED, never inferred; unparseable values are ignored.
+    if (payload.application_deadline) {
+      const deadline = deadlineFromIsoDate(payload.application_deadline);
+      if (deadline) {
+        spec.deadline = deadline;
+      }
     }
     // The boards API exposes no employment type — employmentType stays unset.
     // Greenhouse `content` is HTML-entity-encoded HTML (needs ?content=true).

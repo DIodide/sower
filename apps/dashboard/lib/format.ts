@@ -41,6 +41,59 @@ const RELATIVE_UNITS: { ms: number; label: string }[] = [
   { ms: 60 * 1000, label: 'm' },
 ];
 
+// jobs.deadline is stored as UTC MIDNIGHT of the published calendar date, so
+// deadline formatters must render in UTC — an Eastern render would show the
+// evening BEFORE the actual deadline date.
+const DEADLINE_FMT = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'UTC',
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+});
+
+const DEADLINE_CHIP_FMT = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'UTC',
+  month: 'short',
+  day: 'numeric',
+});
+
+/** Absolute deadline date, e.g. `Jul 30, 2026` (UTC — see note above). */
+export function formatDeadline(
+  value: Date | string | null | undefined,
+): string {
+  if (!value) return '—';
+  const d = typeof value === 'string' ? new Date(value) : value;
+  if (Number.isNaN(d.getTime())) return '—';
+  return DEADLINE_FMT.format(d);
+}
+
+/**
+ * Compact deadline chip label: `Jul 30` this year, `Jul 30, 2027` otherwise
+ * (a bare month-day would silently mean the wrong year).
+ */
+export function deadlineChipLabel(
+  value: Date | string | null | undefined,
+): string | null {
+  if (!value) return null;
+  const d = typeof value === 'string' ? new Date(value) : value;
+  if (Number.isNaN(d.getTime())) return null;
+  return d.getUTCFullYear() === new Date().getUTCFullYear()
+    ? DEADLINE_CHIP_FMT.format(d)
+    : DEADLINE_FMT.format(d);
+}
+
+const DEADLINE_SOON_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** True when the deadline is within 7 days (or already past) — red tint. */
+export function isDeadlineSoon(
+  value: Date | string | null | undefined,
+): boolean {
+  if (!value) return false;
+  const d = typeof value === 'string' ? new Date(value) : value;
+  if (Number.isNaN(d.getTime())) return false;
+  return d.getTime() - Date.now() <= DEADLINE_SOON_MS;
+}
+
 /** Compact relative time: `3m ago`, `2d ago`, `in 1h`, `just now`. */
 export function relativeTime(value: Date | string | null | undefined): string {
   if (!value) return '—';
@@ -258,6 +311,7 @@ const EVENT_LABELS: Record<string, string> = {
   FORM_VERIFIED: 'Discovered form verified by a human',
   INVESTIGATION_DONE: 'Browser agent finished investigating',
   INVESTIGATION_FOUND: 'Browser agent found the job posting',
+  HANDOFF: 'Apply flow reached a supported platform — real task created',
 };
 
 /**

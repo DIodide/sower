@@ -1007,7 +1007,12 @@ describe('buildServer', () => {
         externalId: null,
         company: 'WeirdCo',
         title: null,
+        deadline: null,
       };
+      // The task half of the endpoint's task+job join (jobSpec is what the
+      // not_found employmentType merge reads).
+      const taskRow = { id: TASK_ID, jobSpec: null };
+      const joinRow = { task: taskRow, job: jobRow };
       const discoveredForm = {
         formFound: true,
         applyUrl: 'https://weirdats.example/jobs/1/apply',
@@ -1065,7 +1070,7 @@ describe('buildServer', () => {
         const db = createFakeDb({
           selectResults: [
             [{ id: 'run-1' }], // latest investigation run
-            [{ job: jobRow }], // task+job join
+            [joinRow], // task+job join
           ],
           insertResults: [[]], // FORM_DISCOVERED event
           writes,
@@ -1161,7 +1166,7 @@ describe('buildServer', () => {
         const db = createFakeDb({
           selectResults: [
             [{ id: 'run-1' }], // latest run
-            [{ job: jobRow }], // task+job join
+            [joinRow], // task+job join
             // Latest stored description for the job: version 2, other content.
             [{ version: 2, contentHash: 'someotherhash' }],
           ],
@@ -1197,7 +1202,7 @@ describe('buildServer', () => {
         const db = createFakeDb({
           selectResults: [
             [{ id: 'run-1' }],
-            [{ job: jobRow }],
+            [joinRow],
             [], // no job_descriptions rows yet
           ],
           insertResults: [[]],
@@ -1243,7 +1248,7 @@ describe('buildServer', () => {
         const db = createFakeDb({
           selectResults: [
             [{ id: 'run-1' }],
-            [{ job: { ...jobRow, title: 'Ingest Title' } }],
+            [{ task: taskRow, job: { ...jobRow, title: 'Ingest Title' } }],
           ],
           insertResults: [[]],
           writes,
@@ -1265,7 +1270,7 @@ describe('buildServer', () => {
       it('accepts an employmentType and stores it on the discovered jobSpec', async () => {
         const writes: DbWrite[] = [];
         const db = createFakeDb({
-          selectResults: [[{ id: 'run-1' }], [{ job: jobRow }]],
+          selectResults: [[{ id: 'run-1' }], [joinRow]],
           insertResults: [[]],
           writes,
         });
@@ -1290,7 +1295,7 @@ describe('buildServer', () => {
       it('not found: records FORM_NOT_FOUND, writes no jobSpec, and marks the run not_found', async () => {
         const writes: DbWrite[] = [];
         const db = createFakeDb({
-          selectResults: [[{ id: 'run-1' }]],
+          selectResults: [[{ id: 'run-1' }], [joinRow]],
           insertResults: [[]], // FORM_NOT_FOUND event
           writes,
         });
@@ -1335,6 +1340,339 @@ describe('buildServer', () => {
 
         // The reply refresh fires on ANY investigation outcome.
         expect(refreshState.calls).toEqual([TASK_ID]);
+      });
+
+      it('not found: STILL backfills title/company and stores the JD markdown (the data-loss fix)', async () => {
+        // The live Salesforce case: correct metadata scraped, but the apply
+        // hop dead-ended on a Workday sign-in, so formFound was false — and
+        // the old endpoint dropped everything.
+        const markdown =
+          '# Summer 2027 Intern - APM\n\nBuild product at Salesforce.';
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({
+          selectResults: [
+            [{ id: 'run-1' }], // latest run
+            [{ task: taskRow, job: { ...jobRow, company: null } }],
+            [], // no job_descriptions rows yet
+          ],
+          insertResults: [[]], // FORM_NOT_FOUND event
+          writes,
+        });
+        const { deps, enqueueProcess } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app, {
+          kind: 'form',
+          result: {
+            ...formNotFound,
+            company: 'Salesforce',
+            title: 'Summer 2027 Intern - Associate Product Manager (APM)',
+            descriptionMarkdown: markdown,
+          },
+          transcript: formTranscript,
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(enqueueProcess).not.toHaveBeenCalled();
+
+        // Blank title AND company on the jobs row → both backfilled.
+        const jobUpdate = writes.find(
+          (w) => w.method === 'update' && w.table === jobs,
+        );
+        expect(jobUpdate?.arg).toEqual({
+          company: 'Salesforce',
+          title: 'Summer 2027 Intern - Associate Product Manager (APM)',
+        });
+
+        // The scraped JD lands as a versioned job_descriptions row.
+        const descriptionInsert = writes.find(
+          (w) => w.method === 'insert' && w.table === jobDescriptions,
+        );
+        expect(descriptionInsert?.arg).toMatchObject({
+          jobId: 'job-u',
+          version: 1,
+          content: markdown,
+        });
+
+        // Still an honest not_found: no jobSpec write, FORM_NOT_FOUND event.
+        expect(
+          writes.some(
+            (w) => w.method === 'update' && w.table === applicationTasks,
+          ),
+        ).toBe(false);
+        const runUpdate = writes.find(
+          (w) => w.method === 'update' && w.table === investigationRuns,
+        );
+        expect(runUpdate?.arg).toMatchObject({ status: 'not_found' });
+      });
+
+      it('not found: stores employmentType into an EXISTING jobSpec only', async () => {
+        const existingSpec = {
+          platform: 'unknown',
+          tenant: '',
+          externalId: '',
+          title: 'Platform Intern',
+          applyUrl: 'https://weirdats.example/jobs/1/apply',
+          questions: [],
+          discoveredByAgent: true,
+        };
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({
+          selectResults: [
+            [{ id: 'run-1' }],
+            [{ task: { ...taskRow, jobSpec: existingSpec }, job: jobRow }],
+          ],
+          insertResults: [[]],
+          writes,
+        });
+        const { deps } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app, {
+          kind: 'form',
+          result: { ...formNotFound, employmentType: 'Intern' },
+          transcript: formTranscript,
+        });
+
+        expect(res.statusCode).toBe(200);
+        const taskUpdate = writes.find(
+          (w) => w.method === 'update' && w.table === applicationTasks,
+        );
+        expect(taskUpdate?.arg).toMatchObject({
+          jobSpec: { ...existingSpec, employmentType: 'Intern' },
+        });
+      });
+
+      it('not found: skips employmentType when the task has no jobSpec (no minimal-spec fabrication)', async () => {
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({
+          selectResults: [[{ id: 'run-1' }], [joinRow]],
+          insertResults: [[]],
+          writes,
+        });
+        const { deps } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app, {
+          kind: 'form',
+          result: { ...formNotFound, employmentType: 'Intern' },
+          transcript: formTranscript,
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(
+          writes.some(
+            (w) => w.method === 'update' && w.table === applicationTasks,
+          ),
+        ).toBe(false);
+      });
+
+      it('persists an explicit deadline field onto jobs.deadline (found or not)', async () => {
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({
+          selectResults: [[{ id: 'run-1' }], [joinRow]],
+          insertResults: [[]],
+          writes,
+        });
+        const { deps } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app, {
+          kind: 'form',
+          result: { ...formNotFound, deadline: '2027-01-09T00:00:00.000Z' },
+          transcript: formTranscript,
+        });
+
+        expect(res.statusCode).toBe(200);
+        const deadlineUpdate = writes.find(
+          (w) =>
+            w.method === 'update' &&
+            w.table === jobs &&
+            (w.arg as Record<string, unknown>).deadline !== undefined,
+        );
+        expect(deadlineUpdate?.arg).toEqual({
+          deadline: new Date('2027-01-09T00:00:00.000Z'),
+        });
+      });
+
+      it('parses the deadline out of descriptionMarkdown when no field is sent', async () => {
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({
+          selectResults: [
+            [{ id: 'run-1' }],
+            [joinRow],
+            [], // job_descriptions latest (for the JD row)
+          ],
+          insertResults: [[]],
+          writes,
+        });
+        const { deps } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app, {
+          kind: 'form',
+          result: {
+            ...formNotFound,
+            descriptionMarkdown: 'Great role. Apply by January 9, 2027.',
+          },
+          transcript: formTranscript,
+        });
+
+        expect(res.statusCode).toBe(200);
+        const deadlineUpdate = writes.find(
+          (w) =>
+            w.method === 'update' &&
+            w.table === jobs &&
+            (w.arg as Record<string, unknown>).deadline !== undefined,
+        );
+        expect(deadlineUpdate?.arg).toEqual({
+          deadline: new Date('2027-01-09T00:00:00.000Z'),
+        });
+      });
+
+      it('never overwrites a deadline the jobs row already has', async () => {
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({
+          selectResults: [
+            [{ id: 'run-1' }],
+            [
+              {
+                task: taskRow,
+                job: { ...jobRow, deadline: new Date('2026-12-01') },
+              },
+            ],
+          ],
+          insertResults: [[]],
+          writes,
+        });
+        const { deps } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app, {
+          kind: 'form',
+          result: { ...formNotFound, deadline: '2027-01-09T00:00:00.000Z' },
+          transcript: formTranscript,
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(writes.some((w) => w.table === jobs)).toBe(false);
+      });
+
+      it('handoffUrl: ingests it, records a HANDOFF event, and reports it in the body', async () => {
+        const handoffUrl = 'https://boards.greenhouse.io/acme/jobs/999';
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({
+          selectResults: [
+            [{ id: 'run-1' }], // latest run
+            [joinRow], // task+job join
+            [], // ingestJob canonical-url dup check: fresh
+            [{ platform: 'greenhouse' }], // the ingested job's platform
+          ],
+          insertResults: [
+            [], // FORM_NOT_FOUND event
+            [{ id: 'job-9' }], // ingested job
+            [{ id: 'task-9' }], // its application task
+          ],
+          writes,
+        });
+        const { deps, enqueueProcess } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app, {
+          kind: 'form',
+          result: { ...formNotFound, handoffUrl },
+          transcript: formTranscript,
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toEqual({
+          ok: true,
+          handoff: { jobId: 'job-9', taskId: 'task-9', duplicate: false },
+        });
+
+        // The handoff URL went through the real ingest pipeline + enqueued.
+        const jobInsert = writes.find(
+          (w) => w.method === 'insert' && w.table === jobs,
+        );
+        expect(jobInsert?.arg).toMatchObject({
+          url: handoffUrl,
+          source: 'discord-investigation',
+        });
+        expect(enqueueProcess).toHaveBeenCalledWith('task-9');
+
+        // Timeline annotation on the ORIGINAL task (a plain events insert —
+        // the original task keeps its state and jobSpec untouched; the task
+        // updates in `writes` are the NEW task's own ingest transitions).
+        const handoffEvent = writes
+          .filter((w) => w.method === 'insert' && w.table === events)
+          .map((w) => w.arg as Record<string, unknown>)
+          .find((arg) => arg.type === 'HANDOFF');
+        expect(handoffEvent).toMatchObject({
+          taskId: TASK_ID,
+          data: {
+            handoffUrl,
+            jobId: 'job-9',
+            taskId: 'task-9',
+            platform: 'greenhouse',
+          },
+        });
+
+        // The run itself still records the honest form outcome.
+        const runUpdate = writes.find(
+          (w) => w.method === 'update' && w.table === investigationRuns,
+        );
+        expect(runUpdate?.arg).toMatchObject({
+          kind: 'form',
+          status: 'not_found',
+          error: null,
+        });
+      });
+
+      it('a duplicate handoff is reported as duplicate, with no HANDOFF event', async () => {
+        const handoffUrl = 'https://boards.greenhouse.io/acme/jobs/999';
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({
+          selectResults: [
+            [{ id: 'run-1' }],
+            [joinRow],
+            // ingestJob canonical-url dup check: already known.
+            [
+              {
+                id: 'job-9',
+                source: 'discord-ingest',
+                createdAt: new Date('2026-06-01T00:00:00Z'),
+              },
+            ],
+            [{ id: 'task-9' }], // the existing job's earliest task
+            [{ platform: 'greenhouse' }],
+          ],
+          insertResults: [[]], // FORM_NOT_FOUND event
+          writes,
+        });
+        const { deps, enqueueProcess } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app, {
+          kind: 'form',
+          result: { ...formNotFound, handoffUrl },
+          transcript: formTranscript,
+        });
+
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toEqual({
+          ok: true,
+          handoff: { jobId: 'job-9', taskId: 'task-9', duplicate: true },
+        });
+        expect(enqueueProcess).not.toHaveBeenCalled();
+        expect(
+          writes.some((w) => w.method === 'insert' && w.table === jobs),
+        ).toBe(false);
+        expect(
+          writes
+            .filter((w) => w.method === 'insert' && w.table === events)
+            .map((w) => w.arg as Record<string, unknown>)
+            .some((arg) => arg.type === 'HANDOFF'),
+        ).toBe(false);
       });
 
       it('formFound with a missing task row: still persists the run, as an error', async () => {
