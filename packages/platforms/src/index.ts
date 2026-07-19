@@ -7,6 +7,10 @@ export type {
 } from './contract.js';
 export { htmlEntityEncodedToPlainText } from './description.js';
 export { detectPlatform } from './detect.js';
+export {
+  deriveGreenhouseTenant,
+  greenhouseTenantCandidates,
+} from './greenhouse/derive-tenant.js';
 export { GreenhouseAdapter } from './greenhouse/index.js';
 export {
   fetchLeverApplicationForm,

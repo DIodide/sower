@@ -319,6 +319,72 @@ describe('renderTaskLine (discarded)', () => {
   });
 });
 
+describe('renderTaskLine (applied)', () => {
+  const asRow = (r: ReturnType<typeof row>, state: string) =>
+    ({
+      ...r,
+      task: { ...r.task, state },
+    }) as unknown as Parameters<typeof renderTaskLine>[0];
+
+  it('renders the applied line for SUBMITTED and CONFIRMED tasks', () => {
+    for (const state of ['SUBMITTED', 'CONFIRMED']) {
+      const line = renderTaskLine(
+        asRow(
+          row('sent-1xx', { title: 'Data Scientist', company: 'TickPick' }),
+          state,
+        ),
+        undefined,
+        BASE_URL,
+      );
+      expect(line).toBe(
+        `✅ [Data Scientist · TickPick](${BASE_URL}/tasks/sent-1xx) · applied · ${DATE}`,
+      );
+    }
+  });
+
+  it('wins over the queued/screenshot lines (a sent application is never "queued")', () => {
+    // A supported task marked applied out of band no longer reads "queued"...
+    const queued = renderTaskLine(
+      asRow(
+        row('sent-2xx', {
+          platform: 'greenhouse',
+          tenant: 'acme',
+          url: 'https://boards.greenhouse.io/acme/jobs/1',
+        }),
+        'SUBMITTED',
+      ),
+      undefined,
+      BASE_URL,
+    );
+    expect(queued).toContain('· applied');
+    expect(queued).not.toContain('queued');
+
+    // ...and a screenshot task marked applied no longer reads "investigating".
+    const shot = renderTaskLine(
+      asRow(
+        row('sent-3xx', {
+          url: 'https://cdn.discordapp.com/attachments/1/2/shot.png',
+        }),
+        'SUBMITTED',
+      ),
+      { kind: 'screenshot', status: 'running' },
+      BASE_URL,
+    );
+    expect(shot).toContain('· applied');
+    expect(shot).not.toContain('investigating');
+  });
+
+  it('discarded still wins over applied ordering (DISCARDED renders discarded)', () => {
+    const line = renderTaskLine(
+      asRow(row('disc-9xx'), 'DISCARDED'),
+      undefined,
+      BASE_URL,
+    );
+    expect(line).toContain('· discarded');
+    expect(line).not.toContain('applied');
+  });
+});
+
 describe('renderTaskLine (link labels)', () => {
   const asRow = (r: ReturnType<typeof row>) =>
     r as unknown as Parameters<typeof renderTaskLine>[0];

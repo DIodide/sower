@@ -2,7 +2,12 @@ import type { PlatformRef } from '@sower/core';
 import { canonicalizeUrl } from '@sower/core';
 import { applicationTasks } from '@sower/db';
 import type { DiscordChannelMessage } from '@sower/notify';
-import { detectPlatform, getAdapter, resolveUrl } from '@sower/platforms';
+import {
+  deriveGreenhouseTenant,
+  detectPlatform,
+  getAdapter,
+  resolveUrl,
+} from '@sower/platforms';
 import { inArray } from 'drizzle-orm';
 import type { AttachmentOutcome } from './attachment-ingest.js';
 import {
@@ -102,6 +107,18 @@ function isSupportedJobRef(ref: PlatformRef, url: string): boolean {
   );
 }
 
+/**
+ * The job id when a ref is greenhouse-with-id-but-no-tenant (gh_jid on a
+ * custom domain) — the shape the verified tenant probe can resolve.
+ */
+function tenantlessGreenhouseJobId(ref: PlatformRef): string | null {
+  return ref.platform === 'greenhouse' &&
+    ref.tenant === null &&
+    ref.externalId !== null
+    ? ref.externalId
+    : null;
+}
+
 /** Ingest a supported-platform URL and map the result to its outcome. */
 async function ingestSupported(
   deps: Deps,
@@ -160,10 +177,14 @@ async function classifyAndIngest(
       return await ingestSupported(deps, resolved, ref.platform, source);
     }
 
-    // Still unknown at the top level → fetch the page ONCE and inspect it:
-    // first sniff for a greenhouse job embedded on a custom domain (ingest
-    // the canonical board URL so it dedupes with board-hosted pastes), then
-    // fall back to treating the page as a directory of job links.
+    // Still unknown at the top level → fetch the page ONCE and inspect it,
+    // cheapest evidence first: (1) sniff the HTML for a greenhouse job
+    // embedded on a custom domain (free — no extra requests), (2) probe the
+    // fixed greenhouse boards API for a VERIFIED tenant when the URL pinned a
+    // gh_jid without one (a few API GETs — covers JS-rendered pages the sniff
+    // cannot see through, e.g. akunacapital.com), (3) treat the page as a
+    // directory of job links, (4) record + park below. A sniff or probe hit
+    // ingests the canonical board URL so it dedupes with board-hosted pastes.
     if (depth === 0) {
       const page = await fetchPageHtml(resolved);
       if (page) {
@@ -178,6 +199,21 @@ async function classifyAndIngest(
           const canonical = `https://job-boards.greenhouse.io/${sniffed.tenant}/jobs/${sniffed.jobId}`;
           return await ingestSupported(deps, canonical, 'greenhouse', source);
         }
+      }
+      // Sniff missed (or the page fetch failed): when the pre- or post-resolve
+      // ref was greenhouse-with-id-but-no-tenant, the probe can still verify
+      // the tenant straight from the boards API. Only a VERIFIED hit (200 +
+      // matching job id) ingests; null falls through to directory/park.
+      const probeJobId =
+        tenantlessGreenhouseJobId(ref) ?? tenantlessGreenhouseJobId(preRef);
+      if (probeJobId !== null) {
+        const tenant = await deriveGreenhouseTenant(resolved, probeJobId);
+        if (tenant !== null) {
+          const canonical = `https://job-boards.greenhouse.io/${tenant}/jobs/${probeJobId}`;
+          return await ingestSupported(deps, canonical, 'greenhouse', source);
+        }
+      }
+      if (page) {
         const links = extractJobLinks(page.html, page.url);
         if (links.length > 0) {
           const children: UrlOutcome[] = [];

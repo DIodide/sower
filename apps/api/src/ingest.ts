@@ -1,7 +1,12 @@
 import type { PlatformRef, TaskState } from '@sower/core';
 import { canonicalizeUrl, stripTrackingParams } from '@sower/core';
 import { applicationTasks, jobs } from '@sower/db';
-import { detectPlatform, getAdapter, resolveUrl } from '@sower/platforms';
+import {
+  deriveGreenhouseTenant,
+  detectPlatform,
+  getAdapter,
+  resolveUrl,
+} from '@sower/platforms';
 import { computeDedupeKey } from '@sower/sources';
 import { asc, eq } from 'drizzle-orm';
 import { isIngestableJobUrl } from './link-extract.js';
@@ -118,8 +123,27 @@ export async function ingestJob(
   // time the posting link is opened). Dedupe already ignores them via
   // canonicalizeUrl; this cleans what we persist and re-open.
   resolvedUrl = stripTrackingParams(resolvedUrl);
-  const canonicalUrl = canonicalizeUrl(resolvedUrl);
-  const ref = detectPlatform(canonicalUrl);
+  let canonicalUrl = canonicalizeUrl(resolvedUrl);
+  let ref = detectPlatform(canonicalUrl);
+  // VERIFIED tenant probe: a gh_jid URL on a company's own domain names the
+  // greenhouse job but not the board tenant, which would park it below. Try
+  // hostname-derived candidates against the FIXED boards API first; a
+  // verified hit rewrites the ingest to the canonical board URL (stored url
+  // included, like the discord greenhouse-sniff path) so it dedupes with
+  // board-hosted pastes and enqueues as a normal supported greenhouse job.
+  // A null probe changes nothing — the task parks exactly as before.
+  if (
+    ref.platform === 'greenhouse' &&
+    ref.tenant === null &&
+    ref.externalId !== null
+  ) {
+    const tenant = await deriveGreenhouseTenant(resolvedUrl, ref.externalId);
+    if (tenant !== null) {
+      resolvedUrl = `https://job-boards.greenhouse.io/${tenant}/jobs/${ref.externalId}`;
+      canonicalUrl = canonicalizeUrl(resolvedUrl);
+      ref = detectPlatform(canonicalUrl);
+    }
+  }
   const dedupeKey = computeDedupeKey(ref, canonicalUrl);
 
   // Fast path: exact same canonical URL already ingested. Also covers legacy

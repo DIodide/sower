@@ -47,6 +47,12 @@ const adapterResultState = vi.hoisted(() => ({
   employmentType: undefined as string | undefined,
 }));
 
+/** Verified greenhouse tenant probe: what it reports + how it was called. */
+const probeState = vi.hoisted(() => ({
+  tenant: null as string | null,
+  calls: [] as Array<{ url: string; jobId: string }>,
+}));
+
 // The refresh primitive is proven in ingest-reply.test.ts; here we only
 // assert the endpoints invoke it (it never throws, so a fake fn suffices).
 vi.mock('./ingest-reply.js', () => ({
@@ -82,6 +88,12 @@ vi.mock('@sower/platforms', () => ({
   resolveUrl: async (url: string) => {
     platformState.resolveCalls.push(url);
     return url;
+  },
+  // Verified tenant probe (unit-tested in @sower/platforms); null = no
+  // verified tenant, so tenant-less greenhouse ingests park exactly as before.
+  deriveGreenhouseTenant: async (url: string, jobId: string) => {
+    probeState.calls.push({ url, jobId });
+    return probeState.tenant;
   },
   // Only greenhouse has an adapter in this mock (the real registry also
   // registers ashby/lever — covered by @sower/platforms registry.test.ts).
@@ -239,6 +251,8 @@ beforeEach(() => {
   adapterResultState.employmentType = undefined;
   investigateState.calls = [];
   investigateState.fired = true;
+  probeState.tenant = null;
+  probeState.calls = [];
 });
 
 describe('buildServer', () => {
@@ -401,7 +415,7 @@ describe('buildServer', () => {
     }
   });
 
-  it('POST /ingest parks greenhouse jobs without a tenant (gh_jid on custom domain)', async () => {
+  it('POST /ingest parks greenhouse jobs without a tenant when the probe finds none', async () => {
     platformState.ref = {
       platform: 'greenhouse',
       tenant: null,
@@ -426,6 +440,72 @@ describe('buildServer', () => {
       state: 'NEEDS_INPUT',
     });
     expect(enqueueProcess).not.toHaveBeenCalled();
+    // The probe WAS consulted (with the resolved URL + job id) and reported
+    // no verified tenant — only then did the task park.
+    expect(probeState.calls).toEqual([
+      {
+        url: 'https://jobs.example.com/openings?gh_jid=4141773008',
+        jobId: '4141773008',
+      },
+    ]);
+  });
+
+  it('POST /ingest queues a tenant-less greenhouse job the probe verifies, stored under the canonical board URL', async () => {
+    // The akuna shape: gh_jid on the company's own domain. detectPlatform
+    // sees greenhouse without a tenant; the probe verifies 'akunacapital'.
+    const pageUrl =
+      'https://akunacapital.com/careers/job/8018853/swe?gh_jid=8018853';
+    const canonical =
+      'https://job-boards.greenhouse.io/akunacapital/jobs/8018853';
+    platformState.byUrl[pageUrl] = {
+      platform: 'greenhouse',
+      tenant: null,
+      externalId: '8018853',
+    };
+    platformState.byUrl[canonical] = {
+      platform: 'greenhouse',
+      tenant: 'akunacapital',
+      externalId: '8018853',
+    };
+    probeState.tenant = 'akunacapital';
+    const writes: DbWrite[] = [];
+    const db = createFakeDb({
+      selectResults: [[]], // no canonical-url duplicate
+      insertResults: [[{ id: 'job-5' }], [{ id: 'task-5' }]],
+      writes,
+    });
+    const { deps, enqueueProcess } = createDeps(db);
+    const app = buildServer(deps);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/ingest',
+      headers: { 'x-api-key': 'test-key' },
+      payload: { url: pageUrl },
+    });
+
+    // A SUPPORTED ingest: queued + enqueued, never parked.
+    expect(res.statusCode).toBe(201);
+    expect(res.json()).toEqual({
+      jobId: 'job-5',
+      taskId: 'task-5',
+      state: 'QUEUED',
+    });
+    expect(enqueueProcess).toHaveBeenCalledWith('task-5');
+    expect(probeState.calls).toEqual([{ url: pageUrl, jobId: '8018853' }]);
+    // The stored job row carries the canonical board URL + verified tenant
+    // (like the discord sniff path), so board-hosted pastes dedupe onto it.
+    const jobInsert = writes.find(
+      (write) => write.method === 'insert' && write.table === jobs,
+    );
+    expect(jobInsert?.arg).toMatchObject({
+      url: canonical,
+      canonicalUrl: canonical,
+      platform: 'greenhouse',
+      tenant: 'akunacapital',
+      externalId: '8018853',
+      dedupeKey: 'greenhouse:akunacapital:8018853',
+    });
   });
 
   it('POST /ingest parks platforms without a registered adapter', async () => {
@@ -1753,6 +1833,174 @@ describe('buildServer', () => {
       const unauthed = await app.inject({
         method: 'POST',
         url: `/tasks/${TASK_ID}/restore`,
+      });
+      expect(unauthed.statusCode).toBe(401);
+    });
+  });
+
+  describe('POST /tasks/:id/mark-applied', () => {
+    const TASK_ID = '7d8e9f10-1112-4314-a516-b71819c2d2e2';
+
+    function inject(
+      app: ReturnType<typeof buildServer>,
+      id: string = TASK_ID,
+      payload?: Record<string, unknown>,
+    ) {
+      return app.inject({
+        method: 'POST',
+        url: `/tasks/${id}/mark-applied`,
+        headers: { 'x-api-key': 'test-key' },
+        ...(payload !== undefined ? { payload } : {}),
+      });
+    }
+
+    it('marks an active task applied: MARK_SUBMITTED transition + event, then refreshes the reply', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[{ state: 'NEEDS_INPUT' }]],
+        insertResults: [[]], // MARK_SUBMITTED event
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true });
+
+      const taskUpdate = writes.find(
+        (w) => w.method === 'update' && w.table === applicationTasks,
+      );
+      expect(taskUpdate?.arg).toMatchObject({ state: 'SUBMITTED' });
+
+      const markEvent = writes
+        .filter((w) => w.method === 'insert' && w.table === events)
+        .map((w) => w.arg as Record<string, unknown>)
+        .find((arg) => arg.type === 'MARK_SUBMITTED');
+      expect(markEvent).toMatchObject({
+        taskId: TASK_ID,
+        fromState: 'NEEDS_INPUT',
+        toState: 'SUBMITTED',
+        data: { reason: 'manual' },
+      });
+
+      // The #ingest reply line flips to "applied".
+      expect(refreshState.calls).toEqual([TASK_ID]);
+    });
+
+    it('stores a trimmed note ("where/how") in the MARK_SUBMITTED event data', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[{ state: 'REVIEW' }]],
+        insertResults: [[]], // MARK_SUBMITTED event
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, TASK_ID, {
+        note: '  applied via their careers portal  ',
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true });
+      const markEvent = writes
+        .filter((w) => w.method === 'insert' && w.table === events)
+        .map((w) => w.arg as Record<string, unknown>)
+        .find((arg) => arg.type === 'MARK_SUBMITTED');
+      expect(markEvent?.data).toEqual({
+        reason: 'manual',
+        note: 'applied via their careers portal',
+      });
+    });
+
+    it('treats a whitespace-only note as absent (no note key in the event)', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[{ state: 'QUEUED' }]],
+        insertResults: [[]], // MARK_SUBMITTED event
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, TASK_ID, { note: '   ' });
+
+      expect(res.statusCode).toBe(200);
+      const markEvent = writes
+        .filter((w) => w.method === 'insert' && w.table === events)
+        .map((w) => w.arg as Record<string, unknown>)
+        .find((arg) => arg.type === 'MARK_SUBMITTED');
+      expect(markEvent?.data).toEqual({ reason: 'manual' });
+    });
+
+    it('rejects an over-long note (400, nothing written)', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[{ state: 'NEEDS_INPUT' }]],
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, TASK_ID, { note: 'x'.repeat(2001) });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ error: 'invalid body' });
+      expect(writes).toEqual([]);
+      expect(refreshState.calls).toEqual([]);
+    });
+
+    it('is idempotent: an already-sent task (SUBMITTED/CONFIRMED) is a 200 no-op', async () => {
+      for (const state of ['SUBMITTED', 'CONFIRMED']) {
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({ selectResults: [[{ state }]], writes });
+        const { deps } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app);
+
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toEqual({ ok: true });
+        expect(writes).toEqual([]);
+      }
+      expect(refreshState.calls).toEqual([]);
+    });
+
+    it('responds 409 for an archived task (DISCARDED/DUPLICATE)', async () => {
+      for (const state of ['DISCARDED', 'DUPLICATE']) {
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({ selectResults: [[{ state }]], writes });
+        const { deps } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app);
+
+        expect(res.statusCode).toBe(409);
+        expect(res.json()).toEqual({
+          error: `cannot mark a task applied in state '${state}'`,
+        });
+        expect(writes).toEqual([]);
+      }
+      expect(refreshState.calls).toEqual([]);
+    });
+
+    it('responds 404 for a missing task, 400 for an invalid id, 401 without a key', async () => {
+      const { deps } = createDeps(createFakeDb({ selectResults: [[]] }));
+      const app = buildServer(deps);
+
+      const missing = await inject(app);
+      expect(missing.statusCode).toBe(404);
+      expect(missing.json()).toEqual({ error: 'task not found' });
+
+      const invalid = await inject(app, 'not-a-uuid');
+      expect(invalid.statusCode).toBe(400);
+      expect(invalid.json()).toMatchObject({ error: 'invalid task id' });
+
+      const unauthed = await app.inject({
+        method: 'POST',
+        url: `/tasks/${TASK_ID}/mark-applied`,
       });
       expect(unauthed.statusCode).toBe(401);
     });

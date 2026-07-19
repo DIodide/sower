@@ -320,6 +320,36 @@ describe('POST /tasks/:id/requeue', () => {
     expect(enqueueProcess).toHaveBeenCalledWith(TASK_ID);
   });
 
+  it('requeues a parked NEEDS_INPUT task with NO jobSpec (never processed)', async () => {
+    // A task parked at INGEST time (e.g. "greenhouse job without tenant") has
+    // neither jobSpec nor resolution — requeue must still work, since it is
+    // the door back into processTask (where the tenant probe can self-heal).
+    const state = createState({
+      state: 'NEEDS_INPUT',
+      attempt: 0,
+      jobSpec: null,
+      resolution: null,
+    });
+    const { deps, enqueueProcess } = createDeps(state);
+    const app = buildServer(deps);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/tasks/${TASK_ID}/requeue`,
+      headers: { 'x-api-key': 'test-key' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ state: 'QUEUED' });
+    expect(state.task?.state).toBe('QUEUED');
+    expect(state.events[0]).toMatchObject({
+      type: 'RETRY',
+      fromState: 'NEEDS_INPUT',
+      toState: 'QUEUED',
+    });
+    expect(enqueueProcess).toHaveBeenCalledWith(TASK_ID);
+  });
+
   it('requeues a FAILED task', async () => {
     const state = createState({ state: 'FAILED', attempt: 5 });
     const { deps, enqueueProcess } = createDeps(state);

@@ -54,6 +54,11 @@ const triggerState = vi.hoisted(() => ({
   /** What the mocked trigger reports back (true = investigation fired). */
   fires: false,
 }));
+/** Verified greenhouse tenant probe: what it reports + how it was called. */
+const probeState = vi.hoisted(() => ({
+  tenant: null as string | null,
+  calls: [] as Array<{ url: string; jobId: string }>,
+}));
 
 vi.mock('@sower/platforms', () => ({
   detectPlatform: (url: string) =>
@@ -69,6 +74,11 @@ vi.mock('@sower/platforms', () => ({
   resolveUrl: async (url: string) => {
     platformState.resolveCalls.push(url);
     return platformState.resolveTo[url] ?? url;
+  },
+  // Verified tenant probe (unit-tested in @sower/platforms); null = miss.
+  deriveGreenhouseTenant: async (url: string, jobId: string) => {
+    probeState.calls.push({ url, jobId });
+    return probeState.tenant;
   },
 }));
 
@@ -144,6 +154,8 @@ beforeEach(() => {
   dirState.byUrl = {};
   triggerState.calls = [];
   triggerState.fires = false;
+  probeState.tenant = null;
+  probeState.calls = [];
 });
 
 describe('ingestMessageLinks', () => {
@@ -458,6 +470,121 @@ describe('ingestMessageLinks', () => {
     pageState.byUrl[url] = '<html><body>join our team</body></html>';
     const s = await ingestMessageLinks({} as Deps, url);
     expect(s.unsupported).toBe(1);
+    expect(ingestState.calls).toEqual([url]);
+    // No gh_jid anywhere: the tenant probe is never even attempted.
+    expect(probeState.calls).toEqual([]);
+  });
+
+  it('sniff hit short-circuits the tenant probe (sniff first, probe second)', async () => {
+    // gh_jid pins the job AND the HTML names the tenant: the free sniff wins,
+    // so the probe (which costs API GETs) must never run.
+    const url = 'https://acme-example.com/jobs?gh_jid=42';
+    platformState.byUrl[url] = {
+      platform: 'greenhouse',
+      tenant: null,
+      externalId: '42',
+    };
+    pageState.byUrl[url] =
+      '<a href="https://boards.greenhouse.io/acme">our job board</a>';
+    probeState.tenant = 'wrong-if-ever-consulted';
+    const s = await ingestMessageLinks({} as Deps, url);
+    expect(s.ingested).toBe(1);
+    expect(s.outcomes[0]).toMatchObject({
+      kind: 'ingested',
+      url: 'https://job-boards.greenhouse.io/acme/jobs/42',
+    });
+    expect(probeState.calls).toEqual([]);
+  });
+
+  it('sniff null + probe hit ingests the canonical board URL (JS-rendered page, live akuna shape)', async () => {
+    // akunacapital.com serves a JS-rendered page with NO greenhouse markers
+    // in the HTML — the sniff sees nothing — but the gh_jid URL pins the job
+    // id and the probe verifies the tenant against the boards API.
+    const url =
+      'https://akunacapital.com/careers/job/8018853/swe?gh_jid=8018853';
+    platformState.byUrl[url] = {
+      platform: 'greenhouse',
+      tenant: null,
+      externalId: '8018853',
+    };
+    pageState.byUrl[url] = '<html><body><div id="root"></div></body></html>';
+    probeState.tenant = 'akunacapital';
+    const canonical =
+      'https://job-boards.greenhouse.io/akunacapital/jobs/8018853';
+    const s = await ingestMessageLinks({} as Deps, url);
+    expect(s.ingested).toBe(1);
+    expect(s.outcomes[0]).toMatchObject({
+      kind: 'ingested',
+      platform: 'greenhouse',
+      url: canonical,
+    });
+    expect(ingestState.calls).toEqual([canonical]);
+    expect(probeState.calls).toEqual([{ url, jobId: '8018853' }]);
+  });
+
+  it('probes even when the page fetch fails, using the PRE-resolve gh_jid ref', async () => {
+    // The redirect strips gh_jid AND the stripped page cannot be fetched:
+    // the job id from the ORIGINAL pasted URL still drives the probe.
+    const pasted = 'https://acme-example.com/jobs/search?gh_jid=77';
+    const stripped = 'https://acme-example.com/jobs/listing/senior-baker';
+    platformState.byUrl[pasted] = {
+      platform: 'greenhouse',
+      tenant: null,
+      externalId: '77',
+    };
+    platformState.resolveTo[pasted] = stripped;
+    // No pageState fixture for `stripped`: fetchPageHtml returns null.
+    probeState.tenant = 'acme';
+    const s = await ingestMessageLinks({} as Deps, pasted);
+    expect(s.ingested).toBe(1);
+    expect(s.outcomes[0]).toMatchObject({
+      kind: 'ingested',
+      url: 'https://job-boards.greenhouse.io/acme/jobs/77',
+    });
+    // Candidates come from the RESOLVED page's host (where the page lives).
+    expect(probeState.calls).toEqual([{ url: stripped, jobId: '77' }]);
+  });
+
+  it('probe hit outranks directory expansion (probe second, directory third)', async () => {
+    const url = 'https://acme-example.com/careers/opening?gh_jid=8';
+    platformState.byUrl[url] = {
+      platform: 'greenhouse',
+      tenant: null,
+      externalId: '8',
+    };
+    platformState.byUrl['https://gh/other'] = {
+      platform: 'greenhouse',
+      tenant: 'other',
+      externalId: '9',
+    };
+    // The page has extractable job links, but the gh_jid + verified tenant
+    // identify THIS page as one posting — never a directory.
+    pageState.byUrl[url] = '<html>rendered nav</html>';
+    dirState.byUrl[url] = ['https://gh/other'];
+    probeState.tenant = 'acme';
+    const s = await ingestMessageLinks({} as Deps, url);
+    expect(s.directories).toBe(0);
+    expect(s.ingested).toBe(1);
+    expect(s.outcomes[0]).toMatchObject({
+      kind: 'ingested',
+      url: 'https://job-boards.greenhouse.io/acme/jobs/8',
+    });
+  });
+
+  it('parks a gh_jid page exactly as before when the probe finds no tenant', async () => {
+    const url =
+      'https://akunacapital.com/careers/job/8018853/swe?gh_jid=8018853';
+    platformState.byUrl[url] = {
+      platform: 'greenhouse',
+      tenant: null,
+      externalId: '8018853',
+    };
+    pageState.byUrl[url] = '<html><body><div id="root"></div></body></html>';
+    // probeState.tenant stays null: no candidate verified.
+    const s = await ingestMessageLinks({} as Deps, url);
+    expect(s.unsupported).toBe(1);
+    expect(probeState.calls).toEqual([{ url, jobId: '8018853' }]);
+    // Recorded + parked through ingestJob with the page URL, same as today.
     expect(ingestState.calls).toEqual([url]);
   });
 

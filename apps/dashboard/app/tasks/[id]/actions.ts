@@ -469,6 +469,37 @@ export async function discardTask(
 }
 
 /**
+ * Mark a task applied out of band via the api service: the human completed
+ * the application themselves, so the task jumps straight to SUBMITTED
+ * (refused for DISCARDED/DUPLICATE; already-sent tasks are a no-op). An
+ * optional short note ("where/how") travels with it and is stored on the
+ * MARK_SUBMITTED event. Revalidates the task page plus the home list the
+ * row moves within.
+ */
+export async function markApplied(
+  taskId: string,
+  note?: string,
+): Promise<ActionResult> {
+  const idParse = uuidSchema.safeParse(taskId);
+  if (!idParse.success) return { ok: false, message: 'invalid task id.' };
+  const trimmed = typeof note === 'string' ? note.trim() : '';
+  if (trimmed.length > 2000) {
+    return {
+      ok: false,
+      message: 'note is too long (max 2,000 characters).',
+    };
+  }
+  const result = await callApi(
+    idParse.data,
+    'mark-applied',
+    trimmed === '' ? undefined : { note: trimmed },
+  );
+  revalidatePath(`/tasks/${idParse.data}`);
+  revalidatePath('/');
+  return result;
+}
+
+/**
  * Restore a DISCARDED task via the api service (the Archive's Restore and the
  * discard toast's Undo). Lands back in NEEDS_INPUT; restoring a task that is
  * already NEEDS_INPUT is a no-op on the api side, so a double-clicked undo
@@ -552,6 +583,7 @@ async function callApi(
     | 'verify-form'
     | 'discard'
     | 'restore'
+    | 'mark-applied'
     | 'investigate'
     | 'meta',
   jsonBody?: Record<string, unknown>,
@@ -644,6 +676,13 @@ async function callApi(
     return {
       ok: true,
       message: 'task restored — back in the queue as needs-input.',
+    };
+  }
+
+  if (action === 'mark-applied') {
+    return {
+      ok: true,
+      message: 'marked applied — recorded as submitted out of band.',
     };
   }
 

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { jobs as jobsTable } from '@sower/db';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
 import { refreshIngestReply } from './ingest-reply.js';
@@ -9,6 +10,8 @@ const adapterState = vi.hoisted(() => ({
   discoverError: null as string | null,
   questions: [] as unknown[],
   lastDiscoverOpts: undefined as { recorder?: unknown } | undefined,
+  /** The PlatformRef discover was called with (tenant self-heal assertions). */
+  lastDiscoverRef: undefined as { tenant?: string | null } | undefined,
   // Contract D: optional spec fields the discover mock echoes back so tests can
   // exercise company/title backfill and description versioning.
   company: undefined as string | undefined,
@@ -39,16 +42,27 @@ const workdayState = vi.hoisted(() => ({
   getQuestionnaireCalls: [] as string[],
 }));
 
+/** Verified greenhouse tenant probe: what it reports + how it was called. */
+const probeState = vi.hoisted(() => ({
+  tenant: null as string | null,
+  calls: [] as Array<{ url: string; jobId: string }>,
+}));
+
 vi.mock('@sower/platforms', () => ({
+  deriveGreenhouseTenant: async (url: string, jobId: string) => {
+    probeState.calls.push({ url, jobId });
+    return probeState.tenant;
+  },
   getAdapter: (platform: string) => {
     if (platform === 'greenhouse') {
       return {
         discover: async (
-          _ref: unknown,
+          ref: { tenant?: string | null },
           _url: unknown,
           opts?: { recorder?: unknown },
         ) => {
           adapterState.lastDiscoverOpts = opts;
+          adapterState.lastDiscoverRef = ref;
           if (adapterState.discoverError) {
             throw new Error(adapterState.discoverError);
           }
@@ -167,9 +181,11 @@ interface FakeEventRow {
 interface FakeJobRow {
   id: string;
   url: string;
+  canonicalUrl: string;
+  dedupeKey: string;
   platform: string;
-  tenant: string;
-  externalId: string;
+  tenant: string | null;
+  externalId: string | null;
   company: string | null;
   title: string | null;
 }
@@ -199,6 +215,17 @@ function createFakeTaskDb(initial: {
   platform?: string;
   /** Pre-existing event history (e.g. a RESTORE from a human un-discard). */
   events?: FakeEventRow[];
+  /** Job tenant override; pass null for a tenant-less (parked) greenhouse job. */
+  tenant?: string | null;
+  /** Job url override (e.g. a custom-domain gh_jid URL). */
+  url?: string;
+  /** Job externalId override. */
+  externalId?: string | null;
+  /**
+   * When set, the tenant self-heal's canonical-collision select (FROM jobs)
+   * reports this OTHER job as already owning the canonical board identity.
+   */
+  collidingJobId?: string;
 }) {
   const task: FakeTaskRow = {
     id: 'task-1',
@@ -211,14 +238,29 @@ function createFakeTaskDb(initial: {
     updatedAt: new Date(0),
   };
   const isWorkday = initial.platform === 'workday';
+  const url =
+    initial.url ??
+    (isWorkday
+      ? 'https://acme.wd1.myworkdayjobs.com/external/job/x/SWE_1'
+      : 'https://boards.greenhouse.io/acme/jobs/123');
   const job: FakeJobRow = {
     id: 'job-1',
-    url: isWorkday
-      ? 'https://acme.wd1.myworkdayjobs.com/external/job/x/SWE_1'
-      : 'https://boards.greenhouse.io/acme/jobs/123',
+    url,
+    canonicalUrl: url,
+    dedupeKey: url,
     platform: initial.platform ?? 'greenhouse',
-    tenant: isWorkday ? 'acme-wd' : 'acme',
-    externalId: isWorkday ? 'wd-1' : 'swe-1',
+    tenant:
+      initial.tenant !== undefined
+        ? initial.tenant
+        : isWorkday
+          ? 'acme-wd'
+          : 'acme',
+    externalId:
+      initial.externalId !== undefined
+        ? initial.externalId
+        : isWorkday
+          ? 'wd-1'
+          : 'swe-1',
     company: initial.company ?? null,
     title: initial.title ?? null,
   };
@@ -226,57 +268,79 @@ function createFakeTaskDb(initial: {
   const descriptionRows: FakeDescriptionRow[] = initial.descriptions ?? [];
   const bankRows = initial.bank ?? [];
 
-  // A jobs backfill sets only company/title; everything else (claim,
-  // jobSpec, resolution, transitions) targets the task row.
+  // A jobs write sets only jobs columns (company/title backfill, tenant
+  // self-heal adoption); everything else (claim, jobSpec, resolution,
+  // transitions) targets the task row.
+  const JOB_COLUMNS = new Set([
+    'company',
+    'title',
+    'tenant',
+    'url',
+    'canonicalUrl',
+    'dedupeKey',
+  ]);
   const isJobUpdate = (setArg: Record<string, unknown>) => {
     const keys = Object.keys(setArg);
-    return (
-      keys.length > 0 && keys.every((k) => k === 'company' || k === 'title')
-    );
+    return keys.length > 0 && keys.every((k) => JOB_COLUMNS.has(k));
   };
 
   const db = {
     select: (fields?: Record<string, unknown>) => {
-      // Bank (answers) and documents selects resolve empty; a job_descriptions
-      // select resolves the latest stored version (desc by version, limit 1);
-      // the task+job lookup resolves the single task row.
-      const isBankSelect = fields !== undefined && 'normalizedLabel' in fields;
-      const isDocumentsSelect = fields !== undefined && 'kind' in fields;
-      const isDescriptionSelect =
-        fields !== undefined && 'contentHash' in fields;
-      // The auto-discard RESTORE guard selects only the event id (filtered to
-      // type = 'RESTORE' in SQL; the fake applies the filter here).
-      const isRestoreEventSelect =
-        fields !== undefined &&
-        'id' in fields &&
-        Object.keys(fields).length === 1;
-      let result: unknown[];
-      if (isRestoreEventSelect) {
-        result = eventRows
-          .filter((event) => event.type === 'RESTORE')
-          .map((_, index) => ({ id: `event-${index}` }));
-      } else if (isDescriptionSelect) {
-        const latest = [...descriptionRows]
-          .sort((a, b) => b.version - a.version)
-          .slice(0, 1)
-          .map((d) => ({ version: d.version, contentHash: d.contentHash }));
-        result = latest;
-      } else if (isBankSelect) {
-        result = bankRows.map((row) => ({ ...row }));
-      } else if (isDocumentsSelect) {
-        result = [];
-      } else {
-        result = [{ task: { ...task }, job }];
-      }
+      // Result is computed lazily (at await time) so the FROM table — captured
+      // below — can disambiguate selects with identical field shapes (the
+      // RESTORE-event guard and the jobs canonical-collision check both select
+      // a single `id`).
+      let fromTable: unknown;
+      const computeResult = (): unknown[] => {
+        if (fromTable === jobsTable) {
+          // The tenant self-heal's canonical-collision check.
+          return initial.collidingJobId ? [{ id: initial.collidingJobId }] : [];
+        }
+        // Bank (answers) and documents selects resolve empty; a
+        // job_descriptions select resolves the latest stored version (desc by
+        // version, limit 1); the task+job lookup resolves the single task row.
+        const isBankSelect =
+          fields !== undefined && 'normalizedLabel' in fields;
+        const isDocumentsSelect = fields !== undefined && 'kind' in fields;
+        const isDescriptionSelect =
+          fields !== undefined && 'contentHash' in fields;
+        // The auto-discard RESTORE guard selects only the event id (filtered
+        // to type = 'RESTORE' in SQL; the fake applies the filter here).
+        const isRestoreEventSelect =
+          fields !== undefined &&
+          'id' in fields &&
+          Object.keys(fields).length === 1;
+        if (isRestoreEventSelect) {
+          return eventRows
+            .filter((event) => event.type === 'RESTORE')
+            .map((_, index) => ({ id: `event-${index}` }));
+        }
+        if (isDescriptionSelect) {
+          return [...descriptionRows]
+            .sort((a, b) => b.version - a.version)
+            .slice(0, 1)
+            .map((d) => ({ version: d.version, contentHash: d.contentHash }));
+        }
+        if (isBankSelect) {
+          return bankRows.map((row) => ({ ...row }));
+        }
+        if (isDocumentsSelect) {
+          return [];
+        }
+        return [{ task: { ...task }, job }];
+      };
       const chain = {
-        from: () => chain,
+        from: (table: unknown) => {
+          fromTable = table;
+          return chain;
+        },
         innerJoin: () => chain,
         where: () => chain,
         orderBy: () => chain,
         limit: () => chain,
         // biome-ignore lint/suspicious/noThenProperty: mimics drizzle's awaitable builder
         then: (onFulfilled: (value: unknown) => unknown) =>
-          Promise.resolve(result).then(onFulfilled),
+          Promise.resolve().then(computeResult).then(onFulfilled),
       };
       return chain;
     },
@@ -426,6 +490,9 @@ beforeEach(() => {
   adapterState.discoverError = null;
   adapterState.questions = [];
   adapterState.lastDiscoverOpts = undefined;
+  adapterState.lastDiscoverRef = undefined;
+  probeState.tenant = null;
+  probeState.calls = [];
   adapterState.company = undefined;
   adapterState.title = undefined;
   adapterState.description = undefined;
@@ -1333,5 +1400,107 @@ describe('processTask full-time auto-discard', () => {
     expect(job.company).toBe('Acme Corp');
     expect(job.title).toBe('Staff Software Engineer');
     expect(descriptionRows).toHaveLength(1);
+  });
+});
+
+describe('processTask greenhouse tenant self-heal (custom domain)', () => {
+  const CUSTOM_URL =
+    'https://akunacapital.com/careers/job/8018853/swe?gh_jid=8018853';
+  const BOARD_URL =
+    'https://job-boards.greenhouse.io/akunacapital/jobs/8018853';
+
+  function tenantlessDb(overrides: { collidingJobId?: string } = {}) {
+    return createFakeTaskDb({
+      state: 'QUEUED',
+      tenant: null,
+      url: CUSTOM_URL,
+      externalId: '8018853',
+      ...overrides,
+    });
+  }
+
+  it('adopts a probe-verified tenant + the canonical board URL, then discovery proceeds', async () => {
+    const { db, task, job } = tenantlessDb();
+    probeState.tenant = 'akunacapital';
+    answersState.result = {
+      resolved: [{ questionId: 'email', source: 'profile', value: 'x' }],
+      missing: [],
+    };
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    // Probed with the job's stored (custom-domain) URL + external id.
+    expect(probeState.calls).toEqual([{ url: CUSTOM_URL, jobId: '8018853' }]);
+    // The jobs row was healed: tenant + board url/canonical/dedupe key.
+    expect(job.tenant).toBe('akunacapital');
+    expect(job.url).toBe(BOARD_URL);
+    expect(job.canonicalUrl).toBe(BOARD_URL);
+    expect(job.dedupeKey).toBe('greenhouse:akunacapital:8018853');
+    // Discovery ran WITH the verified tenant and the task flowed to REVIEW.
+    expect(adapterState.lastDiscoverRef).toMatchObject({
+      tenant: 'akunacapital',
+      externalId: '8018853',
+    });
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'REVIEW' });
+    expect(task.state).toBe('REVIEW');
+  });
+
+  it('keeps the custom-domain url when the canonical board identity collides with another job', async () => {
+    // A board-hosted paste of the same posting already owns the canonical
+    // URL / dedupe key (both UNIQUE): only the tenant may be adopted.
+    const { db, job } = tenantlessDb({ collidingJobId: 'job-2' });
+    probeState.tenant = 'akunacapital';
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(job.tenant).toBe('akunacapital');
+    expect(job.url).toBe(CUSTOM_URL);
+    expect(job.canonicalUrl).toBe(CUSTOM_URL);
+    expect(job.dedupeKey).toBe(CUSTOM_URL);
+    // Discovery still proceeds — the adapter reads tenant+id, not the URL.
+    expect(adapterState.lastDiscoverRef).toMatchObject({
+      tenant: 'akunacapital',
+    });
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'REVIEW' });
+  });
+
+  it('re-parks with the SAME reason (never FAIL) when the probe verifies nothing', async () => {
+    const { db, task, job, eventRows } = tenantlessDb();
+    // probeState.tenant stays null: no candidate verified.
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    // The existing parked outcome: a clean NEEDS_INPUT, not a retry loop.
+    expect(outcome).toEqual({
+      kind: 'processed',
+      state: 'NEEDS_INPUT',
+      resolved: 0,
+      missing: 0,
+    });
+    expect(task.state).toBe('NEEDS_INPUT');
+    expect(task.lastError).toBeNull();
+    expect(eventRows.map((e) => [e.type, e.fromState, e.toState])).toEqual([
+      ['PROCESS_START', 'QUEUED', 'PREPARING'],
+      ['RESOLVED_PARTIAL', 'PREPARING', 'NEEDS_INPUT'],
+    ]);
+    expect(eventRows.at(-1)?.data).toEqual({
+      reason: 'greenhouse job without tenant (custom domain)',
+    });
+    // The parked resolution explains WHY (surfaced on the dashboard)...
+    expect((task.resolution as { note?: string }).note).toMatch(/tenant/);
+    // ...and discovery was never attempted (it would have thrown).
+    expect(adapterState.lastDiscoverRef).toBeUndefined();
+    // The jobs row is untouched — a later requeue probes again.
+    expect(job.tenant).toBeNull();
+    expect(job.url).toBe(CUSTOM_URL);
+  });
+
+  it('never probes a greenhouse job that already has a tenant', async () => {
+    const { db } = createFakeTaskDb({ state: 'QUEUED' });
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome).toMatchObject({ kind: 'processed' });
+    expect(probeState.calls).toEqual([]);
   });
 });

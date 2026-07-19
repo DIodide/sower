@@ -154,9 +154,10 @@ const bulkDiscardBodySchema = z.object({
   taskIds: z.array(z.string().uuid()).min(1).max(100),
 });
 
-// Optional single-discard body: a human note ("why") stored on the DISCARD
-// event. No body / empty-after-trim = exactly the note-less discard.
-const discardBodySchema = z
+// Optional note body shared by single discard and mark-applied: a human note
+// ("why" / "where or how I applied") stored on the DISCARD / MARK_SUBMITTED
+// event. No body / empty-after-trim = exactly the note-less action.
+const noteBodySchema = z
   .object({
     note: z.string().trim().max(2000).optional(),
   })
@@ -443,7 +444,7 @@ export function buildServer(deps: Deps): FastifyInstance {
         .code(400)
         .send({ error: 'invalid task id', issues: parsed.error.issues });
     }
-    const body = discardBodySchema.safeParse(request.body ?? undefined);
+    const body = noteBodySchema.safeParse(request.body ?? undefined);
     if (!body.success) {
       return reply
         .code(400)
@@ -515,6 +516,54 @@ export function buildServer(deps: Deps): FastifyInstance {
       reason: 'manual',
     });
     // Best-effort: the reply line for this task leaves "discarded".
+    await refreshIngestReply(deps, taskId);
+    return reply.code(200).send({ ok: true });
+  });
+
+  // Mark a task applied out of band: the human completed the application
+  // themselves, so the task jumps straight to SUBMITTED. Allowed from every
+  // non-terminal state EXCEPT SUBMITTED/CONFIRMED — those are 200 no-ops (it
+  // is already sent, a double-click never errors) — while the archived
+  // DISCARDED/DUPLICATE states are 409s (restore first). The optional body
+  // note ("where/how") is stored on the MARK_SUBMITTED event's data.
+  app.post('/tasks/:id/mark-applied', async (request, reply) => {
+    const parsed = taskParamsSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid task id', issues: parsed.error.issues });
+    }
+    const body = noteBodySchema.safeParse(request.body ?? undefined);
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid body', issues: body.error.issues });
+    }
+    const note = body.data?.note;
+    const taskId = parsed.data.id;
+    const rows = await deps.db
+      .select({ state: applicationTasks.state })
+      .from(applicationTasks)
+      .where(eq(applicationTasks.id, taskId))
+      .limit(1);
+    const row = rows[0];
+    if (!row) {
+      return reply.code(404).send({ error: 'task not found' });
+    }
+    if (row.state === 'SUBMITTED' || row.state === 'CONFIRMED') {
+      return reply.code(200).send({ ok: true });
+    }
+    if (!canTransition(row.state, 'MARK_SUBMITTED')) {
+      return reply
+        .code(409)
+        .send({ error: `cannot mark a task applied in state '${row.state}'` });
+    }
+    await transitionTask(deps.db, taskId, row.state, 'MARK_SUBMITTED', {
+      reason: 'manual',
+      // Omit the key entirely when absent/blank — event data stays minimal.
+      ...(note ? { note } : {}),
+    });
+    // Best-effort: the reply line for this task flips to "applied".
     await refreshIngestReply(deps, taskId);
     return reply.code(200).send({ ok: true });
   });

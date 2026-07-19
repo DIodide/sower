@@ -3,10 +3,10 @@
 // One Applications-workspace row: priority stepper (▼/▲, see
 // lib/priority-control), label link, plain-words status (tone dot + phrase),
 // inline note, relative time, and actions. Recovery actions
-// (Retry/Investigate/Restore) are always visible; only the destructive
-// Discard (with an undo toast) and the bulk-select checkbox are
-// hover/focus-revealed. Rendered as cells of the page's CSS grid list —
-// never a <table>.
+// (Retry/Investigate/Restore) are always visible; the destructive Discard
+// (with an undo toast), the quiet Mark applied (completed out of band), and
+// the bulk-select checkbox are hover/focus-revealed. Rendered as cells of
+// the page's CSS grid list — never a <table>.
 
 import type { TaskPriority } from '@sower/core';
 import Link from 'next/link';
@@ -19,6 +19,7 @@ import {
   type ActionResult,
   discardTask,
   investigateTask,
+  markApplied,
   requeueTask,
   restoreTask,
 } from './tasks/[id]/actions';
@@ -56,6 +57,21 @@ const UNDISCARDABLE = new Set([
   'CONFIRMED',
   'DISCARDED',
   'DUPLICATE',
+]);
+
+/** Rows offering the quiet "Mark applied" action (completed out of band):
+ *  the waiting/processing states only — Sent rows are already applied, and
+ *  Archive rows (FAILED/DUPLICATE/DISCARDED) have their own recovery
+ *  actions. */
+const MARKABLE = new Set([
+  'INGESTED',
+  'PARSED',
+  'QUEUED',
+  'PREPARING',
+  'NEEDS_INPUT',
+  'REVIEW',
+  'AWAITING_OTP',
+  'FILLING',
 ]);
 
 /** States where a priority no longer means anything — the control goes inert. */
@@ -129,6 +145,37 @@ export function TaskRow({ row }: { row: TaskRowData }) {
       })
       .finally(() => {
         setBusy(false);
+      });
+  };
+
+  // Actions that move the row to another section (Restore → "Waiting on
+  // you", Mark applied → Sent): hide the row NOW and say where it went,
+  // instead of leaving it visually untouched for the whole server round-trip
+  // (which includes the api's Discord reply edit — the "restore looks like
+  // it did nothing until I reload" bug). router.refresh() then converges the
+  // sections to the server truth; a failure un-hides the row and explains.
+  // No undo: neither move is destructive, and both are one click to reverse
+  // where reversal exists at all.
+  const runMove = (
+    action: (id: string) => Promise<ActionResult>,
+    doneMessage: string,
+    failMessage: string,
+  ) => {
+    setHidden(true);
+    ws.setSelected(row.id, false);
+    action(row.id)
+      .then((result) => {
+        if (result.ok) {
+          ws.toast(doneMessage);
+          router.refresh();
+        } else {
+          setHidden(false);
+          ws.toast(result.message, { kind: 'error' });
+        }
+      })
+      .catch(() => {
+        setHidden(false);
+        ws.toast(failMessage, { kind: 'error' });
       });
   };
 
@@ -223,14 +270,32 @@ export function TaskRow({ row }: { row: TaskRowData }) {
             className="btn btn--quiet btn--sm"
             disabled={busy}
             onClick={() =>
-              runAction(
+              runMove(
                 restoreTask,
-                'Restore failed — could not reach the server.',
+                'Restored — back in "Waiting on you"',
+                'Restore failed — still in the Archive.',
               )
             }
             title="Put this task back in the queue (as needs-input)"
           >
-            {busy ? 'Working…' : 'Restore'}
+            Restore
+          </button>
+        ) : null}
+        {MARKABLE.has(row.state) ? (
+          <button
+            type="button"
+            className="btn btn--quiet btn--sm tr-reveal"
+            disabled={busy}
+            onClick={() =>
+              runMove(
+                markApplied,
+                'Marked applied — moved to Sent',
+                'Mark applied failed — could not reach the server.',
+              )
+            }
+            title="You applied to this one yourself, outside sower — records it as submitted and moves it to Sent"
+          >
+            Mark applied
           </button>
         ) : null}
         {selectable ? (

@@ -18,11 +18,13 @@ import {
 } from '@sower/db';
 import {
   CalypsoClient,
+  deriveGreenhouseTenant,
   getAdapter,
   loadWorkdaySession,
   workdayFieldsToQuestions,
 } from '@sower/platforms';
-import { and, desc, eq, inArray, lt, sql } from 'drizzle-orm';
+import { computeDedupeKey } from '@sower/sources';
+import { and, desc, eq, inArray, lt, ne, or, sql } from 'drizzle-orm';
 import { postReviewApprovalCard } from './discord.js';
 import { refreshIngestReply } from './ingest-reply.js';
 import { createTaskRecorder } from './recorder.js';
@@ -113,6 +115,47 @@ export async function processTask(
   });
 
   try {
+    // SELF-HEALING for tenant-less greenhouse jobs: a task parked with
+    // "greenhouse job without tenant (custom domain)" re-enters here after a
+    // requeue with jobs.tenant still NULL — discover would throw. Probe the
+    // fixed boards API for a VERIFIED tenant first: a hit updates the jobs
+    // row and discovery proceeds normally; null re-parks with the same
+    // reason (a clean NEEDS_INPUT, never a FAIL/retry loop).
+    if (
+      job.platform === 'greenhouse' &&
+      job.tenant === null &&
+      job.externalId !== null
+    ) {
+      const tenant = await deriveGreenhouseTenant(job.url, job.externalId);
+      if (tenant === null) {
+        const resolution: ResolutionResult = {
+          resolved: [],
+          missing: [],
+          requiredMissingCount: 0,
+          optionalMissingCount: 0,
+          note: 'Greenhouse posting on a custom domain: no verified board tenant found, so the boards API is unreachable. Re-ingest the job-boards.greenhouse.io URL for this posting to unblock it.',
+        };
+        await db
+          .update(applicationTasks)
+          .set({ resolution, updatedAt: new Date() })
+          .where(eq(applicationTasks.id, taskId));
+        currentState = await transitionTask(
+          db,
+          taskId,
+          currentState,
+          'RESOLVED_PARTIAL',
+          { reason: 'greenhouse job without tenant (custom domain)' },
+        );
+        return {
+          kind: 'processed',
+          state: currentState,
+          resolved: 0,
+          missing: 0,
+        };
+      }
+      await adoptGreenhouseTenant(db, job, tenant);
+    }
+
     const adapter = getAdapter(job.platform as Platform);
     if (!adapter) {
       throw new Error(`no adapter for platform '${job.platform}'`);
@@ -288,6 +331,56 @@ export async function processTask(
       gaveUp: claimed.attempt >= MAX_ATTEMPTS,
     };
   }
+}
+
+/**
+ * Adopt a probe-VERIFIED greenhouse tenant onto a tenant-less jobs row and
+ * mirror it onto the in-memory `job` so discovery continues with it.
+ *
+ * The row normally also adopts the canonical board URL (url + canonical_url +
+ * dedupe_key), so it dedupes with board-hosted pastes from now on. BUT both
+ * canonical_url and dedupe_key are UNIQUE — when ANOTHER job already owns the
+ * board identity (the same posting was pasted via its board URL), rewriting
+ * would violate the constraint, so only the tenant is set and this row keeps
+ * its custom-domain URL. Discovery works either way (the adapter reads
+ * tenant+id, not the URL).
+ */
+async function adoptGreenhouseTenant(
+  db: Deps['db'],
+  job: {
+    id: string;
+    url: string;
+    tenant: string | null;
+    externalId: string | null;
+  },
+  tenant: string,
+): Promise<void> {
+  const canonicalUrl = `https://job-boards.greenhouse.io/${tenant}/jobs/${job.externalId}`;
+  const dedupeKey = computeDedupeKey(
+    { platform: 'greenhouse', tenant, externalId: job.externalId },
+    canonicalUrl,
+  );
+  const collisions = await db
+    .select({ id: jobs.id })
+    .from(jobs)
+    .where(
+      and(
+        ne(jobs.id, job.id),
+        or(eq(jobs.canonicalUrl, canonicalUrl), eq(jobs.dedupeKey, dedupeKey)),
+      ),
+    )
+    .limit(1);
+  if (collisions.length > 0) {
+    await db.update(jobs).set({ tenant }).where(eq(jobs.id, job.id));
+    job.tenant = tenant;
+    return;
+  }
+  await db
+    .update(jobs)
+    .set({ tenant, url: canonicalUrl, canonicalUrl, dedupeKey })
+    .where(eq(jobs.id, job.id));
+  job.tenant = tenant;
+  job.url = canonicalUrl;
 }
 
 /**

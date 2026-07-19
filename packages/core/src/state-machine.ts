@@ -28,10 +28,17 @@ export const ALLOWED: Record<
   // DISCARD (a human removing the task from the queue) is allowed from every
   // non-terminal state EXCEPT SUBMITTED/CONFIRMED: an application that was
   // already sent cannot be "removed from the queue" anymore.
+  //
+  // MARK_SUBMITTED (a human completed the application out of band, outside
+  // sower) shares exactly that set of source states: any task still in
+  // flight can be declared applied, jumping straight to SUBMITTED. It is
+  // meaningless from SUBMITTED/CONFIRMED (already sent) and from the
+  // DISCARDED/DUPLICATE archive (restore first).
   INGESTED: {
     PARSE_OK: 'PARSED',
     PARSE_DUPLICATE: 'DUPLICATE',
     DISCARD: 'DISCARDED',
+    MARK_SUBMITTED: 'SUBMITTED',
   },
   PARSED: {
     ENQUEUE: 'QUEUED',
@@ -39,40 +46,47 @@ export const ALLOWED: Record<
     // tenant, or no adapter registered): park for manual input.
     PARK: 'NEEDS_INPUT',
     DISCARD: 'DISCARDED',
+    MARK_SUBMITTED: 'SUBMITTED',
   },
   QUEUED: {
     PROCESS_START: 'PREPARING',
     FAIL: 'FAILED',
     DISCARD: 'DISCARDED',
+    MARK_SUBMITTED: 'SUBMITTED',
   },
   PREPARING: {
     RESOLVED_ALL: 'REVIEW',
     RESOLVED_PARTIAL: 'NEEDS_INPUT',
     FAIL: 'FAILED',
     DISCARD: 'DISCARDED',
+    MARK_SUBMITTED: 'SUBMITTED',
   },
   NEEDS_INPUT: {
     RETRY: 'QUEUED',
     FAIL: 'FAILED',
     DISCARD: 'DISCARDED',
+    MARK_SUBMITTED: 'SUBMITTED',
   },
   REVIEW: {
     APPROVED: 'FILLING',
     SUBMIT_OK: 'SUBMITTED',
     FAIL: 'FAILED',
     DISCARD: 'DISCARDED',
+    MARK_SUBMITTED: 'SUBMITTED',
   },
   // OTP flows arrive with account-based platforms in M3/M4; the edges exist
   // now so AWAITING_OTP is reachable and the table never needs a hot patch.
   AWAITING_OTP: {
     RETRY: 'FILLING',
     DISCARD: 'DISCARDED',
+    MARK_SUBMITTED: 'SUBMITTED',
   },
   FILLING: {
     FILLED: 'REVIEW',
     NEED_OTP: 'AWAITING_OTP',
     FAIL: 'FAILED',
     DISCARD: 'DISCARDED',
+    MARK_SUBMITTED: 'SUBMITTED',
   },
   SUBMITTED: {
     CONFIRM: 'CONFIRMED',
@@ -85,6 +99,7 @@ export const ALLOWED: Record<
     // directly for another processing attempt (subject to the attempt cap).
     PROCESS_START: 'PREPARING',
     DISCARD: 'DISCARDED',
+    MARK_SUBMITTED: 'SUBMITTED',
   },
   DUPLICATE: {},
   // A discarded task can be brought back (the Archive section's Restore /

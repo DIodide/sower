@@ -38,6 +38,9 @@ vi.mock('@sower/platforms', () => ({
       ? { discover: async () => ({}) }
       : null,
   resolveUrl: async (url: string) => url,
+  // Verified tenant probe (proven in @sower/platforms + discord-ingest tests):
+  // no fixture here ever carries a tenant-less greenhouse ref, so always null.
+  deriveGreenhouseTenant: async () => null,
 }));
 
 vi.mock('./ingest.js', () => ({

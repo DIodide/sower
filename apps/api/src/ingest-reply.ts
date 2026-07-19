@@ -90,6 +90,13 @@ export function renderTaskLine(
     return `🗑️ ${ref} · discarded${date}`;
   }
 
+  // Sent wins next: whether the pipeline submitted it or a human marked it
+  // applied out of band (MARK_SUBMITTED), the honest line is "applied" —
+  // never "queued"/"investigating…" for an application that already went out.
+  if (task.state === 'SUBMITTED' || task.state === 'CONFIRMED') {
+    return `✅ ${ref} · applied${date}`;
+  }
+
   // Screenshot tasks: the run kind is authoritative; the CDN host covers
   // parked screenshots that never got an investigation run.
   if (run?.kind === 'screenshot' || (!run && isDiscordAttachmentUrl(job.url))) {

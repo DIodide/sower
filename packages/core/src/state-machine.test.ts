@@ -40,10 +40,12 @@ const ALL_EVENTS: TaskEvent[] = [
   'RETRY',
   'DISCARD',
   'RESTORE',
+  'MARK_SUBMITTED',
 ];
 
 /** Every state a task may be DISCARDed from (all non-terminal states except
- * SUBMITTED — a sent application can't be removed from the queue). */
+ * SUBMITTED — a sent application can't be removed from the queue).
+ * MARK_SUBMITTED (applied out of band) is allowed from exactly this set. */
 const DISCARDABLE_STATES: TaskState[] = [
   'INGESTED',
   'PARSED',
@@ -83,6 +85,11 @@ const VALID_TRANSITIONS: Array<[TaskState, TaskEvent, TaskState]> = [
     state,
     'DISCARD',
     'DISCARDED',
+  ]),
+  ...DISCARDABLE_STATES.map((state): [TaskState, TaskEvent, TaskState] => [
+    state,
+    'MARK_SUBMITTED',
+    'SUBMITTED',
   ]),
   ['DISCARDED', 'RESTORE', 'NEEDS_INPUT'],
 ];
@@ -177,6 +184,32 @@ describe('transition', () => {
       );
       expect(canTransition(state, 'DISCARD')).toBe(false);
     }
+  });
+
+  it('supports MARK_SUBMITTED (applied out of band) from every discardable state', () => {
+    for (const state of DISCARDABLE_STATES) {
+      expect(transition(state, 'MARK_SUBMITTED')).toBe('SUBMITTED');
+    }
+  });
+
+  it('refuses MARK_SUBMITTED once sent (SUBMITTED/CONFIRMED) or archived (DISCARDED/DUPLICATE)', () => {
+    for (const state of [
+      'SUBMITTED',
+      'CONFIRMED',
+      'DISCARDED',
+      'DUPLICATE',
+    ] as TaskState[]) {
+      expect(() => transition(state, 'MARK_SUBMITTED')).toThrow(
+        InvalidTransitionError,
+      );
+      expect(canTransition(state, 'MARK_SUBMITTED')).toBe(false);
+    }
+  });
+
+  it('a task marked applied out of band can still be confirmed (SUBMITTED -> CONFIRMED)', () => {
+    expect(
+      transition(transition('NEEDS_INPUT', 'MARK_SUBMITTED'), 'CONFIRM'),
+    ).toBe('CONFIRMED');
   });
 
   it('DISCARDED allows only RESTORE (back to NEEDS_INPUT)', () => {

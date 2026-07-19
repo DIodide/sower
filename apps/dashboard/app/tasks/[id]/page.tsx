@@ -786,11 +786,17 @@ export default async function TaskPage({
           ) : null}
         </div>
 
-        {/* ---- action row: discard (hidden once sent or already discarded) ---- */}
+        {/* ---- action row: mark applied + discard (hidden once sent or
+             already discarded; DUPLICATE keeps only discard) ---- */}
         {!['SUBMITTED', 'CONFIRMED', 'DISCARDED'].includes(task.state) ? (
           <>
             <hr className="divider-soft" />
-            <TaskActions taskId={task.id} mode="discard" />
+            <div className="row" style={{ alignItems: 'flex-start' }}>
+              {task.state !== 'DUPLICATE' ? (
+                <TaskActions taskId={task.id} mode="mark-applied" />
+              ) : null}
+              <TaskActions taskId={task.id} mode="discard" />
+            </div>
           </>
         ) : null}
       </header>
