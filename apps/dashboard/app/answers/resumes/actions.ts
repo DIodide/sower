@@ -46,7 +46,7 @@ const runResponseSchema = z.object({
   run: z.object({
     id: z.string().uuid(),
     resumeId: z.string().uuid().nullish(),
-    kind: z.enum(['sync', 'agent', 'write']),
+    kind: z.enum(['sync', 'agent', 'write', 'fork']),
     status: z.enum(['running', 'succeeded', 'failed']),
     // Transcript steps pass through untyped; the viewer renders them.
     transcript: z.unknown().nullish(),
@@ -142,6 +142,182 @@ export async function saveResumeEdit(
     result.body,
     'save started — committing and recompiling your resume.',
   );
+}
+
+// Mirrors the api's forkBodySchema (and FORK_NAME_RE in the editor job).
+const forkNameSchema = z
+  .string()
+  .trim()
+  .regex(
+    /^[a-z0-9_-]{2,60}$/i,
+    'name must be 2-60 letters/digits/dashes/underscores',
+  );
+
+const linkNameSchema = z
+  .string()
+  .trim()
+  .min(1, 'give the link a name (e.g. the company)')
+  .max(200, 'link name must be at most 200 characters');
+
+const shareLinkSchema = z.object({
+  id: z.string().uuid(),
+  resumeId: z.string().uuid(),
+  name: z.string(),
+  token: z.string(),
+  enabled: z.boolean(),
+  viewCount: z.number(),
+  lastViewedAt: z.string().nullish(),
+  createdAt: z.string().nullish(),
+  /** Full public URL (…/r/<token>) as the api rendered it. */
+  url: z.string(),
+});
+
+export type ShareLink = z.infer<typeof shareLinkSchema>;
+
+export interface ShareLinkResult {
+  ok: boolean;
+  message: string;
+  link?: ShareLink;
+}
+
+export interface ShareLinkListResult {
+  ok: boolean;
+  message: string;
+  links?: ShareLink[];
+}
+
+const versionSchema = z.object({
+  id: z.string().uuid(),
+  resumeId: z.string().uuid(),
+  commitSha: z.string(),
+  texSource: z.string(),
+  /** Vault path — streamed via /answers/resumes/versions/[versionId]. */
+  pdfStoragePath: z.string().nullish(),
+  runId: z.string().uuid().nullish(),
+  kind: z.enum(['agent', 'write', 'sync', 'fork']),
+  createdAt: z.string().nullish(),
+});
+
+export type ResumeVersionEntry = z.infer<typeof versionSchema>;
+
+export interface VersionListResult {
+  ok: boolean;
+  message: string;
+  versions?: ResumeVersionEntry[];
+}
+
+/** Fork a resume: copy its current source to a new <name>.tex + new row. */
+export async function forkResume(
+  id: string,
+  name: string,
+): Promise<ResumeRunActionResult> {
+  const idParsed = idSchema.safeParse(id);
+  if (!idParsed.success) return { ok: false, message: 'invalid resume id.' };
+  const nameParsed = forkNameSchema.safeParse(name);
+  if (!nameParsed.success) {
+    return {
+      ok: false,
+      message: nameParsed.error.issues[0]?.message ?? 'invalid name',
+    };
+  }
+  const result = await apiRequest(
+    `/resumes/${encodeURIComponent(idParsed.data)}/fork`,
+    { method: 'POST', body: { name: nameParsed.data } },
+  );
+  if (!result.ok) return { ok: false, message: result.message };
+  revalidatePath('/answers/resumes');
+  return triggered(
+    result.body,
+    'fork started — the copy will appear once it compiles.',
+  );
+}
+
+/** Create a named public share link (…/r/<token>) for a resume. */
+export async function createShareLink(
+  id: string,
+  name: string,
+): Promise<ShareLinkResult> {
+  const idParsed = idSchema.safeParse(id);
+  if (!idParsed.success) return { ok: false, message: 'invalid resume id.' };
+  const nameParsed = linkNameSchema.safeParse(name);
+  if (!nameParsed.success) {
+    return {
+      ok: false,
+      message: nameParsed.error.issues[0]?.message ?? 'invalid link name',
+    };
+  }
+  const result = await apiRequest(
+    `/resumes/${encodeURIComponent(idParsed.data)}/links`,
+    { method: 'POST', body: { name: nameParsed.data } },
+  );
+  if (!result.ok) return { ok: false, message: result.message };
+  const parsed = z.object({ link: shareLinkSchema }).safeParse(result.body);
+  if (!parsed.success) {
+    return { ok: false, message: 'the api returned an unexpected link shape.' };
+  }
+  revalidatePath('/answers/resumes');
+  return { ok: true, message: 'share link created.', link: parsed.data.link };
+}
+
+/** List a resume's share links (newest first). */
+export async function listShareLinks(id: string): Promise<ShareLinkListResult> {
+  const idParsed = idSchema.safeParse(id);
+  if (!idParsed.success) return { ok: false, message: 'invalid resume id.' };
+  const result = await apiRequest(
+    `/resumes/${encodeURIComponent(idParsed.data)}/links`,
+  );
+  if (!result.ok) return { ok: false, message: result.message };
+  const parsed = z
+    .object({ links: z.array(shareLinkSchema) })
+    .safeParse(result.body);
+  if (!parsed.success) {
+    return { ok: false, message: 'the api returned an unexpected link shape.' };
+  }
+  return { ok: true, message: 'ok', links: parsed.data.links };
+}
+
+/** Enable/disable (revoke) a share link. Disable IS the revoke. */
+export async function setShareLinkEnabled(
+  linkId: string,
+  enabled: boolean,
+): Promise<ShareLinkResult> {
+  const idParsed = idSchema.safeParse(linkId);
+  if (!idParsed.success) return { ok: false, message: 'invalid link id.' };
+  const result = await apiRequest(
+    `/resumes/links/${encodeURIComponent(idParsed.data)}/${enabled ? 'enable' : 'disable'}`,
+    { method: 'POST' },
+  );
+  if (!result.ok) return { ok: false, message: result.message };
+  const parsed = z.object({ link: shareLinkSchema }).safeParse(result.body);
+  if (!parsed.success) {
+    return { ok: false, message: 'the api returned an unexpected link shape.' };
+  }
+  revalidatePath('/answers/resumes');
+  return {
+    ok: true,
+    message: enabled ? 'link re-enabled.' : 'link disabled.',
+    link: parsed.data.link,
+  };
+}
+
+/** Version history for a resume, newest first. */
+export async function listVersions(id: string): Promise<VersionListResult> {
+  const idParsed = idSchema.safeParse(id);
+  if (!idParsed.success) return { ok: false, message: 'invalid resume id.' };
+  const result = await apiRequest(
+    `/resumes/${encodeURIComponent(idParsed.data)}/versions`,
+  );
+  if (!result.ok) return { ok: false, message: result.message };
+  const parsed = z
+    .object({ versions: z.array(versionSchema) })
+    .safeParse(result.body);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      message: 'the api returned an unexpected versions shape.',
+    };
+  }
+  return { ok: true, message: 'ok', versions: parsed.data.versions };
 }
 
 /** Poll one run's status/transcript (the editor UI's progress view). */

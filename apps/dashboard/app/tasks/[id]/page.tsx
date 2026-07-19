@@ -822,14 +822,20 @@ export default async function TaskPage({
           ) : null}
         </div>
 
-        {/* The user's own note — the same inline editor the rows use.
-            Read-only display once the task has left the queue. */}
-        <div style={{ marginTop: '0.375rem', maxWidth: '48rem' }}>
-          <InlineNote
-            taskId={task.id}
-            note={task.notes}
-            readOnly={PRIORITY_LOCKED.has(task.state)}
-          />
+        {/* The user's own note — the same inline editor the rows use, but
+            clearly labeled so it reads as an editable field (a bare ghost
+            line proved too subtle here). Notes are annotations: editable in
+            EVERY state, including Sent/Archive. */}
+        <div style={{ marginTop: '0.5rem', maxWidth: '48rem' }}>
+          <div
+            className="hint faint"
+            style={{ fontSize: '0.72rem', fontWeight: 600 }}
+          >
+            Notes
+          </div>
+          <div className="well" style={{ padding: '0.375rem 0.625rem' }}>
+            <InlineNote taskId={task.id} note={task.notes} />
+          </div>
         </div>
 
         {stepIndex >= 0 ? (
