@@ -48,7 +48,8 @@ export type TaskEvent =
   | 'DISCARD'
   | 'RESTORE'
   | 'MARK_SUBMITTED'
-  | 'UNMARK_SUBMITTED';
+  | 'UNMARK_SUBMITTED'
+  | 'REINGEST';
 
 export interface QuestionOption {
   label: string;

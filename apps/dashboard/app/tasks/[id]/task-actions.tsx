@@ -83,7 +83,7 @@ const LABELS: Record<Mode, { idle: string; className: string; title: string }> =
       idle: 'Re-ingest',
       className: 'btn',
       title:
-        'Discard this task and re-run it through ingestion from scratch (fresh parse, current pipeline)',
+        'Reset this task and re-run it through ingestion from scratch — same task, fresh parse',
     },
   };
 
@@ -125,15 +125,10 @@ export function TaskActions({ taskId, mode }: { taskId: string; mode: Mode }) {
       return requeueTask(taskId);
     };
     const outcome = await run();
-    // Reingest replaced this task with a fresh one — follow the replacement
-    // (the success toast still renders while the navigation happens).
-    if (outcome.ok && mode === 'reingest' && outcome.newTaskId) {
-      router.push(`/tasks/${outcome.newTaskId}`);
-      return outcome;
-    }
     // The action's revalidatePath alone can leave THIS page's banner/badge
     // stale (the restore-from-archive bug); an explicit client refresh makes
-    // every state change land without a manual reload.
+    // every state change land without a manual reload. Reingest included:
+    // the reset happens in place, so this page IS the (same) task.
     if (outcome.ok) router.refresh();
     return outcome;
   }, null);

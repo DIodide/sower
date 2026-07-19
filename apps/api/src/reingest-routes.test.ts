@@ -212,6 +212,15 @@ function eventInserts(writes: DbWrite[]): Record<string, unknown>[] {
     .map((write) => write.arg as Record<string, unknown>);
 }
 
+/** The application_tasks row updates recorded, in order. */
+function taskUpdates(writes: DbWrite[]): Record<string, unknown>[] {
+  return writes
+    .filter(
+      (write) => write.method === 'update' && write.table === applicationTasks,
+    )
+    .map((write) => write.arg as Record<string, unknown>);
+}
+
 beforeEach(() => {
   platformState.ref = {
     platform: 'greenhouse',
@@ -259,13 +268,10 @@ describe('POST /tasks/:id/reingest', () => {
     expect(res.json()).toEqual({ error: 'task not found' });
   });
 
-  it('re-ingests a supported job: fresh task QUEUED, old task DISCARDED with note, REINGESTED event', async () => {
+  it('re-ingests a supported job IN PLACE: same task id resets to INGESTED then ends QUEUED + enqueued', async () => {
     const writes: DbWrite[] = [];
     const db = createFakeDb({
       selectResults: [[taskJobRow('NEEDS_INPUT')]],
-      // insert order: DISCARD event, task row (returning), PARSE_OK event,
-      // ENQUEUE event, REINGESTED event.
-      insertResults: [[], [{ id: 'task-new' }]],
       writes,
     });
     const { deps, enqueueProcess } = createDeps(db);
@@ -278,55 +284,70 @@ describe('POST /tasks/:id/reingest', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({
-      ok: true,
-      newTaskId: 'task-new',
-      state: 'QUEUED',
-    });
+    // No newTaskId anymore: the task IS the task.
+    expect(res.json()).toEqual({ ok: true, state: 'QUEUED' });
     expect(enqueueProcess).toHaveBeenCalledTimes(1);
-    expect(enqueueProcess).toHaveBeenCalledWith('task-new');
+    expect(enqueueProcess).toHaveBeenCalledWith(OLD_TASK_ID);
 
-    // The fresh task spawned on the SAME job row (dedupe continuity).
+    // NO new task row: the reset happens on the existing row.
     const taskInsert = writes.find(
       (write) => write.method === 'insert' && write.table === applicationTasks,
     );
-    expect(taskInsert?.arg).toMatchObject({
-      jobId: 'job-1',
-      state: 'INGESTED',
-    });
+    expect(taskInsert).toBeUndefined();
 
     const inserted = eventInserts(writes);
-    // Old task retired first, with the auto/reingested marker.
+    // The SAME task walks REINGEST -> PARSE_OK -> ENQUEUE, in order.
+    expect(inserted.map((event) => event.type)).toEqual([
+      'REINGEST',
+      'PARSE_OK',
+      'ENQUEUE',
+    ]);
     expect(inserted[0]).toMatchObject({
       taskId: OLD_TASK_ID,
-      type: 'DISCARD',
+      type: 'REINGEST',
       fromState: 'NEEDS_INPUT',
-      toState: 'DISCARDED',
-      data: { reason: 'auto', note: 'reingested' },
+      toState: 'INGESTED',
+      data: { reason: 'manual' },
     });
-    // Fresh task walks the exact ingest tail: PARSE_OK then ENQUEUE.
-    expect(inserted[1]).toMatchObject({ taskId: 'task-new', type: 'PARSE_OK' });
+    expect(inserted[1]).toMatchObject({
+      taskId: OLD_TASK_ID,
+      type: 'PARSE_OK',
+      toState: 'PARSED',
+    });
     expect(inserted[2]).toMatchObject({
-      taskId: 'task-new',
+      taskId: OLD_TASK_ID,
       type: 'ENQUEUE',
       toState: 'QUEUED',
     });
-    // The old task's timeline points at its replacement.
-    expect(inserted[3]).toMatchObject({
-      taskId: OLD_TASK_ID,
-      type: 'REINGESTED',
-      data: { newTaskId: 'task-new' },
-    });
 
-    // The old task's #ingest reply flipped to discarded (best-effort).
+    // The REINGEST row update clears the pipeline artifacts atomically…
+    expect(taskUpdates(writes)[0]).toMatchObject({
+      state: 'INGESTED',
+      attempt: 0,
+      lastError: null,
+      jobSpec: null,
+      resolution: null,
+    });
+    // …and NEVER touches user annotations (notes/priority/dueDate/sortRank/
+    // ingest reply refs survive a reingest).
+    for (const update of taskUpdates(writes)) {
+      expect(update).not.toHaveProperty('notes');
+      expect(update).not.toHaveProperty('priority');
+      expect(update).not.toHaveProperty('dueDate');
+      expect(update).not.toHaveProperty('sortRank');
+      expect(update).not.toHaveProperty('ingestChannelId');
+      expect(update).not.toHaveProperty('ingestMessageId');
+    }
+
+    // The #ingest reply line returns to queued as the state settles.
     expect(refreshState.calls).toEqual([OLD_TASK_ID]);
-    // A queued spawn needs no investigation; the stored identity was already
+    // A queued reset needs no investigation; the stored identity was already
     // discoverable, so the probe was never consulted either.
     expect(investigateState.calls).toEqual([]);
     expect(probeState.calls).toEqual([]);
   });
 
-  it('re-ingests an unknown-platform job: fresh task parks NEEDS_INPUT and investigation is triggered', async () => {
+  it('re-ingests an unknown-platform job: the SAME task re-parks NEEDS_INPUT and investigation is triggered', async () => {
     platformState.ref = { platform: 'unknown', tenant: null, externalId: null };
     const writes: DbWrite[] = [];
     const db = createFakeDb({
@@ -342,7 +363,6 @@ describe('POST /tasks/:id/reingest', () => {
           }),
         ],
       ],
-      insertResults: [[], [{ id: 'task-new' }]],
       writes,
     });
     const { deps, enqueueProcess } = createDeps(db);
@@ -355,28 +375,33 @@ describe('POST /tasks/:id/reingest', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({
-      ok: true,
-      newTaskId: 'task-new',
-      state: 'NEEDS_INPUT',
-    });
+    expect(res.json()).toEqual({ ok: true, state: 'NEEDS_INPUT' });
     expect(enqueueProcess).not.toHaveBeenCalled();
 
     const inserted = eventInserts(writes);
     expect(inserted.map((event) => event.type)).toEqual([
-      'DISCARD',
+      'REINGEST',
       'PARSE_OK',
       'PARK',
-      'REINGESTED',
     ]);
     expect(inserted[2]).toMatchObject({
-      taskId: 'task-new',
+      taskId: OLD_TASK_ID,
       type: 'PARK',
       toState: 'NEEDS_INPUT',
       data: { reason: 'unknown platform' },
     });
-    // Parked spawn: the (self-gating) Tier-2 form discovery was offered.
-    expect(investigateState.calls).toEqual(['task-new']);
+    // The pipeline artifacts were cleared even though the task re-parks:
+    // the fresh run (or the browser agent) rebuilds them.
+    expect(taskUpdates(writes)[0]).toMatchObject({
+      state: 'INGESTED',
+      attempt: 0,
+      lastError: null,
+      jobSpec: null,
+      resolution: null,
+    });
+    // Parked reset: the (self-gating) Tier-2 form discovery was offered for
+    // THIS task — no replacement exists.
+    expect(investigateState.calls).toEqual([OLD_TASK_ID]);
     expect(refreshState.calls).toEqual([OLD_TASK_ID]);
   });
 
@@ -403,12 +428,10 @@ describe('POST /tasks/:id/reingest', () => {
     }
   });
 
-  it('re-ingests an already-DISCARDED task without a double discard — it stays archived, the fresh task still spawns', async () => {
+  it('re-ingests a DISCARDED task straight from the archive: in-place reset, no restore-first dance', async () => {
     const writes: DbWrite[] = [];
     const db = createFakeDb({
       selectResults: [[taskJobRow('DISCARDED')]],
-      // No DISCARD event insert this time: the task insert is first.
-      insertResults: [[{ id: 'task-new' }]],
       writes,
     });
     const { deps, enqueueProcess } = createDeps(db);
@@ -421,40 +444,61 @@ describe('POST /tasks/:id/reingest', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({
-      ok: true,
-      newTaskId: 'task-new',
-      state: 'QUEUED',
-    });
-    expect(enqueueProcess).toHaveBeenCalledWith('task-new');
+    expect(res.json()).toEqual({ ok: true, state: 'QUEUED' });
+    expect(enqueueProcess).toHaveBeenCalledWith(OLD_TASK_ID);
 
     const inserted = eventInserts(writes);
-    // No DISCARD anywhere — the old task keeps its original archive entry.
+    // The archived task itself leaves the archive via REINGEST -> INGESTED.
     expect(inserted.map((event) => event.type)).toEqual([
+      'REINGEST',
       'PARSE_OK',
       'ENQUEUE',
-      'REINGESTED',
     ]);
-    expect(inserted[2]).toMatchObject({
+    expect(inserted[0]).toMatchObject({
       taskId: OLD_TASK_ID,
-      type: 'REINGESTED',
-      data: { newTaskId: 'task-new' },
+      type: 'REINGEST',
+      fromState: 'DISCARDED',
+      toState: 'INGESTED',
     });
-    // No task-row update wrote DISCARDED either.
-    const discardedUpdate = writes.find(
-      (write) =>
-        write.method === 'update' &&
-        write.table === applicationTasks &&
-        (write.arg as Record<string, unknown>).state === 'DISCARDED',
+    // No new task row spawned.
+    const taskInsert = writes.find(
+      (write) => write.method === 'insert' && write.table === applicationTasks,
     );
-    expect(discardedUpdate).toBeUndefined();
+    expect(taskInsert).toBeUndefined();
   });
 
-  it('upgrades the job row via the verified greenhouse tenant probe before spawning', async () => {
+  it('re-ingests a DUPLICATE task in place (job-level dedupe is unaffected)', async () => {
+    const writes: DbWrite[] = [];
+    const db = createFakeDb({
+      selectResults: [[taskJobRow('DUPLICATE')]],
+      writes,
+    });
+    const { deps, enqueueProcess } = createDeps(db);
+    const app = buildServer(deps);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/tasks/${OLD_TASK_ID}/reingest`,
+      headers: { 'x-api-key': 'test-key' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, state: 'QUEUED' });
+    expect(enqueueProcess).toHaveBeenCalledWith(OLD_TASK_ID);
+    const inserted = eventInserts(writes);
+    expect(inserted[0]).toMatchObject({
+      taskId: OLD_TASK_ID,
+      type: 'REINGEST',
+      fromState: 'DUPLICATE',
+      toState: 'INGESTED',
+    });
+  });
+
+  it('upgrades the job row via the verified greenhouse tenant probe before the in-place reset', async () => {
     // The akuna shape: stored tenant-less greenhouse (parked at ingest —
     // gh_jid on the company's own domain). The probe can NOW verify the
     // tenant, so reingest adopts the canonical board identity onto the jobs
-    // row FIRST and the fresh task queues instead of re-parking.
+    // row FIRST and the SAME task queues instead of re-parking.
     const pageUrl =
       'https://akunacapital.com/careers/job/8018853/swe?gh_jid=8018853';
     const boardUrl =
@@ -480,7 +524,6 @@ describe('POST /tasks/:id/reingest', () => {
         ],
         [], // collision check: no other row owns the board identity
       ],
-      insertResults: [[], [{ id: 'task-new' }]],
       writes,
     });
     const { deps, enqueueProcess } = createDeps(db);
@@ -493,11 +536,7 @@ describe('POST /tasks/:id/reingest', () => {
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toEqual({
-      ok: true,
-      newTaskId: 'task-new',
-      state: 'QUEUED',
-    });
+    expect(res.json()).toEqual({ ok: true, state: 'QUEUED' });
     // The probe ran against the row's CURRENT url + external id.
     expect(probeState.calls).toEqual([{ url: pageUrl, jobId: '8018853' }]);
     // The jobs row adopted the verified identity + canonical board URL.
@@ -512,21 +551,20 @@ describe('POST /tasks/:id/reingest', () => {
       canonicalUrl: boardUrl,
       dedupeKey: 'greenhouse:akunacapital:8018853',
     });
-    // The fresh task queued as a normal supported greenhouse job, its
+    // The SAME task queued as a normal supported greenhouse job, its
     // PARSE_OK recorded against the upgraded canonical URL.
     const inserted = eventInserts(writes);
     expect(inserted.map((event) => event.type)).toEqual([
-      'DISCARD',
+      'REINGEST',
       'PARSE_OK',
       'ENQUEUE',
-      'REINGESTED',
     ]);
     expect(inserted[1]).toMatchObject({
-      taskId: 'task-new',
+      taskId: OLD_TASK_ID,
       type: 'PARSE_OK',
       data: { canonicalUrl: boardUrl, platform: 'greenhouse' },
     });
-    expect(enqueueProcess).toHaveBeenCalledWith('task-new');
+    expect(enqueueProcess).toHaveBeenCalledWith(OLD_TASK_ID);
     expect(investigateState.calls).toEqual([]);
   });
 });

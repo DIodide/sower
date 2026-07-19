@@ -322,6 +322,10 @@ const EVENT_LABELS: Record<string, string> = {
   RESTORE: 'Restored to the queue',
   MARK_SUBMITTED: 'Marked applied (out of band)',
   UNMARK_SUBMITTED: 'Un-marked applied — back in the queue',
+  // The in-place reset (current behavior): same task, back to INGESTED.
+  REINGEST: 'Re-ingested — reset and re-run from scratch',
+  // Historical only: the old reingest flow discarded the task and spawned a
+  // replacement; existing timelines still carry this event type.
   REINGESTED: 'Re-ingested — replaced by a fresh task',
   REJECTED: 'Rejected',
   FORM_DISCOVERED: 'Application form discovered by the browser agent',

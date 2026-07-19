@@ -218,24 +218,31 @@ export interface SpawnedTask {
   parkedReason: string | null;
 }
 
+/** The job-row fields the ingest tail reads: the CURRENT platform identity
+ *  (reingest re-detects/upgrades it first) plus the canonical URL recorded on
+ *  the PARSE_OK event. */
+export interface IngestTailJob {
+  id: string;
+  canonicalUrl: string;
+  platform: string;
+  tenant: string | null;
+  externalId: string | null;
+}
+
 /**
- * The ingest-time task tail, shared by ingestJob and POST /tasks/:id/reingest:
- * insert a fresh application_tasks row on `job` (INGESTED), record PARSE_OK,
- * then either PARK -> NEEDS_INPUT (nothing can discover the job's platform
- * identity, no enqueue) or ENQUEUE -> QUEUED + queue.enqueueProcess. The
- * platform identity is read from the fields passed in, so callers must pass
- * the CURRENT job-row values (reingest re-detects/upgrades them first).
+ * The ingest-time task tail, shared by spawnTaskForJob (fresh ingest) and
+ * POST /tasks/:id/reingest (in-place reset of an existing task): from an
+ * INGESTED task, record PARSE_OK, then either PARK -> NEEDS_INPUT (nothing
+ * can discover the job's platform identity, no enqueue) or ENQUEUE -> QUEUED
+ * + queue.enqueueProcess. The platform identity is read from the fields
+ * passed in, so callers must pass the CURRENT job-row values.
  */
-export async function spawnTaskForJob(
+export async function runIngestTail(
   deps: Deps,
-  job: {
-    id: string;
-    canonicalUrl: string;
-    platform: string;
-    tenant: string | null;
-    externalId: string | null;
-  },
-): Promise<SpawnedTask> {
+  job: IngestTailJob,
+  taskId: string,
+  fromState: TaskState,
+): Promise<Omit<SpawnedTask, 'taskId'>> {
   const { db, queue } = deps;
   // jobs.platform is free text in the DB; PlatformRef.platform is the union.
   const ref: PlatformRef = {
@@ -244,16 +251,7 @@ export async function spawnTaskForJob(
     externalId: job.externalId,
   };
 
-  const insertedTasks = await db
-    .insert(applicationTasks)
-    .values({ jobId: job.id, state: 'INGESTED' })
-    .returning({ id: applicationTasks.id });
-  const task = insertedTasks[0];
-  if (!task) {
-    throw new Error('failed to insert application task');
-  }
-
-  let state = await transitionTask(db, task.id, 'INGESTED', 'PARSE_OK', {
+  let state = await transitionTask(db, taskId, fromState, 'PARSE_OK', {
     canonicalUrl: job.canonicalUrl,
     platform: ref.platform,
   });
@@ -261,15 +259,35 @@ export async function spawnTaskForJob(
   const reason = parkReason(ref);
   if (reason !== null) {
     // Park for manual input. Do NOT enqueue: no adapter can discover it.
-    state = await transitionTask(db, task.id, state, 'PARK', {
+    state = await transitionTask(db, taskId, state, 'PARK', {
       reason,
       platform: ref.platform,
       tenant: ref.tenant,
     });
-    return { taskId: task.id, state, parkedReason: reason };
+    return { state, parkedReason: reason };
   }
 
-  state = await transitionTask(db, task.id, state, 'ENQUEUE');
-  await queue.enqueueProcess(task.id);
-  return { taskId: task.id, state, parkedReason: null };
+  state = await transitionTask(db, taskId, state, 'ENQUEUE');
+  await queue.enqueueProcess(taskId);
+  return { state, parkedReason: null };
+}
+
+/**
+ * Fresh-ingest task spawn, used by ingestJob: insert a new application_tasks
+ * row on `job` (INGESTED), then walk the shared ingest tail (runIngestTail).
+ */
+export async function spawnTaskForJob(
+  deps: Deps,
+  job: IngestTailJob,
+): Promise<SpawnedTask> {
+  const insertedTasks = await deps.db
+    .insert(applicationTasks)
+    .values({ jobId: job.id, state: 'INGESTED' })
+    .returning({ id: applicationTasks.id });
+  const task = insertedTasks[0];
+  if (!task) {
+    throw new Error('failed to insert application task');
+  }
+  const tail = await runIngestTail(deps, job, task.id, 'INGESTED');
+  return { taskId: task.id, ...tail };
 }

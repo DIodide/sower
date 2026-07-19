@@ -1,4 +1,9 @@
-import type { TaskEvent, TaskState } from '@sower/core';
+import type {
+  JobSpec,
+  ResolutionResult,
+  TaskEvent,
+  TaskState,
+} from '@sower/core';
 import { transition } from '@sower/core';
 import { applicationTasks, events } from '@sower/db';
 import { eq } from 'drizzle-orm';
@@ -11,6 +16,10 @@ import type { Db } from './types.js';
  * an illegal (state, event) pair throws InvalidTransitionError, which is a
  * bug signal (a runtime path the table forbids), never control flow.
  *
+ * `patch` merges extra task columns into the SAME row update (one atomic
+ * UPDATE): clearing a stale lastError alongside a successful pass, or the
+ * reingest reset (attempt/jobSpec/resolution back to fresh-ingest values).
+ *
  * Returns the state the task moved to.
  */
 export async function transitionTask(
@@ -19,7 +28,12 @@ export async function transitionTask(
   fromState: TaskState,
   event: TaskEvent,
   data?: Record<string, unknown>,
-  patch?: { lastError?: string | null },
+  patch?: {
+    lastError?: string | null;
+    attempt?: number;
+    jobSpec?: JobSpec | null;
+    resolution?: ResolutionResult | null;
+  },
 ): Promise<TaskState> {
   const toState = transition(fromState, event);
   await db

@@ -1,12 +1,12 @@
 import type { PlatformRef } from '@sower/core';
-import { canonicalizeUrl, canTransition } from '@sower/core';
-import { applicationTasks, events, type Job, jobs } from '@sower/db';
+import { canonicalizeUrl } from '@sower/core';
+import { applicationTasks, type Job, jobs } from '@sower/db';
 import { deriveGreenhouseTenant, detectPlatform } from '@sower/platforms';
 import { computeDedupeKey } from '@sower/sources';
 import { and, eq, ne, or } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { parkReason, spawnTaskForJob } from './ingest.js';
+import { parkReason, runIngestTail } from './ingest.js';
 import { refreshIngestReply } from './ingest-reply.js';
 import { triggerInvestigation } from './investigate-trigger.js';
 import { trailingNumericJobId } from './link-extract.js';
@@ -112,14 +112,16 @@ async function upgradeJobIdentity(deps: Deps, job: Job): Promise<void> {
 }
 
 /**
- * POST /tasks/:id/reingest — drop a task and run its job through ingestion
- * again, as if the posting had just arrived: the current task is discarded
- * (state permitting) and a FRESH task spawns on the SAME job row (dedupe
- * continuity — the posting stays one job), through exactly the ingest-time
- * tail (PARSE_OK, then queue or park+investigate). Refused (409) only for
- * SUBMITTED/CONFIRMED — an application already sent cannot be silently
- * replaced; un-mark it first. DISCARDED/DUPLICATE tasks stay archived as
- * history and simply gain a replacement.
+ * POST /tasks/:id/reingest — reset a task IN PLACE and run it through
+ * ingestion again, as if the posting had just arrived: the SAME task row
+ * (same id — nothing is discarded, no replacement spawns) transitions
+ * REINGEST -> INGESTED with its pipeline artifacts cleared (attempt,
+ * lastError, jobSpec, resolution — a fresh run rebuilds them; user
+ * annotations like notes/priority/dueDate/sortRank survive), then walks
+ * exactly the ingest-time tail (PARSE_OK, then queue or park+investigate).
+ * Refused (409) only for SUBMITTED/CONFIRMED — an application already sent
+ * cannot be silently redone; un-mark it first. DISCARDED/DUPLICATE tasks may
+ * be re-ingested straight from the archive (no restore-first dance).
  *
  * x-api-key gated by the server-wide preHandler, like every other route.
  */
@@ -149,41 +151,35 @@ export function registerReingestRoutes(app: FastifyInstance, deps: Deps): void {
       });
     }
 
-    // Retire the current task into the Archive. An already-DISCARDED (or
-    // DUPLICATE) task has no DISCARD edge and simply stays where it is —
-    // it remains the history entry its replacement's REINGESTED event
-    // points from.
-    if (canTransition(state, 'DISCARD')) {
-      await transitionTask(deps.db, taskId, state, 'DISCARD', {
-        reason: 'auto',
-        note: 'reingested',
-      });
-    }
-
-    // Fresh task on the SAME job row, through the ingest-time tail — with the
-    // identity re-detected/probe-upgraded from the row's CURRENT url first.
+    // Identity first: re-detect/probe-upgrade from the job row's CURRENT url,
+    // so the tail below sees the best identity available today.
     const job = row.job;
     await upgradeJobIdentity(deps, job);
-    const spawned = await spawnTaskForJob(deps, job);
-    if (spawned.parkedReason !== null) {
+
+    // In-place reset on the SAME task row, atomically: REINGEST -> INGESTED
+    // with the pipeline artifacts cleared in the same UPDATE. User
+    // annotations (notes, priority, dueDate, sortRank, ingest reply refs)
+    // are deliberately untouched.
+    const ingested = await transitionTask(
+      deps.db,
+      taskId,
+      state,
+      'REINGEST',
+      { reason: 'manual' },
+      { attempt: 0, lastError: null, jobSpec: null, resolution: null },
+    );
+
+    // The same ingest-time tail a fresh task walks — against THIS task.
+    const tail = await runIngestTail(deps, job, taskId, ingested);
+    if (tail.parkedReason !== null) {
       // Parked: nothing can process it — offer Tier-2 form discovery exactly
       // like a fresh unsupported ingest (self-gating, never throws).
-      await triggerInvestigation(deps, spawned.taskId);
+      await triggerInvestigation(deps, taskId);
     }
 
-    // Annotate the OLD task's timeline with its replacement (a direct events
-    // insert, not a transition — its state was settled above).
-    await deps.db.insert(events).values({
-      taskId,
-      type: 'REINGESTED',
-      data: { newTaskId: spawned.taskId },
-    });
-
-    // Best-effort: the old task's #ingest reply line flips to discarded.
+    // Best-effort: the #ingest reply line returns to queued/parked.
     await refreshIngestReply(deps, taskId);
 
-    return reply
-      .code(200)
-      .send({ ok: true, newTaskId: spawned.taskId, state: spawned.state });
+    return reply.code(200).send({ ok: true, state: tail.state });
   });
 }

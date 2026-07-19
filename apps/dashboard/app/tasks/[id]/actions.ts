@@ -26,9 +26,6 @@ import { documentKind } from './question-kind';
 export interface ActionResult {
   ok: boolean;
   message: string;
-  /** Reingest only: the fresh task that replaced the re-ingested one, so the
-   *  UI can follow the replacement. */
-  newTaskId?: string;
 }
 
 const uuidSchema = z.string().uuid();
@@ -606,11 +603,11 @@ export async function restoreTask(taskId: string): Promise<ActionResult> {
 }
 
 /**
- * Re-ingest a task via the api service: the current task is discarded (its
- * record and history stay in the Archive) and a FRESH task is spawned on the
- * same job — a from-scratch run through today's ingest pipeline (fresh parse,
- * current probes/adapters). Refused by the api (409) for SUBMITTED/CONFIRMED.
- * Returns the replacement's id as `newTaskId` so the UI can follow it.
+ * Re-ingest a task via the api service: the SAME task (same id) is reset in
+ * place back to INGESTED — pipeline artifacts (attempt, last error, job spec,
+ * resolution) cleared, user annotations kept — and re-run through today's
+ * ingest pipeline (fresh parse, current probes/adapters). Refused by the api
+ * (409) for SUBMITTED/CONFIRMED.
  */
 export async function reingestTask(taskId: string): Promise<ActionResult> {
   const idParse = uuidSchema.safeParse(taskId);
@@ -618,9 +615,6 @@ export async function reingestTask(taskId: string): Promise<ActionResult> {
   const result = await callApi(idParse.data, 'reingest');
   revalidatePath(`/tasks/${idParse.data}`);
   revalidatePath('/');
-  if (result.ok && result.newTaskId) {
-    revalidatePath(`/tasks/${result.newTaskId}`);
-  }
   return result;
 }
 
@@ -679,8 +673,6 @@ const apiResponseSchema = z.object({
   /** Reorder only: present when the drop crossed a tier boundary and the
    *  row adopted the destination tier's priority. */
   priority: z.number().optional(),
-  /** Reingest only: the fresh task that replaced the re-ingested one. */
-  newTaskId: z.string().optional(),
   error: z.string().optional(),
   message: z.string().optional(),
 });
@@ -801,8 +793,8 @@ async function callApi(
   if (action === 'reingest') {
     return {
       ok: true,
-      message: 're-ingested — a fresh task took its place.',
-      ...(body.newTaskId ? { newTaskId: body.newTaskId } : {}),
+      message:
+        're-ingested — this task was reset and is running through ingestion again from scratch.',
     };
   }
 

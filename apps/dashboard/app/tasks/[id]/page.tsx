@@ -539,8 +539,8 @@ function NextStep({
                     The individual jobs are in <Link href="/">your queue</Link>.{' '}
                   </>
                 ) : null}
-                Restore it if this rule got it wrong — or re-ingest it to give
-                it another go from scratch.
+                Restore it if this rule got it wrong — or re-ingest it to reset
+                this same task and run it through ingestion again from scratch.
               </p>
               <div className="row" style={{ alignItems: 'flex-start' }}>
                 <TaskActions taskId={task.id} mode="restore" />
@@ -557,8 +557,8 @@ function NextStep({
               <strong>Discarded</strong>
               {discard?.note ? <> — {discard.note}</> : null}. Moved to the
               Archive; the record and history are kept below. Restore it to pick
-              this application back up — or re-ingest it to give it another go
-              from scratch.
+              this application back up — or re-ingest it to reset this same task
+              and run it through ingestion again from scratch.
             </p>
             <div className="row" style={{ alignItems: 'flex-start' }}>
               <TaskActions taskId={task.id} mode="restore" />

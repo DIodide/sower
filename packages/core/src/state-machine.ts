@@ -34,11 +34,19 @@ export const ALLOWED: Record<
   // flight can be declared applied, jumping straight to SUBMITTED. It is
   // meaningless from SUBMITTED/CONFIRMED (already sent) and from the
   // DISCARDED/DUPLICATE archive (restore first).
+  //
+  // REINGEST (a human resetting the task to re-run it through ingestion from
+  // scratch, IN PLACE — same task id) is allowed from EVERY state except
+  // SUBMITTED/CONFIRMED: a sent application cannot be silently redone
+  // (un-mark it first). It IS allowed from the DISCARDED/DUPLICATE archive —
+  // re-ingesting an archived task replaces the old restore-then-reingest
+  // dance, and job-level dedupe is unaffected by a task-level reset.
   INGESTED: {
     PARSE_OK: 'PARSED',
     PARSE_DUPLICATE: 'DUPLICATE',
     DISCARD: 'DISCARDED',
     MARK_SUBMITTED: 'SUBMITTED',
+    REINGEST: 'INGESTED',
   },
   PARSED: {
     ENQUEUE: 'QUEUED',
@@ -47,12 +55,14 @@ export const ALLOWED: Record<
     PARK: 'NEEDS_INPUT',
     DISCARD: 'DISCARDED',
     MARK_SUBMITTED: 'SUBMITTED',
+    REINGEST: 'INGESTED',
   },
   QUEUED: {
     PROCESS_START: 'PREPARING',
     FAIL: 'FAILED',
     DISCARD: 'DISCARDED',
     MARK_SUBMITTED: 'SUBMITTED',
+    REINGEST: 'INGESTED',
   },
   PREPARING: {
     RESOLVED_ALL: 'REVIEW',
@@ -60,12 +70,14 @@ export const ALLOWED: Record<
     FAIL: 'FAILED',
     DISCARD: 'DISCARDED',
     MARK_SUBMITTED: 'SUBMITTED',
+    REINGEST: 'INGESTED',
   },
   NEEDS_INPUT: {
     RETRY: 'QUEUED',
     FAIL: 'FAILED',
     DISCARD: 'DISCARDED',
     MARK_SUBMITTED: 'SUBMITTED',
+    REINGEST: 'INGESTED',
   },
   REVIEW: {
     APPROVED: 'FILLING',
@@ -73,6 +85,7 @@ export const ALLOWED: Record<
     FAIL: 'FAILED',
     DISCARD: 'DISCARDED',
     MARK_SUBMITTED: 'SUBMITTED',
+    REINGEST: 'INGESTED',
   },
   // OTP flows arrive with account-based platforms in M3/M4; the edges exist
   // now so AWAITING_OTP is reachable and the table never needs a hot patch.
@@ -80,6 +93,7 @@ export const ALLOWED: Record<
     RETRY: 'FILLING',
     DISCARD: 'DISCARDED',
     MARK_SUBMITTED: 'SUBMITTED',
+    REINGEST: 'INGESTED',
   },
   FILLING: {
     FILLED: 'REVIEW',
@@ -87,6 +101,7 @@ export const ALLOWED: Record<
     FAIL: 'FAILED',
     DISCARD: 'DISCARDED',
     MARK_SUBMITTED: 'SUBMITTED',
+    REINGEST: 'INGESTED',
   },
   SUBMITTED: {
     CONFIRM: 'CONFIRMED',
@@ -106,13 +121,17 @@ export const ALLOWED: Record<
     PROCESS_START: 'PREPARING',
     DISCARD: 'DISCARDED',
     MARK_SUBMITTED: 'SUBMITTED',
+    REINGEST: 'INGESTED',
   },
-  DUPLICATE: {},
+  DUPLICATE: {
+    REINGEST: 'INGESTED',
+  },
   // A discarded task can be brought back (the Archive section's Restore /
   // an undo after a mis-click). It lands in NEEDS_INPUT — a human decides
   // what happens next — rather than trying to reconstruct its prior state.
   DISCARDED: {
     RESTORE: 'NEEDS_INPUT',
+    REINGEST: 'INGESTED',
   },
 };
 

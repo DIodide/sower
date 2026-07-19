@@ -42,6 +42,7 @@ const ALL_EVENTS: TaskEvent[] = [
   'RESTORE',
   'MARK_SUBMITTED',
   'UNMARK_SUBMITTED',
+  'REINGEST',
 ];
 
 /** Every state a task may be DISCARDed from (all non-terminal states except
@@ -57,6 +58,17 @@ const DISCARDABLE_STATES: TaskState[] = [
   'AWAITING_OTP',
   'FILLING',
   'FAILED',
+];
+
+/** Every state a task may be REINGESTed from (in-place reset back to
+ * INGESTED): every state except SUBMITTED/CONFIRMED — a sent application
+ * cannot be silently redone. Unlike DISCARD/MARK_SUBMITTED this includes the
+ * DISCARDED/DUPLICATE archive: re-ingesting straight from the archive
+ * replaces the old restore-then-reingest dance. */
+const REINGESTABLE_STATES: TaskState[] = [
+  ...DISCARDABLE_STATES,
+  'DUPLICATE',
+  'DISCARDED',
 ];
 
 const VALID_TRANSITIONS: Array<[TaskState, TaskEvent, TaskState]> = [
@@ -91,6 +103,11 @@ const VALID_TRANSITIONS: Array<[TaskState, TaskEvent, TaskState]> = [
     state,
     'MARK_SUBMITTED',
     'SUBMITTED',
+  ]),
+  ...REINGESTABLE_STATES.map((state): [TaskState, TaskEvent, TaskState] => [
+    state,
+    'REINGEST',
+    'INGESTED',
   ]),
   ['DISCARDED', 'RESTORE', 'NEEDS_INPUT'],
   ['SUBMITTED', 'UNMARK_SUBMITTED', 'NEEDS_INPUT'],
@@ -214,9 +231,11 @@ describe('transition', () => {
     ).toBe('CONFIRMED');
   });
 
-  it('DISCARDED allows only RESTORE (back to NEEDS_INPUT)', () => {
+  it('DISCARDED allows only RESTORE (back to NEEDS_INPUT) and REINGEST', () => {
     for (const event of ALL_EVENTS) {
-      expect(canTransition('DISCARDED', event)).toBe(event === 'RESTORE');
+      expect(canTransition('DISCARDED', event)).toBe(
+        event === 'RESTORE' || event === 'REINGEST',
+      );
     }
     expect(transition('DISCARDED', 'RESTORE')).toBe('NEEDS_INPUT');
   });
@@ -248,6 +267,35 @@ describe('transition', () => {
       InvalidTransitionError,
     );
   });
+
+  it('supports REINGEST (in-place reset) from every state except SUBMITTED/CONFIRMED, landing INGESTED', () => {
+    for (const state of REINGESTABLE_STATES) {
+      expect(transition(state, 'REINGEST')).toBe('INGESTED');
+    }
+  });
+
+  it('REINGEST includes the DISCARDED/DUPLICATE archive (no restore-first dance)', () => {
+    expect(transition('DISCARDED', 'REINGEST')).toBe('INGESTED');
+    expect(transition('DUPLICATE', 'REINGEST')).toBe('INGESTED');
+  });
+
+  it('refuses REINGEST once an application was sent (SUBMITTED/CONFIRMED)', () => {
+    for (const state of ['SUBMITTED', 'CONFIRMED'] as TaskState[]) {
+      expect(() => transition(state, 'REINGEST')).toThrow(
+        InvalidTransitionError,
+      );
+      expect(canTransition(state, 'REINGEST')).toBe(false);
+    }
+  });
+
+  it('a re-ingested task walks the ingest tail again (REINGEST -> PARSE_OK -> ENQUEUE)', () => {
+    expect(
+      transition(
+        transition(transition('FAILED', 'REINGEST'), 'PARSE_OK'),
+        'ENQUEUE',
+      ),
+    ).toBe('QUEUED');
+  });
 });
 
 describe('canTransition', () => {
@@ -267,11 +315,12 @@ describe('ALLOWED table', () => {
     }
   });
 
-  it('terminal states DUPLICATE and CONFIRMED have no outbound transitions', () => {
-    expect(Object.keys(ALLOWED.DUPLICATE)).toHaveLength(0);
+  it('CONFIRMED is terminal; the archive escapes only via RESTORE/REINGEST', () => {
     expect(Object.keys(ALLOWED.CONFIRMED)).toHaveLength(0);
-    // DISCARDED is escapable — but only via RESTORE.
-    expect(Object.keys(ALLOWED.DISCARDED)).toEqual(['RESTORE']);
+    // DUPLICATE is escapable only via an in-place re-ingest.
+    expect(Object.keys(ALLOWED.DUPLICATE)).toEqual(['REINGEST']);
+    // DISCARDED is escapable — via RESTORE or an in-place re-ingest.
+    expect(Object.keys(ALLOWED.DISCARDED)).toEqual(['RESTORE', 'REINGEST']);
   });
 
   it('every state except INGESTED is reachable from some transition', () => {
