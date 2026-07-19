@@ -1,3 +1,4 @@
+import { deadlineFromIsoDate } from '@sower/core';
 import { events } from '@sower/db';
 import { describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
@@ -92,6 +93,8 @@ const baseConfig: Config = {
   DISCORD_ENABLED: true,
   INVESTIGATOR_JOB_NAME: 'sower-investigator',
   SCREENSHOT_INVESTIGATION_ENABLED: false,
+  RESUME_EDITOR_JOB_NAME: 'sower-resume-editor',
+  RESUME_EDITOR_ENABLED: false,
   DASHBOARD_BASE_URL: 'https://dash.example',
 };
 
@@ -223,6 +226,63 @@ describe('runDeadlineAlerts', () => {
       data: { date: TODAY_ET, channel: 'discord' },
     });
     expect(alertEvents[1]?.taskId).toBe('aaaaaaaa-0000-4000-8000-00000000000c');
+  });
+
+  it("a date-only dueDate ('2026-07-20') alerts on ET July 20's run, NOT July 19's", async () => {
+    // End-to-end with the real normalizer: the meta endpoint stores a
+    // date-only dueDate via deadlineFromIsoDate, which now pins it to
+    // AMERICA/NEW_YORK midnight of that day (2026-07-20T04:00Z under EDT) —
+    // so the alert fires on the ET calendar day the user meant, not the
+    // evening before (the old UTC-midnight off-by-one).
+    const iso = deadlineFromIsoDate('2026-07-20');
+    expect(iso).toBe('2026-07-20T04:00:00.000Z');
+    const dueRow = row({
+      taskId: 'aaaaaaaa-0000-4000-8000-000000000e01',
+      dueDate: new Date(iso ?? ''),
+      deadline: null,
+    });
+
+    // ET July 19's midnight run (00:30 ET): nothing is due.
+    const notifyJul19 = createNotify();
+    const resultJul19 = await runDeadlineAlerts(
+      createDeps({
+        db: createFakeDb({ selectResults: [[dueRow], []] }),
+        notify: notifyJul19,
+      }),
+      new Date('2026-07-19T04:30:00Z'),
+    );
+    expect(resultJul19).toEqual({
+      enabled: true,
+      due: 0,
+      alerted: 0,
+      skipped: 0,
+    });
+    expect(notifyJul19.postChannelMessage).not.toHaveBeenCalled();
+
+    // ET July 20's midnight run: the task is due today and alerts.
+    const writes: DbWrite[] = [];
+    const notifyJul20 = createNotify();
+    const resultJul20 = await runDeadlineAlerts(
+      createDeps({
+        db: createFakeDb({ selectResults: [[dueRow], []], writes }),
+        notify: notifyJul20,
+      }),
+      new Date('2026-07-20T04:30:00Z'),
+    );
+    expect(resultJul20).toEqual({
+      enabled: true,
+      due: 1,
+      alerted: 1,
+      skipped: 0,
+    });
+    expect(notifyJul20.postChannelMessage).toHaveBeenCalledTimes(1);
+    const inserted = writes
+      .filter((w) => w.method === 'insert' && w.table === events)
+      .map((w) => w.arg as Record<string, unknown>);
+    expect(inserted[0]?.data).toEqual({
+      date: '2026-07-20',
+      channel: 'discord',
+    });
   });
 
   it('never alerts excluded states (SUBMITTED/CONFIRMED/DISCARDED/DUPLICATE)', async () => {

@@ -551,7 +551,7 @@ describe('discoverForm', () => {
     );
   });
 
-  it('extracts listing links from the RENDERED DOM of a formless SPA listing page (≥3 ⇒ pageKind listing)', async () => {
+  it('extracts listing links from the RENDERED DOM of a formless SPA listing page (≥LISTING_LINKS_MIN ⇒ pageKind listing)', async () => {
     // The databricks case: a JS-rendered listings page whose raw HTML had no
     // anchors, but whose rendered DOM carries job cards (gh_jid links) plus
     // nav/pagination noise the filter must drop.
@@ -599,7 +599,7 @@ describe('discoverForm', () => {
     expect(queryMock).not.toHaveBeenCalled();
   });
 
-  it('below the 3-link threshold the page is NOT a listing (no listingLinks, no pageKind override)', async () => {
+  it('exactly 2 qualifying links make a listing (a 2-job team page must not silently do nothing)', async () => {
     fakePlaywright({
       extractions: [EMPTY_EXTRACTION],
       anchors: [
@@ -610,6 +610,29 @@ describe('discoverForm', () => {
         {
           href: 'https://boards.greenhouse.io/acme/jobs/2',
           text: 'PM Intern',
+        },
+      ],
+    });
+
+    const { result } = await discoverForm({
+      url: 'https://jobs.example.com/posting/123',
+    });
+
+    expect(result.formFound).toBe(false);
+    expect(result.pageKind).toBe('listing');
+    expect(result.listingLinks).toEqual([
+      'https://boards.greenhouse.io/acme/jobs/1',
+      'https://boards.greenhouse.io/acme/jobs/2',
+    ]);
+  });
+
+  it('below the 2-link threshold the page is NOT a listing (no listingLinks, no pageKind override)', async () => {
+    fakePlaywright({
+      extractions: [EMPTY_EXTRACTION],
+      anchors: [
+        {
+          href: 'https://boards.greenhouse.io/acme/jobs/1',
+          text: 'SWE Intern',
         },
       ],
     });
@@ -628,7 +651,7 @@ describe('discoverForm', () => {
         s.tool === 'browser.extract' &&
         s.output?.includes('candidate job link'),
     );
-    expect(listingStep?.output).toContain('2 candidate job links');
+    expect(listingStep?.output).toContain('1 candidate job link');
   });
 
   it('a listing-classified agent result gains the extracted links (controls present, no form)', async () => {

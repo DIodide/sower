@@ -454,6 +454,8 @@ const config: Config = {
   DISCORD_ENABLED: false,
   INVESTIGATOR_JOB_NAME: 'sower-investigator',
   SCREENSHOT_INVESTIGATION_ENABLED: false,
+  RESUME_EDITOR_JOB_NAME: 'sower-resume-editor',
+  RESUME_EDITOR_ENABLED: false,
 };
 
 function createDeps(db: Deps['db'], overrides: Partial<Deps> = {}): Deps {
@@ -1279,7 +1281,8 @@ describe('processTask deadline persistence (jobs.deadline)', () => {
 
     await processTask(createDeps(db), 'task-1');
 
-    expect(job.deadline).toEqual(new Date('2026-08-01T00:00:00.000Z'));
+    // Date-only ATS values normalize to ET midnight (EDT: 04:00Z).
+    expect(job.deadline).toEqual(new Date('2026-08-01T04:00:00.000Z'));
   });
 
   it('never overwrites a deadline the jobs row already has', async () => {

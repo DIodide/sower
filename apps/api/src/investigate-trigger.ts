@@ -1,5 +1,5 @@
-import { JobsClient } from '@google-cloud/run';
 import { investigationRuns } from '@sower/db';
+import { runCloudJob } from './run-cloud-job.js';
 import type { Deps } from './types.js';
 
 /**
@@ -15,23 +15,10 @@ import type { Deps } from './types.js';
  */
 
 /**
- * Lazily-constructed singleton (mirrors @sower/queue's CloudTasksClient):
- * authenticates via ADC on Cloud Run — no key material.
- */
-let jobsClient: JobsClient | null = null;
-
-function getJobsClient(): JobsClient {
-  if (jobsClient === null) {
-    jobsClient = new JobsClient();
-  }
-  return jobsClient;
-}
-
-/**
  * Record an investigation_runs row and start one Cloud Run Job execution for
  * `taskId` (passed to the container via a TASK_ID env override). Starting the
- * execution is fire-and-forget: the returned long-running operation is NOT
- * awaited to completion — the Job reports back over HTTP when it finishes.
+ * execution is fire-and-forget (see runCloudJob): the Job reports back over
+ * HTTP when it finishes.
  *
  * Returns true once the 'running' run row was recorded (an investigation is
  * visibly underway), so the #ingest reply can honestly render "discovering
@@ -57,17 +44,10 @@ export async function triggerInvestigation(
       .insert(investigationRuns)
       .values({ taskId, status: 'running' });
     // The run row is the visible "investigation underway" breadcrumb: even if
-    // the runJob RPC below fails, the reply/refresh state stays consistent.
+    // the runCloudJob RPC below fails, the reply/refresh state stays
+    // consistent.
     fired = true;
-    const name = `projects/${config.GCP_PROJECT_ID}/locations/${config.GCP_REGION}/jobs/${config.INVESTIGATOR_JOB_NAME}`;
-    // Resolves once the execution is STARTED (the initial RPC); the
-    // operation itself is left running.
-    await getJobsClient().runJob({
-      name,
-      overrides: {
-        containerOverrides: [{ env: [{ name: 'TASK_ID', value: taskId }] }],
-      },
-    });
+    await runCloudJob(deps, config.INVESTIGATOR_JOB_NAME, { TASK_ID: taskId });
   } catch (error) {
     console.error(
       `[sower] investigation trigger failed for task ${taskId}:`,

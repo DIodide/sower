@@ -96,6 +96,14 @@ const envSchema = z
      * the feature stays fully dormant until infra flips it.
      */
     SCREENSHOT_INVESTIGATION_ENABLED: z.string().optional(),
+    /** Cloud Run Job that runs the resume editor (sync/write/agent). */
+    RESUME_EDITOR_JOB_NAME: z.string().default('sower-resume-editor'),
+    /**
+     * Opt-in flag ('true' enables) for the resume editor. Raw env string
+     * here; derived to a boolean in the transform below so the feature stays
+     * fully dormant until infra wires the Job + secrets and flips it.
+     */
+    RESUME_EDITOR_ENABLED: z.string().optional(),
   })
   .transform((env) => ({
     ...env,
@@ -104,6 +112,8 @@ const envSchema = z
     /** Derived: screenshot investigation fires only when explicitly enabled. */
     SCREENSHOT_INVESTIGATION_ENABLED:
       (env.SCREENSHOT_INVESTIGATION_ENABLED ?? '') === 'true',
+    /** Derived: resume-editor runs fire only when explicitly enabled. */
+    RESUME_EDITOR_ENABLED: (env.RESUME_EDITOR_ENABLED ?? '') === 'true',
   }));
 
 export type Config = z.infer<typeof envSchema>;

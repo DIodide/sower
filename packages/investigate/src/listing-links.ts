@@ -8,16 +8,25 @@
  *
  * Kept: anchors whose href detectPlatform recognizes (greenhouse/lever/
  * ashby/workday hosts, incl. ?gh_jid= custom-domain greenhouse), PLUS
- * same-registrable-domain links matching job-detail path patterns. Excluded:
- * pagination/filter chrome (nav/footer anchors are already dropped in-page),
- * links back to the listing itself, duplicates. Capped at 50.
+ * same-registrable-domain links matching job-detail path patterns — incl.
+ * careers-path slugs ending in a long numeric ATS id (the databricks
+ * `…/careers/university-recruiting/phd-…-intern-7011263002` shape).
+ * Excluded: pagination/filter chrome (nav/footer anchors are already
+ * dropped in-page), links back to the listing itself, duplicates. Capped
+ * at 50.
  */
 import { canonicalizeUrl } from '@sower/core';
 import { detectPlatform } from '@sower/platforms';
 import type { AnchorCandidate } from './page-functions.js';
 
-/** Fewer qualifying links than this and the page is NOT a listing. */
-export const LISTING_LINKS_MIN = 3;
+/**
+ * Fewer qualifying links than this and the page is NOT a listing. Two is
+ * enough: a small team page rendering just two job links is still a listing
+ * worth expanding (databricks's university page rendered only three), while
+ * ONE link is not — a single job anchor is indistinguishable from a posting
+ * page linking to itself or a sibling.
+ */
+export const LISTING_LINKS_MIN = 2;
 /** Hard cap — mirrors the api's directory-expansion cap. */
 export const MAX_LISTING_LINKS = 50;
 
@@ -72,12 +81,31 @@ function samePathAsBase(url: URL, base: URL): boolean {
   );
 }
 
+/** Path segments that mark a careers AREA of the site (any position). */
+const CAREERS_SEGMENTS = new Set([
+  'career',
+  'careers',
+  'jobs',
+  'positions',
+  'openings',
+]);
+
+/**
+ * A final path segment shaped like an ATS-minted job id: a slug ENDING in a
+ * long (6+ digit) numeric id (`phd-genai-research-scientist-intern-7011263002`
+ * — the databricks shape) or the bare id itself (`7011263002`). Six digits
+ * keeps marketing suffixes out: `/careers/team-5` and year-stamped slugs
+ * never qualify.
+ */
+const NUMERIC_ID_FINAL_SEGMENT_RE = /(?:^|-)\d{6,}$/;
+
 /**
  * Job-DETAIL path patterns on the company's own domain: `/job/<x>`,
  * `/jobs/<id-or-slug>`, `/position/<x>`, `/careers/…/details/<x>` (details
- * anywhere below careers, with a segment after it), or a `?gh_jid=` param.
- * The segment after job/jobs/position must not itself be listing chrome
- * (`/jobs/search`).
+ * anywhere below careers, with a segment after it), a careers-ish path
+ * (`career(s)/jobs/positions/openings` segment) whose FINAL segment ends in
+ * a long numeric ATS id, or a `?gh_jid=` param. The segment after
+ * job/jobs/position must not itself be listing chrome (`/jobs/search`).
  */
 function looksLikeJobDetailUrl(url: URL): boolean {
   if (url.searchParams.get('gh_jid')) return true;
@@ -94,6 +122,14 @@ function looksLikeJobDetailUrl(url: URL): boolean {
     if (follower !== undefined && !NON_DETAIL_FOLLOWERS.has(follower)) {
       return true;
     }
+  }
+  const finalSegment = segments[segments.length - 1];
+  if (
+    finalSegment !== undefined &&
+    NUMERIC_ID_FINAL_SEGMENT_RE.test(finalSegment) &&
+    segments.some((segment) => CAREERS_SEGMENTS.has(segment))
+  ) {
+    return true;
   }
   const careersIdx = segments.indexOf('careers');
   const detailsIdx = segments.indexOf('details');

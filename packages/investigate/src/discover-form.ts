@@ -106,7 +106,7 @@ export interface DiscoveredForm {
    * Candidate individual-job links extracted from the RENDERED DOM when the
    * page turned out to be a jobs LISTING rather than a single posting (the
    * JS-rendered SPA case raw-HTML directory expansion cannot see). Present
-   * only on formFound:false results with at least LISTING_LINKS_MIN (3)
+   * only on formFound:false results with at least LISTING_LINKS_MIN (2)
    * qualifying links; capped at 50. See listing-links.ts for the filter.
    */
   listingLinks?: string[];
@@ -1500,7 +1500,8 @@ async function interpretExtraction(args: {
  * Programmatic 'listing' override on a no-form result: ≥LISTING_LINKS_MIN
  * links extracted from the rendered DOM are hard evidence the page is a
  * jobs listing — they beat the agent's own pageKind. Below the threshold
- * the result is returned unchanged (2 links do not make a listing).
+ * the result is returned unchanged (a SINGLE link does not make a listing;
+ * two do — small team pages render just a couple of job links).
  */
 function withListing(
   result: DiscoveredForm,

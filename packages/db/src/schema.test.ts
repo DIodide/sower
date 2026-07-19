@@ -11,6 +11,8 @@ import {
   investigationRuns,
   jobDescriptions,
   jobs,
+  resumeRuns,
+  resumes,
 } from './schema.js';
 
 function sqlColumnNames(table: Table): string[] {
@@ -301,6 +303,75 @@ describe('schema', () => {
     expect(investigationRuns.foundJobId.notNull).toBe(false);
     expect(investigationRuns.error.notNull).toBe(false);
     expect(investigationRuns.finishedAt.notNull).toBe(false);
+  });
+
+  it('defines the resumes table', () => {
+    expect(getTableName(resumes)).toBe('resumes');
+    expect(sqlColumnNames(resumes)).toEqual([
+      'document_id',
+      'id',
+      'last_commit_sha',
+      'name',
+      'pdf_storage_path',
+      'tex_path',
+      'tex_source',
+      'updated_at',
+    ]);
+    // The tex filename stem is the upsert key for sync runs: NOT NULL and
+    // unique so a concurrent double-sync cannot create two rows per resume.
+    expect(resumes.name.notNull).toBe(true);
+    expect(resumes.name.isUnique).toBe(true);
+    expect(resumes.texPath.notNull).toBe(true);
+    // All nullable: filled in as the first sync compiles/uploads/registers.
+    expect(resumes.texSource.notNull).toBe(false);
+    expect(resumes.pdfStoragePath.notNull).toBe(false);
+    expect(resumes.documentId.notNull).toBe(false);
+    expect(resumes.lastCommitSha.notNull).toBe(false);
+  });
+
+  it('references documents on resumes', () => {
+    const config = getTableConfig(resumes);
+    const fk = config.foreignKeys[0]?.reference();
+    expect(fk?.foreignTable && getTableName(fk.foreignTable)).toBe('documents');
+    expect(fk?.columns.map((c) => c.name)).toEqual(['document_id']);
+  });
+
+  it('defines the resume_runs table', () => {
+    expect(getTableName(resumeRuns)).toBe('resume_runs');
+    expect(sqlColumnNames(resumeRuns)).toEqual([
+      'commit_sha',
+      'error',
+      'finished_at',
+      'id',
+      'kind',
+      'prompt',
+      'resume_id',
+      'started_at',
+      'status',
+      'transcript',
+    ]);
+    // Nullable: sync runs are repo-wide, not tied to a single resume.
+    expect(resumeRuns.resumeId.notNull).toBe(false);
+    expect(resumeRuns.kind.notNull).toBe(true);
+    expect(resumeRuns.status.notNull).toBe(true);
+    expect(resumeRuns.status.default).toBe('running');
+    expect(resumeRuns.startedAt.notNull).toBe(true);
+    // All set only as a run progresses/finishes.
+    expect(resumeRuns.prompt.notNull).toBe(false);
+    expect(resumeRuns.transcript.notNull).toBe(false);
+    expect(resumeRuns.commitSha.notNull).toBe(false);
+    expect(resumeRuns.error.notNull).toBe(false);
+    expect(resumeRuns.finishedAt.notNull).toBe(false);
+  });
+
+  it('references resumes and indexes resume_id on resume_runs', () => {
+    const config = getTableConfig(resumeRuns);
+    const fk = config.foreignKeys[0]?.reference();
+    expect(fk?.foreignTable && getTableName(fk.foreignTable)).toBe('resumes');
+    expect(fk?.columns.map((c) => c.name)).toEqual(['resume_id']);
+    expect(config.indexes.map((idx) => idx.config.name ?? null)).toContain(
+      'resume_runs_resume_id_idx',
+    );
   });
 
   it('references application_tasks + jobs and indexes task_id on investigation_runs', () => {

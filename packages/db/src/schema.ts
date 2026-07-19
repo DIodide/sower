@@ -422,6 +422,87 @@ export const investigationRuns = pgTable(
 );
 
 /**
+ * What a resume-editor Cloud Run Job execution did (see resume_runs.kind):
+ * - 'sync': repo-wide — compile every developer/resumes/*.tex and refresh the
+ *   resumes rows + vault PDFs. Read-only w.r.t. the portfolio repo.
+ * - 'agent': a Claude Agent SDK session edited the LaTeX per the user's
+ *   natural-language prompt, committed, and pushed.
+ * - 'write': the dashboard's manual editor saved a full .tex source; the job
+ *   wrote, committed, and pushed it verbatim.
+ */
+export type ResumeRunKind = 'sync' | 'agent' | 'write';
+
+/**
+ * Lifecycle of a resume-editor run:
+ * - 'running': trigger row inserted; the Cloud Run Job is (about to be)
+ *   started.
+ * - 'succeeded' / 'failed': the job finished and reported back (see `error`
+ *   on failures). Written directly by the job — there is no HTTP callback.
+ */
+export type ResumeRunStatus = 'running' | 'succeeded' | 'failed';
+
+/**
+ * One row per LaTeX resume in the user's private portfolio repo
+ * (DIodide/portfolio, submodule developer/resumes). Rows are created and
+ * refreshed by the resume-editor job's sync (upsert keyed on `name`), which
+ * also compiles the PDF into the vault and registers it as a kind='resume'
+ * documents row (via `documentId`, so re-syncs update rather than duplicate).
+ */
+export const resumes = pgTable('resumes', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  /** The tex filename stem, e.g. 'swe-2027' — unique so sync can upsert. */
+  name: text('name').notNull().unique(),
+  /** Portfolio-repo-relative path, e.g. 'developer/resumes/swe-2027.tex'. */
+  texPath: text('tex_path').notNull(),
+  /** Latest LaTeX source snapshot (what the manual editor loads). */
+  texSource: text('tex_source'),
+  /** Vault path of the latest compiled PDF (resumes/<name>/<name>.pdf). */
+  pdfStoragePath: text('pdf_storage_path'),
+  /** The auto-registered kind='resume' documents row for the compiled PDF. */
+  documentId: uuid('document_id').references(() => documents.id),
+  /** Submodule HEAD the latest snapshot/PDF was built from. */
+  lastCommitSha: text('last_commit_sha'),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
+});
+
+/**
+ * One row per resume-editor Cloud Run Job execution (sync / agent / write —
+ * see ResumeRunKind). The API inserts the 'running' row and starts the Job
+ * with RESUME_RUN_ID; the job itself writes status/transcript/commitSha
+ * directly to this row when it finishes (it IS the pipeline — unlike the
+ * investigator there is no ingest endpoint to report back through).
+ */
+export const resumeRuns = pgTable(
+  'resume_runs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    /** The resume being edited. Null for repo-wide sync runs. */
+    resumeId: uuid('resume_id').references(() => resumes.id),
+    kind: text('kind').$type<ResumeRunKind>().notNull(),
+    /**
+     * agent runs: the user's natural-language request. write runs: JSON
+     * `{texPath, content}` (the manual editor's save). Null for sync runs.
+     */
+    prompt: text('prompt'),
+    status: text('status')
+      .$type<ResumeRunStatus>()
+      .notNull()
+      .default('running'),
+    /** Full agent transcript (agent runs) — the observability record. */
+    transcript: jsonb('transcript').$type<TranscriptStep[]>(),
+    /** Submodule (or parent) commit the run produced, when it committed. */
+    commitSha: text('commit_sha'),
+    error: text('error'),
+    startedAt: timestamp('started_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    finishedAt: timestamp('finished_at', { withTimezone: true }),
+  },
+  // The dashboard reads a resume's run history by resume_id.
+  (table) => [index('resume_runs_resume_id_idx').on(table.resumeId)],
+);
+
+/**
  * Lifecycle of a per-tenant candidate account (Workday etc.):
  * - 'provisioned': credential generated and stored in the vault; no account
  *   exists on the tenant yet.

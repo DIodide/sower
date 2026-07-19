@@ -1,0 +1,43 @@
+# Cloud Run Job image for @sower/resume-editor (portfolio-repo resume
+# editing: sync / manual write / Claude-agent runs).
+# NOTE: do NOT prune optional dependencies — @anthropic-ai/claude-agent-sdk
+# ships its Claude Code binary via platform-specific optional deps; removing
+# them breaks the SDK at runtime.
+FROM node:22-slim
+
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+RUN corepack enable
+
+# git for the portfolio clone/commit/push (submodule included),
+# ca-certificates for https remotes, curl only to fetch the tectonic binary.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git ca-certificates curl \
+  && rm -rf /var/lib/apt/lists/*
+
+# tectonic (LaTeX engine), pinned. The musl builds are fully static, so no
+# TeX distribution or extra shared libraries are needed; tectonic downloads
+# bundle files on first compile and caches them under $HOME/.cache/Tectonic.
+ARG TECTONIC_VERSION=0.15.0
+RUN arch="$(uname -m)" \
+  && case "$arch" in \
+    x86_64) triple=x86_64-unknown-linux-musl ;; \
+    aarch64|arm64) triple=aarch64-unknown-linux-musl ;; \
+    *) echo "unsupported arch: $arch" && exit 1 ;; \
+  esac \
+  && curl -fsSL "https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%40${TECTONIC_VERSION}/tectonic-${TECTONIC_VERSION}-${triple}.tar.gz" \
+    | tar -xz -C /usr/local/bin tectonic \
+  && chmod 0755 /usr/local/bin/tectonic \
+  && tectonic --version
+
+WORKDIR /app
+COPY . .
+
+RUN corepack pnpm install --frozen-lockfile --filter @sower/resume-editor...
+
+# The Claude Code subprocess needs a writable HOME and config dir; the job
+# itself also writes the tectonic bundle cache under HOME.
+ENV HOME=/home/node
+ENV CLAUDE_CONFIG_DIR=/tmp/.claude
+RUN mkdir -p /home/node /tmp/.claude && chmod -R 0777 /home/node /tmp/.claude
+
+CMD ["corepack", "pnpm", "--filter", "@sower/resume-editor", "start"]

@@ -120,6 +120,13 @@
       "when": 1784442580731,
       "tag": "0016_task_sort_rank_due_date",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1784482176283,
+      "tag": "0017_resume_tables",
+      "breakpoints": true
     }
   ]
 }

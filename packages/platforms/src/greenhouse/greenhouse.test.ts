@@ -116,7 +116,8 @@ describe('GreenhouseAdapter.discover', () => {
       }),
     });
     const spec = await adapter.discover(ref, url);
-    expect(spec.deadline).toBe('2026-08-15T00:00:00.000Z');
+    // Zoned timestamps pass through as instants (23:59 EDT = 03:59Z next day).
+    expect(spec.deadline).toBe('2026-08-16T03:59:00.000Z');
   });
 
   it('ignores an unparseable application_deadline instead of guessing', async () => {

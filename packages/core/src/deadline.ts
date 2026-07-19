@@ -64,19 +64,20 @@ function monthNumber(name: string): number | undefined {
 }
 
 /**
- * Validate a calendar date and render it as ISO 8601 at UTC MIDNIGHT
- * (`2026-07-30T00:00:00.000Z`). Impossible dates (month 13, Feb 30) return
- * null — Date would silently roll them over, which is a form of inference.
+ * Date.UTC(ms) for a VALIDATED calendar date's midnight. Impossible dates
+ * (month 13, Feb 30) return null — Date would silently roll them over
+ * (modern V8 rolls even strict ISO strings), which is a form of inference.
  */
-function toUtcMidnightIso(
+function validUtcMidnightMs(
   year: number,
   month: number,
   day: number,
-): string | null {
+): number | null {
   if (month < 1 || month > 12 || day < 1 || day > 31) {
     return null;
   }
-  const date = new Date(Date.UTC(year, month - 1, day));
+  const ms = Date.UTC(year, month - 1, day);
+  const date = new Date(ms);
   if (
     date.getUTCFullYear() !== year ||
     date.getUTCMonth() !== month - 1 ||
@@ -84,7 +85,99 @@ function toUtcMidnightIso(
   ) {
     return null;
   }
-  return date.toISOString();
+  return ms;
+}
+
+/**
+ * Validate a calendar date and render it as ISO 8601 at UTC MIDNIGHT
+ * (`2026-07-30T00:00:00.000Z`).
+ */
+function toUtcMidnightIso(
+  year: number,
+  month: number,
+  day: number,
+): string | null {
+  const ms = validUtcMidnightMs(year, month, day);
+  return ms === null ? null : new Date(ms).toISOString();
+}
+
+const EASTERN_TIME_ZONE = 'America/New_York';
+
+// 'longOffset' renders the zone as its numeric UTC offset ("GMT-04:00" under
+// EDT, "GMT-05:00" under EST). Which one applies to a given instant comes
+// from the tz database, so DST boundaries — and any future rule change —
+// are automatic; no offset is ever hardcoded.
+const EASTERN_OFFSET_FORMAT = new Intl.DateTimeFormat('en-US', {
+  timeZone: EASTERN_TIME_ZONE,
+  timeZoneName: 'longOffset',
+});
+
+/** America/New_York's UTC offset (ms, negative) in effect at `instant`. */
+function easternOffsetMs(instant: Date): number {
+  const zone = EASTERN_OFFSET_FORMAT.formatToParts(instant).find(
+    (part) => part.type === 'timeZoneName',
+  )?.value;
+  const match = /^GMT([+-])(\d{2}):(\d{2})$/.exec(zone ?? '');
+  if (!match) {
+    // New York is never at GMT exactly — a miss means a broken ICU build.
+    throw new Error(`cannot derive ${EASTERN_TIME_ZONE} offset from '${zone}'`);
+  }
+  const sign = match[1] === '-' ? -1 : 1;
+  return sign * (Number(match[2]) * 60 + Number(match[3])) * 60_000;
+}
+
+/**
+ * Epoch ms of a validated wall-clock time READ AS UTC (the zone-independent
+ * base both wall-time interpretations below start from). Out-of-range time
+ * components → null, same conservative stance as the calendar-date check.
+ */
+function wallClockAsUtcMs(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+  millisecond: number,
+): number | null {
+  const midnight = validUtcMidnightMs(year, month, day);
+  if (midnight === null || hour > 23 || minute > 59 || second > 59) {
+    return null;
+  }
+  return midnight + ((hour * 60 + minute) * 60 + second) * 1000 + millisecond;
+}
+
+/**
+ * The UTC instant at which America/New_York's wall clock reads the given
+ * time — ET MIDNIGHT of a date when only y/m/d are passed (04:00Z under
+ * EDT, 05:00Z under EST). The offset is probed twice: first at the wall
+ * time read as UTC, then re-derived at the corrected instant — that settles
+ * every date, including the EDT/EST boundary days themselves (New York
+ * transitions at 02:00 local, so midnight is never skipped or ambiguous).
+ */
+function easternWallTimeIso(
+  year: number,
+  month: number,
+  day: number,
+  hour = 0,
+  minute = 0,
+  second = 0,
+  millisecond = 0,
+): string | null {
+  const wallAsUtc = wallClockAsUtcMs(
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    second,
+    millisecond,
+  );
+  if (wallAsUtc === null) {
+    return null;
+  }
+  const guess = wallAsUtc - easternOffsetMs(new Date(wallAsUtc));
+  return new Date(wallAsUtc - easternOffsetMs(new Date(guess))).toISOString();
 }
 
 /**
@@ -129,19 +222,81 @@ export function extractDeadline(text: string): string | null {
 }
 
 /**
- * Normalize an ATS-published deadline VALUE (not free text) to the same
- * ISO 8601 UTC-midnight form extractDeadline emits. Accepts a leading
- * `YYYY-MM-DD` (workday cxs `endDate`, greenhouse `application_deadline`,
- * full ISO timestamps, workday's offset-suffixed `2026-08-01-07:00` — the
- * named calendar date is what the source published, so only the date part
- * is kept). Anything else → null.
+ * Normalize an ATS-published or user-entered deadline VALUE (not free text)
+ * to an ISO 8601 UTC instant. Three input shapes:
+ *
+ * - DATE-ONLY (`2026-07-20`; incl. workday's offset-suffixed
+ *   `2026-08-01-07:00`, where the named calendar date is what the source
+ *   published): the value means that calendar day in AMERICA/NEW_YORK, so
+ *   it normalizes to ET MIDNIGHT of the date — `04:00Z` under EDT, `05:00Z`
+ *   under EST. (UTC midnight would land the previous ET evening, making the
+ *   midnight-ET deadline alert fire a day early.)
+ * - ZONE-LESS timestamps (`2026-08-01T23:59:00`): read as ET wall-clock
+ *   time — the user's frame, never the server's locale.
+ * - ZONED timestamps (`2026-08-01T23:59:00-04:00`, `…Z`): an exact
+ *   INSTANT, passed through unchanged (rendered in UTC).
+ *
+ * Impossible calendar dates, out-of-range times, and anything else → null
+ * (parsed, never inferred).
  */
 export function deadlineFromIsoDate(value: string): string | null {
-  const match = /^(\d{4})-(\d{2})-(\d{2})(?:$|[T\s]|[+-]\d{2}:\d{2}$)/.exec(
-    value.trim(),
+  const trimmed = value.trim();
+
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})(?:[+-]\d{2}:\d{2})?$/.exec(
+    trimmed,
   );
-  if (!match) {
+  if (dateOnly) {
+    return easternWallTimeIso(
+      Number(dateOnly[1]),
+      Number(dateOnly[2]),
+      Number(dateOnly[3]),
+    );
+  }
+
+  const stamp =
+    /^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(Z|[+-]\d{2}:\d{2})?$/i.exec(
+      trimmed,
+    );
+  if (!stamp) {
     return null;
   }
-  return toUtcMidnightIso(Number(match[1]), Number(match[2]), Number(match[3]));
+  const year = Number(stamp[1]);
+  const month = Number(stamp[2]);
+  const day = Number(stamp[3]);
+  const hour = Number(stamp[4]);
+  const minute = Number(stamp[5]);
+  const second = Number(stamp[6] ?? '0');
+  const millisecond = Number((stamp[7] ?? '').slice(0, 3).padEnd(3, '0'));
+  const zone = stamp[8];
+  if (zone === undefined) {
+    return easternWallTimeIso(
+      year,
+      month,
+      day,
+      hour,
+      minute,
+      second,
+      millisecond,
+    );
+  }
+  const wallAsUtc = wallClockAsUtcMs(
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    second,
+    millisecond,
+  );
+  if (wallAsUtc === null) {
+    return null;
+  }
+  // Explicit offset: the instant is wall time minus the declared offset.
+  const offset = /^([+-])(\d{2}):(\d{2})$/.exec(zone);
+  const offsetMs = offset
+    ? (offset[1] === '-' ? -1 : 1) *
+      (Number(offset[2]) * 60 + Number(offset[3])) *
+      60_000
+    : 0; // 'Z'
+  return new Date(wallAsUtc - offsetMs).toISOString();
 }

@@ -71,3 +71,7 @@ export type WorkdaySessionRow = typeof schema.workdaySessions.$inferSelect;
 export type NewWorkdaySessionRow = typeof schema.workdaySessions.$inferInsert;
 export type AgentHeartbeat = typeof schema.agentHeartbeats.$inferSelect;
 export type NewAgentHeartbeat = typeof schema.agentHeartbeats.$inferInsert;
+export type Resume = typeof schema.resumes.$inferSelect;
+export type NewResume = typeof schema.resumes.$inferInsert;
+export type ResumeRun = typeof schema.resumeRuns.$inferSelect;
+export type NewResumeRun = typeof schema.resumeRuns.$inferInsert;

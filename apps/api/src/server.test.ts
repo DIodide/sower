@@ -228,6 +228,8 @@ const config: Config = {
   DISCORD_ENABLED: false,
   INVESTIGATOR_JOB_NAME: 'sower-investigator',
   SCREENSHOT_INVESTIGATION_ENABLED: false,
+  RESUME_EDITOR_JOB_NAME: 'sower-resume-editor',
+  RESUME_EDITOR_ENABLED: false,
   DASHBOARD_BASE_URL: undefined,
 };
 
@@ -3240,7 +3242,7 @@ describe('buildServer', () => {
       expect('sortRank' in set).toBe(false);
     });
 
-    it('sets the user due date (normalized to UTC midnight) without touching updatedAt', async () => {
+    it('sets the user due date (normalized to ET midnight) without touching updatedAt', async () => {
       const writes: DbWrite[] = [];
       const { deps } = createDeps(metaDb(writes));
       const app = buildServer(deps);
@@ -3254,8 +3256,10 @@ describe('buildServer', () => {
         unknown
       >;
       expect(set.dueDate).toBeInstanceOf(Date);
+      // Date-only due dates normalize to ET midnight (EDT: 04:00Z) so the
+      // midnight-ET alert fires on the calendar day the user meant.
       expect((set.dueDate as Date).toISOString()).toBe(
-        '2026-08-01T00:00:00.000Z',
+        '2026-08-01T04:00:00.000Z',
       );
       // Like notes: a due date is an annotation, never activity.
       expect('updatedAt' in set).toBe(false);

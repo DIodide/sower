@@ -155,7 +155,8 @@ describe('WorkdayAdapter.discover', () => {
       }),
     });
     const spec = await adapter.discover(ref, url);
-    expect(spec.deadline).toBe('2026-08-01T00:00:00.000Z');
+    // Date-only endDate → ET midnight (EDT: 04:00Z).
+    expect(spec.deadline).toBe('2026-08-01T04:00:00.000Z');
   });
 
   it('ignores an unparseable endDate instead of guessing', async () => {

@@ -155,25 +155,55 @@ describe('extractDeadline', () => {
 });
 
 describe('deadlineFromIsoDate', () => {
-  it('normalizes a plain YYYY-MM-DD to UTC midnight', () => {
-    expect(deadlineFromIsoDate('2026-08-01')).toBe('2026-08-01T00:00:00.000Z');
+  it('normalizes a plain YYYY-MM-DD to America/New_York midnight (EDT, summer)', () => {
+    // ET midnight July 20 = 04:00Z under EDT (UTC-4) — so easternDateOf
+    // reads the instant as July 20, the calendar day the user meant.
+    expect(deadlineFromIsoDate('2026-07-20')).toBe('2026-07-20T04:00:00.000Z');
   });
 
-  it('keeps the named date of a full ISO timestamp', () => {
+  it('normalizes a plain YYYY-MM-DD to America/New_York midnight (EST, winter)', () => {
+    expect(deadlineFromIsoDate('2026-01-15')).toBe('2026-01-15T05:00:00.000Z');
+  });
+
+  it('handles the DST boundary dates themselves (derived, not hardcoded)', () => {
+    // 2026: DST begins Sunday March 8 (02:00 → 03:00), ends Sunday Nov 1.
+    // Midnight on a transition day still uses that night's pre-2am offset.
+    expect(deadlineFromIsoDate('2026-03-08')).toBe('2026-03-08T05:00:00.000Z');
+    expect(deadlineFromIsoDate('2026-03-09')).toBe('2026-03-09T04:00:00.000Z');
+    expect(deadlineFromIsoDate('2026-11-01')).toBe('2026-11-01T04:00:00.000Z');
+    expect(deadlineFromIsoDate('2026-11-02')).toBe('2026-11-02T05:00:00.000Z');
+  });
+
+  it('passes a zoned ISO timestamp through as the INSTANT it denotes', () => {
     expect(deadlineFromIsoDate('2026-08-01T23:59:00-04:00')).toBe(
-      '2026-08-01T00:00:00.000Z',
+      '2026-08-02T03:59:00.000Z',
+    );
+    expect(deadlineFromIsoDate('2027-01-09T00:00:00.000Z')).toBe(
+      '2027-01-09T00:00:00.000Z',
+    );
+    expect(deadlineFromIsoDate('2026-08-01T12:30:00+02:00')).toBe(
+      '2026-08-01T10:30:00.000Z',
     );
   });
 
-  it("accepts workday's offset-suffixed date form", () => {
+  it('reads a ZONE-LESS timestamp as ET wall-clock time, never server-local', () => {
+    expect(deadlineFromIsoDate('2026-08-01T23:59:00')).toBe(
+      '2026-08-02T03:59:00.000Z',
+    );
+    expect(deadlineFromIsoDate('2026-01-15T09:30')).toBe(
+      '2026-01-15T14:30:00.000Z',
+    );
+  });
+
+  it("treats workday's offset-suffixed date form as the named DATE (ET midnight)", () => {
     expect(deadlineFromIsoDate('2026-08-01-07:00')).toBe(
-      '2026-08-01T00:00:00.000Z',
+      '2026-08-01T04:00:00.000Z',
     );
   });
 
   it('trims surrounding whitespace', () => {
     expect(deadlineFromIsoDate(' 2026-08-01 ')).toBe(
-      '2026-08-01T00:00:00.000Z',
+      '2026-08-01T04:00:00.000Z',
     );
   });
 
@@ -185,5 +215,10 @@ describe('deadlineFromIsoDate', () => {
     expect(deadlineFromIsoDate('2026-02-30')).toBeNull();
     // A date embedded in trailing junk is not a clean value.
     expect(deadlineFromIsoDate('2026-08-01x')).toBeNull();
+    // Impossible date/time inside a timestamp — V8's Date would silently
+    // roll Feb 30 over to March 2; the manual validation refuses instead.
+    expect(deadlineFromIsoDate('2026-02-30T10:00:00Z')).toBeNull();
+    expect(deadlineFromIsoDate('2026-08-01T25:00:00Z')).toBeNull();
+    expect(deadlineFromIsoDate('2026-08-01Tgarbage')).toBeNull();
   });
 });

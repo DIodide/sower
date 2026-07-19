@@ -46,6 +46,7 @@ import {
   ranksCollide,
   waitingOrderBy,
 } from './rank.js';
+import { registerResumeRoutes } from './resume-routes.js';
 import {
   claimSessionRequest,
   completeSessionCapture,
@@ -1806,6 +1807,10 @@ export function buildServer(deps: Deps): FastifyInstance {
   // /answer-library CRUD (company-scoped answer library; x-api-key like all
   // other routes via the server-wide preHandler above).
   registerAnswerLibraryRoutes(app, deps);
+
+  // /resumes (list/sync/edit/ask + run polling; x-api-key via the same
+  // server-wide preHandler).
+  registerResumeRoutes(app, deps);
 
   // POST /discord/interactions (signature-authenticated, raw-body parsed).
   registerDiscordRoutes(app, deps);

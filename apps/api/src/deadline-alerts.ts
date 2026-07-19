@@ -38,11 +38,14 @@ const EASTERN_DATE_ISO = new Intl.DateTimeFormat('en-CA', {
 });
 
 /**
- * The America/New_York CALENDAR DATE (`2026-07-18`) an instant falls on.
- * Deadlines are stored as UTC midnight of the published date, and UTC
- * midnight is the previous EVENING in ET — so `2026-07-19T00:00Z` is July 18
- * in ET: the deadline instant passes during ET July 18, which is exactly the
- * day the midnight-ET alert must fire on.
+ * The America/New_York CALENDAR DATE (`2026-07-18`) an instant falls on —
+ * the alert fires on the ET day the deadline instant belongs to. Two storage
+ * shapes flow in: date-only values normalized by deadlineFromIsoDate sit at
+ * ET MIDNIGHT of the named day (`2026-07-20T04:00Z` → July 20 — the day the
+ * user meant), while free-text-parsed deadlines (extractDeadline) and legacy
+ * rows sit at UTC midnight, which is the previous EVENING in ET
+ * (`2026-07-19T00:00Z` → July 18 — the instant passes during ET July 18, so
+ * the midnight-ET alert still precedes it).
  */
 export function easternDateOf(date: Date): string {
   return EASTERN_DATE_ISO.format(date);

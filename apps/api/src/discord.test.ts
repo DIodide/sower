@@ -176,6 +176,8 @@ const config: Config = {
   DISCORD_ENABLED: false,
   INVESTIGATOR_JOB_NAME: 'sower-investigator',
   SCREENSHOT_INVESTIGATION_ENABLED: false,
+  RESUME_EDITOR_JOB_NAME: 'sower-resume-editor',
+  RESUME_EDITOR_ENABLED: false,
 };
 
 const jobSpec = {
