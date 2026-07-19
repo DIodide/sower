@@ -12,7 +12,7 @@ import type {
   SubmitOptions,
   SubmitResult,
 } from '../contract.js';
-import { htmlEntityEncodedToPlainText } from '../description.js';
+import { htmlToMarkdown } from '../html-to-markdown.js';
 import { type Recorder, recordedFetch, safeRecord } from '../recorder.js';
 import { realSubmit } from '../submit-common.js';
 
@@ -246,10 +246,13 @@ export class GreenhouseAdapter implements PlatformAdapter {
       }
     }
     // The boards API exposes no employment type — employmentType stays unset.
-    // Greenhouse `content` is HTML-entity-encoded HTML (needs ?content=true).
+    // Greenhouse `content` is HTML-entity-encoded HTML (needs ?content=true);
+    // descriptionHtml keeps it verbatim, description becomes markdown so the
+    // posting's headings/lists survive (htmlToMarkdown decodes the double
+    // encoding itself).
     if (payload.content) {
       spec.descriptionHtml = payload.content;
-      spec.description = htmlEntityEncodedToPlainText(payload.content);
+      spec.description = htmlToMarkdown(payload.content);
     }
     return spec;
   }

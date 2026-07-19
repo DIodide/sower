@@ -85,10 +85,46 @@ describe('LeverAdapter.discover', () => {
       applyUrl:
         'https://jobs.lever.co/leverdemo/33538a2f-d27d-4a96-8f05-fa4b0e4d940e/apply',
       questions: [],
-      // descriptionHtml/descriptionPlain come straight from the postings API.
+      // descriptionHtml is the intro HTML verbatim; description is markdown
+      // composed from description + lists + additional, mirroring the hosted
+      // posting's order and keeping its structure (bold, bullets, links).
       descriptionHtml: fixture.description as string,
-      description: fixture.descriptionPlain as string,
+      description:
+        'Welcome to the **Demo Job Listing** for Lever! This is a fictional job created solely for demonstration purposes and is **not an actual open position**. We’ve crafted this listing to showcase the functionality of our ATS platform, including job descriptions, application processes, and more.\n\n' +
+        'While you can explore the application process and features here, please note that **applications submitted to this job will not be reviewed or responded to** as it’s for demonstration only.\n\n' +
+        'this job is AMAAAAAAAAAAAAZING!\n\n' +
+        '**Qualifications**\n\n- be smart\n- be very smart\n\n' +
+        '**Duties**\n\n- work hard\n- work VERY hard\n- **bold text**\n- *italic text*\n- strikethrough text\n- underline text\n- [link text](https://google.com)\n\n' +
+        'you will never find a job better than this one!!!\n\n' +
+        'Lever builds modern recruiting software for teams to source, interview, and hire top talent. Our team strives to set a new bar for enterprise software with modern, well-designed, real-time apps. We participated in Y Combinator in summer 2012, and since then have raised $73 million. As the applicant tracking system of choice for Netflix, Eventbrite, ClearSlide, change.org, and thousands more leading companies, Lever means you hire the best by hiring together.\n\n' +
+        'Lever is an equal opportunity employer. We are committed to providing reasonable accommodations and will work with you to meet your needs. If you are a person with a disability and require assistance during the application process, please don’t hesitate to reach out! We celebrate our inclusive work environment and welcome members of all backgrounds and perspectives. [Learn more about our team culture and commitment to diversity and inclusion.](https://inside.lever.co/)',
     });
+  });
+
+  it('falls back to descriptionPlain when the payload has no HTML content', async () => {
+    const trimmed = {
+      ...fixture,
+      description: null,
+      lists: null,
+      additional: null,
+      descriptionPlain: 'Plain description only.',
+    };
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => trimmed,
+      text: async () => '',
+    });
+    const spec = await adapter.discover(ref, url);
+    expect(spec.description).toBe('Plain description only.');
+    expect(spec.descriptionHtml).toBeUndefined();
+  });
+
+  it('composes markdown with no leaked tags or entities', async () => {
+    const spec = await adapter.discover(ref, url);
+    expect(spec.description).not.toMatch(/<[^>]+>/);
+    expect(spec.description).not.toContain('&nbsp;');
+    expect(spec.description).not.toContain('&amp;');
   });
 
   it('falls back to categories.team for department and omits absent metadata', async () => {

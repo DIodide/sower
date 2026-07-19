@@ -6,7 +6,7 @@ import type {
   SubmitOptions,
   SubmitResult,
 } from '../contract.js';
-import { htmlEntityEncodedToPlainText } from '../description.js';
+import { htmlToMarkdown } from '../html-to-markdown.js';
 import { type Recorder, recordedFetch } from '../recorder.js';
 
 /**
@@ -238,11 +238,12 @@ export class WorkdayAdapter implements PlatformAdapter {
         spec.deadline = deadline;
       }
     }
-    // Workday's jobDescription is raw HTML; the shared helper strips tags (and
-    // defensively re-strips any tag reconstructed from encoded entities).
+    // Workday's jobDescription is raw HTML (heavy span nesting, &nbsp; runs);
+    // descriptionHtml keeps it verbatim, description becomes markdown so the
+    // posting's headings/lists survive.
     if (info.jobDescription) {
       spec.descriptionHtml = info.jobDescription;
-      spec.description = htmlEntityEncodedToPlainText(info.jobDescription);
+      spec.description = htmlToMarkdown(info.jobDescription);
     }
     return spec;
   }

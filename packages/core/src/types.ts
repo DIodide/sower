@@ -107,7 +107,7 @@ export interface JobSpec {
   compensation?: string;
   applyUrl: string;
   questions: Question[];
-  /** Plain-text job description (tags/entities stripped). Back-compat optional. */
+  /** Markdown job description (converted from source HTML; entities decoded). Back-compat optional. */
   description?: string;
   /** Raw HTML (or entity-encoded HTML) job description as returned by the source. */
   descriptionHtml?: string;

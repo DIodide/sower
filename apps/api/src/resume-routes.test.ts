@@ -402,6 +402,159 @@ describe('/resumes routes', () => {
     await app.close();
   });
 
+  it('POST /resumes/:id/fork is dormant when disabled', async () => {
+    const writes: DbWrite[] = [];
+    const db = createFakeDb({ writes });
+    const app = buildServer(createDeps(db, { RESUME_EDITOR_ENABLED: false }));
+    const response = await app.inject({
+      method: 'POST',
+      url: `/resumes/${RESUME_ID}/fork`,
+      headers: { 'x-api-key': 'test-key' },
+      payload: { name: 'stripe-2027' },
+    });
+    expect(response.statusCode).toBe(503);
+    expect(writes).toEqual([]);
+    expect(jobState.calls).toEqual([]);
+    await app.close();
+  });
+
+  it('POST /resumes/:id/fork validates the new name', async () => {
+    const db = createFakeDb();
+    const app = buildServer(createDeps(db));
+    for (const name of ['', 'a', 'a/b', 'a.tex', '..', 'x'.repeat(61)]) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/resumes/${RESUME_ID}/fork`,
+        headers: { 'x-api-key': 'test-key' },
+        payload: { name },
+      });
+      expect(response.statusCode).toBe(400);
+    }
+    expect(jobState.calls).toEqual([]);
+    await app.close();
+  });
+
+  it('POST /resumes/:id/fork 404s on an unknown source resume', async () => {
+    const db = createFakeDb({ selectResults: [[]] });
+    const app = buildServer(createDeps(db));
+    const response = await app.inject({
+      method: 'POST',
+      url: `/resumes/${RESUME_ID}/fork`,
+      headers: { 'x-api-key': 'test-key' },
+      payload: { name: 'stripe-2027' },
+    });
+    expect(response.statusCode).toBe(404);
+    expect(jobState.calls).toEqual([]);
+    await app.close();
+  });
+
+  it('POST /resumes/:id/fork 409s when the name is already taken', async () => {
+    const db = createFakeDb({
+      // 1: source resume; 2: name collision found.
+      selectResults: [[resumeRow], [{ id: 'other-resume' }]],
+    });
+    const app = buildServer(createDeps(db));
+    const response = await app.inject({
+      method: 'POST',
+      url: `/resumes/${RESUME_ID}/fork`,
+      headers: { 'x-api-key': 'test-key' },
+      payload: { name: 'swe-2027' },
+    });
+    expect(response.statusCode).toBe(409);
+    expect(jobState.calls).toEqual([]);
+    await app.close();
+  });
+
+  it('POST /resumes/:id/fork inserts a fork run with {sourceResumeId,newName} and triggers the Job', async () => {
+    const writes: DbWrite[] = [];
+    const db = createFakeDb({
+      // 1: source resume; 2: no name collision.
+      selectResults: [[resumeRow], []],
+      insertResults: [[{ id: RUN_ID }]],
+      writes,
+    });
+    const app = buildServer(createDeps(db));
+    const response = await app.inject({
+      method: 'POST',
+      url: `/resumes/${RESUME_ID}/fork`,
+      headers: { 'x-api-key': 'test-key' },
+      payload: { name: 'stripe-2027' },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ runId: RUN_ID, fired: true });
+    expect(writes).toHaveLength(1);
+    const arg = writes[0]?.arg as {
+      resumeId: string;
+      kind: string;
+      prompt: string;
+      status: string;
+    };
+    // The run row hangs off the SOURCE resume (the fork has no row yet).
+    expect(arg.resumeId).toBe(RESUME_ID);
+    expect(arg.kind).toBe('fork');
+    expect(arg.status).toBe('running');
+    expect(JSON.parse(arg.prompt)).toEqual({
+      sourceResumeId: RESUME_ID,
+      newName: 'stripe-2027',
+    });
+    expect(jobState.calls).toEqual([
+      { jobName: 'sower-resume-editor', env: { RESUME_RUN_ID: RUN_ID } },
+    ]);
+    await app.close();
+  });
+
+  it('GET /resumes/:id/versions lists the history (rows pass through, newest first)', async () => {
+    const versions = [
+      {
+        id: 'a4b3c2d1-0000-4000-8000-000000000002',
+        resumeId: RESUME_ID,
+        commitSha: 'sha-new',
+        texSource: '\\v2',
+        pdfStoragePath: 'resumes/swe-2027/versions/sha-new.pdf',
+        runId: RUN_ID,
+        kind: 'write',
+        createdAt: new Date('2026-07-02T00:00:00Z'),
+      },
+      {
+        id: 'a4b3c2d1-0000-4000-8000-000000000001',
+        resumeId: RESUME_ID,
+        commitSha: 'sha-old',
+        texSource: '\\v1',
+        pdfStoragePath: 'resumes/swe-2027/versions/sha-old.pdf',
+        runId: null,
+        kind: 'sync',
+        createdAt: new Date('2026-07-01T00:00:00Z'),
+      },
+    ];
+    const db = createFakeDb({
+      // 1: resume exists; 2: the recency-ordered versions.
+      selectResults: [[{ id: RESUME_ID }], versions],
+    });
+    const app = buildServer(createDeps(db));
+    const response = await app.inject({
+      method: 'GET',
+      url: `/resumes/${RESUME_ID}/versions`,
+      headers: { 'x-api-key': 'test-key' },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      versions: JSON.parse(JSON.stringify(versions)),
+    });
+    await app.close();
+  });
+
+  it('GET /resumes/:id/versions 404s on an unknown resume', async () => {
+    const db = createFakeDb({ selectResults: [[]] });
+    const app = buildServer(createDeps(db));
+    const response = await app.inject({
+      method: 'GET',
+      url: `/resumes/${RESUME_ID}/versions`,
+      headers: { 'x-api-key': 'test-key' },
+    });
+    expect(response.statusCode).toBe(404);
+    await app.close();
+  });
+
   it('GET /resumes/runs/:id returns the run row', async () => {
     const run = {
       id: RUN_ID,

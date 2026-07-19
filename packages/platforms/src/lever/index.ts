@@ -6,6 +6,7 @@ import type {
   ResolvedAnswer,
 } from '@sower/core';
 import type { PlatformAdapter, SubmitFile } from '../contract.js';
+import { htmlToMarkdown } from '../html-to-markdown.js';
 import { type Recorder, recordedFetch } from '../recorder.js';
 import {
   buildAnswerPayload,
@@ -178,12 +179,56 @@ interface LeverPostingPayload {
   workplaceType?: string | null;
   hostedUrl?: string | null;
   applyUrl?: string | null;
-  /** Rendered HTML description. */
+  /** Rendered HTML description (the posting's intro paragraphs). */
   description?: string | null;
   /** Plain-text description. */
   descriptionPlain?: string | null;
   /** Description content blocks — never mapped to questions. */
   lists?: { text: string; content: string }[] | null;
+  /** Rendered HTML closing content (shown after the lists on the posting). */
+  additional?: string | null;
+}
+
+/**
+ * Compose the full job description as markdown, mirroring the hosted
+ * posting's order: intro paragraph(s), then each `lists` block as a bolded
+ * title over its bullets (the content is bare `<li>` fragments), then the
+ * closing `additional` content. Empty pieces drop out; an entirely empty
+ * payload composes to ''.
+ */
+export function composeLeverDescription(payload: {
+  description?: string | null;
+  lists?: { text: string; content: string }[] | null;
+  additional?: string | null;
+}): string {
+  const parts: string[] = [];
+  if (payload.description) {
+    const intro = htmlToMarkdown(payload.description);
+    if (intro) {
+      parts.push(intro);
+    }
+  }
+  for (const list of payload.lists ?? []) {
+    // Titles are short plain-ish strings; convert (decodes entities, strips
+    // stray tags) and keep them on one line for the `**…**` wrap.
+    const title = list.text
+      ? htmlToMarkdown(list.text).replace(/\n+/g, ' ').trim()
+      : '';
+    const body = list.content ? htmlToMarkdown(list.content) : '';
+    const section = [title ? `**${title}**` : '', body]
+      .filter((piece) => piece !== '')
+      .join('\n\n');
+    if (section) {
+      parts.push(section);
+    }
+  }
+  if (payload.additional) {
+    const outro = htmlToMarkdown(payload.additional);
+    if (outro) {
+      parts.push(outro);
+    }
+  }
+  return parts.join('\n\n');
 }
 
 export class LeverAdapter implements PlatformAdapter {
@@ -271,7 +316,13 @@ export class LeverAdapter implements PlatformAdapter {
     if (payload.description) {
       spec.descriptionHtml = payload.description;
     }
-    if (payload.descriptionPlain) {
+    // Markdown composed from description + lists + additional keeps the
+    // posting's structure; descriptionPlain (which flattens it) is only the
+    // fallback when no HTML content exists at all.
+    const descriptionMarkdown = composeLeverDescription(payload);
+    if (descriptionMarkdown) {
+      spec.description = descriptionMarkdown;
+    } else if (payload.descriptionPlain) {
       spec.description = payload.descriptionPlain;
     }
     return spec;

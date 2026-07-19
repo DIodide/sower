@@ -1,11 +1,10 @@
 /**
- * Job-description text helpers shared by the platform adapters.
+ * HTML → plain-text helper for SINGLE-LINE strings (e.g. Workday
+ * questionnaire labels, which arrive as entity-encoded HTML fragments).
  *
- * Ashby and Lever hand us a ready plain-text field (descriptionPlain), so the
- * adapters use that directly. Greenhouse only exposes `content`, which is
- * HTML-entity-encoded HTML (e.g. `&lt;h2&gt;Who we are&lt;/h2&gt;`), so we must
- * derive the plain text ourselves — decoding the entities to reconstruct the
- * tags, stripping them, and collapsing whitespace.
+ * Job DESCRIPTIONS no longer use this: the adapters convert them with
+ * htmlToMarkdown (html-to-markdown.ts) so the posting's headings/lists
+ * survive into the stored description instead of collapsing to one line.
  */
 
 /**

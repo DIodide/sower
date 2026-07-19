@@ -110,8 +110,13 @@ describe('WorkdayAdapter.discover', () => {
     // No discoverable questions at this tier — that is the whole point.
     expect(spec.questions).toEqual([]);
     expect(spec.formAccess).toBe('account-required');
-    // Description is derived from the raw HTML jobDescription.
+    // Description is markdown converted from the raw HTML jobDescription:
+    // the posting's <h2> heading survives (##-clamped) and no tags or
+    // entity-encoded leftovers leak through the span soup.
     expect(spec.description).toContain('Cadence');
+    expect(spec.description).toMatch(/^## /);
+    expect(spec.description).not.toMatch(/<[^>]+>/);
+    expect(spec.description).not.toContain('&nbsp;');
     expect(spec.descriptionHtml).toContain('<');
   });
 

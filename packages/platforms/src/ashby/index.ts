@@ -6,6 +6,7 @@ import type {
   ResolvedAnswer,
 } from '@sower/core';
 import type { PlatformAdapter, SubmitFile } from '../contract.js';
+import { htmlToMarkdown } from '../html-to-markdown.js';
 import { type Recorder, recordedFetch } from '../recorder.js';
 import {
   buildAnswerPayload,
@@ -387,7 +388,15 @@ export class AshbyAdapter implements PlatformAdapter {
     if (posting.descriptionHtml) {
       spec.descriptionHtml = posting.descriptionHtml;
     }
-    if (posting.descriptionPlain) {
+    // Prefer markdown converted from the HTML — descriptionPlain flattens
+    // the posting's headings/lists to a wall of text. Plain text is only the
+    // fallback when no HTML exists (or it converts to nothing).
+    const descriptionMarkdown = posting.descriptionHtml
+      ? htmlToMarkdown(posting.descriptionHtml)
+      : '';
+    if (descriptionMarkdown) {
+      spec.description = descriptionMarkdown;
+    } else if (posting.descriptionPlain) {
       spec.description = posting.descriptionPlain;
     }
     return spec;

@@ -6,8 +6,10 @@ import { exec } from './exec.js';
  * LaTeX compilation via the tectonic CLI (installed into the container image
  * by Dockerfile.resume-editor; it must be on PATH). Tectonic downloads any
  * missing TeX bundle files on first use and caches them under
- * ~/.cache/Tectonic, so the first compile of a fresh container is the slow
- * one — hence the generous timeout.
+ * TECTONIC_CACHE_DIR (the image pre-warms /opt/tectonic-cache at build so a
+ * fresh container's first compile skips the bundle download; locally the
+ * default ~/.cache/Tectonic applies). The generous timeout covers the odd
+ * package the warm-up did not bake in.
  */
 
 export const TECTONIC_TIMEOUT_MS = 120_000;

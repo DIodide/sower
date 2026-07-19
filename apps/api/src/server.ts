@@ -47,6 +47,7 @@ import {
   ranksCollide,
   waitingOrderBy,
 } from './rank.js';
+import { registerResumeLinkRoutes } from './resume-links.js';
 import { registerResumeRoutes } from './resume-routes.js';
 import {
   claimSessionRequest,
@@ -428,6 +429,13 @@ export function buildServer(deps: Deps): FastifyInstance {
     // POST /discord/interactions is authenticated by Ed25519 signature
     // verification inside its handler (Discord cannot send an x-api-key).
     if (request.method === 'POST' && path === '/discord/interactions') {
+      return;
+    }
+    // GET /r/:token (resume share links) is PUBLIC BY DESIGN: a recruiter's
+    // browser cannot send an x-api-key — the unguessable 192-bit token IS
+    // the auth, and disable/unknown both answer a plain 404 with no DB
+    // write (rate-limit friendly). See resume-links.ts.
+    if (request.method === 'GET' && path.startsWith('/r/')) {
       return;
     }
     const apiKey = request.headers['x-api-key'];
@@ -1841,9 +1849,14 @@ export function buildServer(deps: Deps): FastifyInstance {
   // other routes via the server-wide preHandler above).
   registerAnswerLibraryRoutes(app, deps);
 
-  // /resumes (list/sync/edit/ask + run polling; x-api-key via the same
-  // server-wide preHandler).
+  // /resumes (list/sync/edit/ask/fork + versions + run polling; x-api-key
+  // via the same server-wide preHandler).
   registerResumeRoutes(app, deps);
+
+  // Resume share links (/resumes/:id/links CRUD, x-api-key) + the PUBLIC
+  // GET /r/:token viewer (exempted in the preHandler above — the token is
+  // the auth).
+  registerResumeLinkRoutes(app, deps);
 
   registerProfileRoutes(app, deps);
 

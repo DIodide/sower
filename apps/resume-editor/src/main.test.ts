@@ -8,6 +8,8 @@ const state = vi.hoisted(() => ({
   setupError: null as Error | null,
   syncCalls: 0,
   writeCalls: [] as unknown[],
+  writeDeps: [] as unknown[],
+  forkCalls: [] as unknown[],
   agentCalls: [] as unknown[],
   modeError: null as Error | null,
   outcome: {
@@ -80,8 +82,14 @@ vi.mock('./modes.js', () => ({
     if (state.modeError) throw state.modeError;
     return state.outcome;
   },
-  runWrite: async (_deps: unknown, run: unknown) => {
+  runWrite: async (deps: unknown, run: unknown) => {
     state.writeCalls.push(run);
+    state.writeDeps.push(deps);
+    if (state.modeError) throw state.modeError;
+    return state.outcome;
+  },
+  runFork: async (_deps: unknown, run: unknown) => {
+    state.forkCalls.push(run);
     if (state.modeError) throw state.modeError;
     return state.outcome;
   },
@@ -111,6 +119,8 @@ beforeEach(() => {
   state.setupError = null;
   state.syncCalls = 0;
   state.writeCalls = [];
+  state.writeDeps = [];
+  state.forkCalls = [];
   state.agentCalls = [];
   state.modeError = null;
   state.outcome = { commitSha: 'sha-1', transcript: null };
@@ -202,7 +212,7 @@ describe('resume-editor run()', () => {
     expect(set.finishedAt).toBeInstanceOf(Date);
   });
 
-  it('write: dispatches the run row to runWrite', async () => {
+  it('write: dispatches to runWrite WITHOUT cloning (fast Contents-API flow)', async () => {
     const row = {
       id: RUN_ID,
       kind: 'write',
@@ -212,6 +222,24 @@ describe('resume-editor run()', () => {
     state.runRows = [row];
     expect(await run()).toBe(0);
     expect(state.writeCalls).toEqual([row]);
+    // No checkout for a manual save — that is the whole point.
+    expect(state.setupCalls).toEqual([]);
+    // The fast deps carry the token for the Contents API (+ clone fallback).
+    expect(state.writeDeps[0]).toMatchObject({ token: 'ghp_token' });
+    expect(lastUpdate().set.status).toBe('succeeded');
+  });
+
+  it('fork: dispatches to runFork WITHOUT cloning', async () => {
+    const row = {
+      id: RUN_ID,
+      kind: 'fork',
+      status: 'running',
+      prompt: '{"sourceResumeId":"abc","newName":"stripe-2027"}',
+    };
+    state.runRows = [row];
+    expect(await run()).toBe(0);
+    expect(state.forkCalls).toEqual([row]);
+    expect(state.setupCalls).toEqual([]);
     expect(lastUpdate().set.status).toBe('succeeded');
   });
 

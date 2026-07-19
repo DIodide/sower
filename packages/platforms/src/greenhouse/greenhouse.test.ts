@@ -144,18 +144,27 @@ describe('GreenhouseAdapter.discover', () => {
     expect(spec.location).toBe('US · Dublin');
   });
 
-  it('extracts descriptionHtml (raw content) and plain-text description', async () => {
+  it('extracts descriptionHtml (raw content) and markdown description', async () => {
     const spec = await adapter.discover(ref, url);
     // descriptionHtml is the raw (entity-encoded) content, verbatim.
     expect(spec.descriptionHtml).toBe(fixture.content as string);
-    // description is decoded, tag-stripped, whitespace-collapsed plain text.
+    // description is markdown: the posting's headings and bullets survive
+    // instead of collapsing to a wall of text.
+    expect(spec.description).toContain('## Who we are');
+    expect(spec.description).toContain('### About Stripe');
+    expect(spec.description).toContain(
+      '\n- Work with existing Stripe customers',
+    );
     expect(spec.description).toContain(
       'Stripe is a financial infrastructure platform for businesses',
     );
-    // No residual tags or entities leak into the plain text.
+    // No residual tags or entities leak into the markdown (&amp;nbsp; in the
+    // fixture is DOUBLE-encoded — it must fully decode, not leak as &nbsp;).
     expect(spec.description).not.toMatch(/<[^>]+>/);
     expect(spec.description).not.toContain('&lt;');
     expect(spec.description).not.toContain('&amp;');
+    expect(spec.description).not.toContain('&nbsp;');
+    expect(spec.description).not.toContain('&mdash;');
   });
 
   it('omits description fields when the payload carries no content', async () => {

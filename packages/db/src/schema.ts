@@ -428,9 +428,11 @@ export const investigationRuns = pgTable(
  * - 'agent': a Claude Agent SDK session edited the LaTeX per the user's
  *   natural-language prompt, committed, and pushed.
  * - 'write': the dashboard's manual editor saved a full .tex source; the job
- *   wrote, committed, and pushed it verbatim.
+ *   validated (compiled) it and committed it via the GitHub Contents API.
+ * - 'fork': copy an existing resume's current source to a new
+ *   developer/resumes/<newName>.tex and register the new resume.
  */
-export type ResumeRunKind = 'sync' | 'agent' | 'write';
+export type ResumeRunKind = 'sync' | 'agent' | 'write' | 'fork';
 
 /**
  * Lifecycle of a resume-editor run:
@@ -500,6 +502,89 @@ export const resumeRuns = pgTable(
   },
   // The dashboard reads a resume's run history by resume_id.
   (table) => [index('resume_runs_resume_id_idx').on(table.resumeId)],
+);
+
+/**
+ * How a resume_versions row came to be (mirrors the run kinds):
+ * - 'agent' / 'write' / 'fork': the corresponding run landed this change.
+ * - 'sync': a sync run found repo tex that differs from the last recorded
+ *   version (an out-of-band edit), or backfilled a resume's first version.
+ */
+export type ResumeVersionKind = 'agent' | 'write' | 'sync' | 'fork';
+
+/**
+ * Immutable history of a resume: one row per (resume, commit) that changed
+ * it. Every successful flow that lands a change records one — sync (when the
+ * repo drifted from the last recorded version, plus the zero-versions
+ * backfill), write, agent (one per changed resume), fork (the new resume's
+ * first version). Writers upsert with ON CONFLICT (resume_id, commit_sha)
+ * DO NOTHING so a Cloud Run retry can never duplicate history.
+ */
+export const resumeVersions = pgTable(
+  'resume_versions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    resumeId: uuid('resume_id')
+      .notNull()
+      .references(() => resumes.id),
+    /** Portfolio-repo commit this version's tex came from. */
+    commitSha: text('commit_sha').notNull(),
+    /** Full LaTeX source at that commit. */
+    texSource: text('tex_source').notNull(),
+    /**
+     * Vault path of this version's compiled PDF
+     * (resumes/<name>/versions/<sha>.pdf). Nullable — a version whose
+     * compile failed still records its source.
+     */
+    pdfStoragePath: text('pdf_storage_path'),
+    /** The resume_runs row that produced this version, when one did. */
+    runId: uuid('run_id').references(() => resumeRuns.id),
+    kind: text('kind').$type<ResumeVersionKind>().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // The dashboard lists a resume's history newest-first.
+    index('resume_versions_resume_id_created_at_idx').on(
+      table.resumeId,
+      table.createdAt,
+    ),
+    // Idempotence key: one version per (resume, commit) — retries and
+    // re-syncs at the same commit are ON CONFLICT DO NOTHING no-ops.
+    uniqueIndex('resume_versions_resume_id_commit_sha_uq').on(
+      table.resumeId,
+      table.commitSha,
+    ),
+  ],
+);
+
+/**
+ * Public share links for a resume (GET /r/:token — the one API route exempt
+ * from x-api-key). The unguessable token IS the auth; disabling a link is the
+ * revoke (rows are kept for the view stats). The served PDF is always the
+ * resume's CURRENT one, so a link stays fresh across edits.
+ */
+export const resumeLinks = pgTable(
+  'resume_links',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    resumeId: uuid('resume_id')
+      .notNull()
+      .references(() => resumes.id),
+    /** Human label for the audience, e.g. 'Stripe application'. */
+    name: text('name').notNull(),
+    /** Unguessable url-safe token (≥32 chars; 192 bits from the API). */
+    token: text('token').notNull().unique(),
+    enabled: boolean('enabled').notNull().default(true),
+    viewCount: integer('view_count').notNull().default(0),
+    lastViewedAt: timestamp('last_viewed_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  // The dashboard lists a resume's links by resume_id.
+  (table) => [index('resume_links_resume_id_idx').on(table.resumeId)],
 );
 
 /**

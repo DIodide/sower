@@ -13,6 +13,11 @@ export {
 } from './greenhouse/derive-tenant.js';
 export { GreenhouseAdapter } from './greenhouse/index.js';
 export {
+  decodeHtmlEntitiesDeep,
+  htmlToMarkdown,
+} from './html-to-markdown.js';
+export {
+  composeLeverDescription,
   fetchLeverApplicationForm,
   LeverAdapter,
   parseLeverApplicationForm,

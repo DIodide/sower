@@ -12,8 +12,10 @@ import {
   jobDescriptions,
   jobs,
   profiles,
+  resumeLinks,
   resumeRuns,
   resumes,
+  resumeVersions,
 } from './schema.js';
 
 function sqlColumnNames(table: Table): string[] {
@@ -372,6 +374,98 @@ describe('schema', () => {
     expect(fk?.columns.map((c) => c.name)).toEqual(['resume_id']);
     expect(config.indexes.map((idx) => idx.config.name ?? null)).toContain(
       'resume_runs_resume_id_idx',
+    );
+  });
+
+  it('defines the resume_versions table', () => {
+    expect(getTableName(resumeVersions)).toBe('resume_versions');
+    expect(sqlColumnNames(resumeVersions)).toEqual([
+      'commit_sha',
+      'created_at',
+      'id',
+      'kind',
+      'pdf_storage_path',
+      'resume_id',
+      'run_id',
+      'tex_source',
+    ]);
+    expect(resumeVersions.resumeId.notNull).toBe(true);
+    expect(resumeVersions.commitSha.notNull).toBe(true);
+    expect(resumeVersions.texSource.notNull).toBe(true);
+    expect(resumeVersions.kind.notNull).toBe(true);
+    expect(resumeVersions.createdAt.notNull).toBe(true);
+    // Nullable: a version whose compile failed still records its source.
+    expect(resumeVersions.pdfStoragePath.notNull).toBe(false);
+    // Nullable: sync-detected drift has no producing run to point at.
+    expect(resumeVersions.runId.notNull).toBe(false);
+  });
+
+  it('references resumes + resume_runs and keys versions on (resume_id, commit_sha)', () => {
+    const config = getTableConfig(resumeVersions);
+    const foreignTables = config.foreignKeys.map((fk) => {
+      const ref = fk.reference();
+      return {
+        table: getTableName(ref.foreignTable),
+        columns: ref.columns.map((c) => c.name),
+      };
+    });
+    expect(foreignTables).toEqual(
+      expect.arrayContaining([
+        { table: 'resumes', columns: ['resume_id'] },
+        { table: 'resume_runs', columns: ['run_id'] },
+      ]),
+    );
+    // History reads: (resume_id, created_at) newest-first.
+    expect(config.indexes.map((idx) => idx.config.name ?? null)).toContain(
+      'resume_versions_resume_id_created_at_idx',
+    );
+    // Idempotence: ON CONFLICT (resume_id, commit_sha) DO NOTHING relies on
+    // this unique index — a retry can never duplicate history.
+    const unique = config.indexes.find(
+      (idx) => idx.config.name === 'resume_versions_resume_id_commit_sha_uq',
+    );
+    expect(unique).toBeDefined();
+    expect(unique?.config.unique).toBe(true);
+    expect(
+      unique?.config.columns.map((c) => ('name' in c ? c.name : null)),
+    ).toEqual(['resume_id', 'commit_sha']);
+  });
+
+  it('defines the resume_links table', () => {
+    expect(getTableName(resumeLinks)).toBe('resume_links');
+    expect(sqlColumnNames(resumeLinks)).toEqual([
+      'created_at',
+      'enabled',
+      'id',
+      'last_viewed_at',
+      'name',
+      'resume_id',
+      'token',
+      'view_count',
+    ]);
+    expect(resumeLinks.resumeId.notNull).toBe(true);
+    expect(resumeLinks.name.notNull).toBe(true);
+    // The token IS the auth for the public route: NOT NULL and unique so a
+    // lookup resolves at most one link.
+    expect(resumeLinks.token.notNull).toBe(true);
+    expect(resumeLinks.token.isUnique).toBe(true);
+    // enabled=false is the revoke; links start enabled.
+    expect(resumeLinks.enabled.notNull).toBe(true);
+    expect(resumeLinks.enabled.default).toBe(true);
+    expect(resumeLinks.viewCount.notNull).toBe(true);
+    expect(resumeLinks.viewCount.default).toBe(0);
+    // Nullable until the first public view.
+    expect(resumeLinks.lastViewedAt.notNull).toBe(false);
+    expect(resumeLinks.createdAt.notNull).toBe(true);
+  });
+
+  it('references resumes and indexes resume_id on resume_links', () => {
+    const config = getTableConfig(resumeLinks);
+    const fk = config.foreignKeys[0]?.reference();
+    expect(fk?.foreignTable && getTableName(fk.foreignTable)).toBe('resumes');
+    expect(fk?.columns.map((c) => c.name)).toEqual(['resume_id']);
+    expect(config.indexes.map((idx) => idx.config.name ?? null)).toContain(
+      'resume_links_resume_id_idx',
     );
   });
 

@@ -34,6 +34,22 @@ RUN arch="$(uname -m)" \
   && chmod 0755 /usr/local/bin/tectonic \
   && tectonic --version
 
+# Pre-warm the tectonic bundle cache AT IMAGE BUILD: compiling a minimal
+# document downloads the base TeX bundle files into the cache, baking them
+# into this layer — so a fresh container's first compile drops from
+# bundle-download time (minutes on a cold cache) to seconds. The cache path
+# is pinned via TECTONIC_CACHE_DIR (ENV persists to runtime) so build-time
+# root and the runtime user resolve the SAME directory regardless of HOME,
+# and it is chmodded writable so runtime compiles can still add the odd
+# package the warm-up did not touch.
+ENV TECTONIC_CACHE_DIR=/opt/tectonic-cache
+RUN mkdir -p "$TECTONIC_CACHE_DIR" /tmp/tectonic-warm \
+  && printf '\\documentclass{article}\\begin{document}.\\end{document}\n' \
+    > /tmp/tectonic-warm/warm.tex \
+  && tectonic /tmp/tectonic-warm/warm.tex \
+  && rm -rf /tmp/tectonic-warm \
+  && chmod -R 0777 "$TECTONIC_CACHE_DIR"
+
 WORKDIR /app
 COPY . .
 

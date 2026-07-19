@@ -7,15 +7,19 @@
  * redact.ts/exec.ts for why the token can never leak into logs or the run
  * row):
  *
- * - sync:  compile every developer/resumes/*.tex, upload the PDFs to the
- *          vault, upsert resumes + documents rows. No commits.
- * - write: the manual editor's save — write the file, commit + push (a
- *          single parent-repo commit when developer/resumes is a plain
- *          directory; the submodule + pointer-bump flow when it is a
- *          gitlink), compile, upload.
- * - agent: a Claude Agent SDK session inside the checkout (trusted-repo
- *          posture — see agent-session.ts), then reconcile commits/pushes
- *          and republish whatever the session changed.
+ * - sync:  (clones) compile every developer/resumes/*.tex, upload the PDFs
+ *          to the vault, upsert resumes + documents rows. No commits.
+ * - write: (FAST, no clone) the manual editor's save — fetch the current
+ *          file via the GitHub Contents API, compile the new content
+ *          standalone, and only then commit it via a Contents PUT; falls
+ *          back to the clone flow when the compile needs repo-relative
+ *          includes (see modes.ts runWrite/writeViaClone).
+ * - fork:  (FAST, no clone) copy an existing resume's current source to a
+ *          new developer/resumes/<name>.tex, compile-validate, create via
+ *          the Contents API, register the new resume + first version.
+ * - agent: (clones) a Claude Agent SDK session inside the checkout
+ *          (trusted-repo posture — see agent-session.ts), then reconcile
+ *          commits/pushes and republish whatever the session changed.
  *
  * Unlike the investigator (which POSTs results into the ingest pipeline),
  * this job writes status/transcript/commitSha DIRECTLY to its resume_runs
@@ -40,7 +44,13 @@ import {
 import { createStorage } from '@sower/storage';
 import { eq } from 'drizzle-orm';
 import { setupPortfolioRepo } from './git.js';
-import { type ModeOutcome, runAgent, runSync, runWrite } from './modes.js';
+import {
+  type ModeOutcome,
+  runAgent,
+  runFork,
+  runSync,
+  runWrite,
+} from './modes.js';
 import { redactSecrets } from './redact.js';
 
 type Db = ReturnType<typeof createDb>;
@@ -138,18 +148,28 @@ export async function run(): Promise<number> {
   let errorMessage: string | null = null;
   let outcome: ModeOutcome = { commitSha: null, transcript: null };
   try {
-    workdir = await fs.mkdtemp(path.join(os.tmpdir(), 'sower-resume-'));
-    console.log(
-      `resume-editor: run ${runId} kind=${runRow.kind} — cloning portfolio`,
-    );
-    const repo = await setupPortfolioRepo(workdir, token);
-    const deps = { db, storage, repo };
-    if (runRow.kind === 'sync') {
-      outcome = await runSync(deps);
-    } else if (runRow.kind === 'write') {
-      outcome = await runWrite(deps, runRow);
-    } else if (runRow.kind === 'agent') {
-      outcome = await runAgent(deps, runRow);
+    if (runRow.kind === 'write' || runRow.kind === 'fork') {
+      // FAST clone-free flows: one file over the GitHub Contents API. The
+      // write fallback clones for itself when the compile needs the repo.
+      console.log(
+        `resume-editor: run ${runId} kind=${runRow.kind} — Contents API (no clone)`,
+      );
+      const fastDeps = { db, storage, token };
+      outcome =
+        runRow.kind === 'write'
+          ? await runWrite(fastDeps, runRow)
+          : await runFork(fastDeps, runRow);
+    } else if (runRow.kind === 'sync' || runRow.kind === 'agent') {
+      workdir = await fs.mkdtemp(path.join(os.tmpdir(), 'sower-resume-'));
+      console.log(
+        `resume-editor: run ${runId} kind=${runRow.kind} — cloning portfolio`,
+      );
+      const repo = await setupPortfolioRepo(workdir, token);
+      const deps = { db, storage, repo };
+      outcome =
+        runRow.kind === 'sync'
+          ? await runSync(deps, runRow)
+          : await runAgent(deps, runRow);
     } else {
       throw new Error(`unknown run kind '${runRow.kind}'`);
     }

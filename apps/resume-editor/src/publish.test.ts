@@ -1,6 +1,6 @@
-import { documents, resumes } from '@sower/db';
+import { documents, resumes, resumeVersions } from '@sower/db';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { publishResume, vaultPathFor } from './publish.js';
+import { publishResume, vaultPathFor, versionPdfPathFor } from './publish.js';
 
 interface DbWrite {
   method: 'insert' | 'update';
@@ -12,9 +12,11 @@ interface Chain {
   from: () => Chain;
   where: () => Chain;
   limit: () => Chain;
+  orderBy: () => Chain;
   values: (arg?: unknown) => Chain;
   set: (arg?: unknown) => Chain;
   returning: () => Chain;
+  onConflictDoNothing: () => Chain;
   then: (onFulfilled: (value: unknown) => unknown) => Promise<unknown>;
 }
 
@@ -23,6 +25,7 @@ function chain(result: unknown, onArg?: (arg: unknown) => void): Chain {
     from: () => self,
     where: () => self,
     limit: () => self,
+    orderBy: () => self,
     values: (arg?: unknown) => {
       onArg?.(arg);
       return self;
@@ -32,6 +35,7 @@ function chain(result: unknown, onArg?: (arg: unknown) => void): Chain {
       return self;
     },
     returning: () => self,
+    onConflictDoNothing: () => self,
     // biome-ignore lint/suspicious/noThenProperty: intentionally thenable to mimic drizzle's awaitable query builder
     then: (onFulfilled) => Promise.resolve(result).then(onFulfilled),
   };
@@ -97,12 +101,20 @@ describe('vaultPathFor', () => {
   });
 });
 
+describe('versionPdfPathFor', () => {
+  it('keys the immutable copy on the commit sha, next to the latest pointer', () => {
+    expect(versionPdfPathFor('swe-2027', 'abc123')).toBe(
+      'resumes/swe-2027/versions/abc123.pdf',
+    );
+  });
+});
+
 describe('publishResume', () => {
   it('new resume: uploads the PDF, inserts a documents row, inserts the resumes row', async () => {
     const { storage, puts } = createFakeStorage();
     const db = createFakeDb({
       selectResults: [[]],
-      insertResults: [[{ id: 'doc-1' }], []],
+      insertResults: [[{ id: 'doc-1' }], [{ id: 'resume-new' }]],
       writes,
     });
 
@@ -135,6 +147,8 @@ describe('publishResume', () => {
       lastCommitSha: 'abc123',
       documentId: 'doc-1',
     });
+    // No `version` input: nothing else is written or uploaded.
+    expect(writes).toHaveLength(2);
   });
 
   it('existing resume WITH a documentId: updates both rows, inserts nothing', async () => {
@@ -172,5 +186,145 @@ describe('publishResume', () => {
     expect(writes[0]?.table).toBe(documents);
     expect(writes[1]?.table).toBe(resumes);
     expect(writes[1]?.arg).toMatchObject({ documentId: 'doc-new' });
+  });
+
+  it('version (write kind): uploads the per-commit PDF copy and records the resume_versions row', async () => {
+    const { storage, puts } = createFakeStorage();
+    const db = createFakeDb({
+      selectResults: [
+        [{ id: 'resume-1', name: 'swe-2027', documentId: 'doc-9' }],
+      ],
+      writes,
+    });
+
+    await publishResume(db, storage, {
+      ...input,
+      version: { kind: 'write', runId: 'run-1' },
+    });
+
+    // Same compile output uploaded twice: latest pointer + immutable copy.
+    expect(puts.map((p) => p.path)).toEqual([
+      'resumes/swe-2027/swe-2027.pdf',
+      'resumes/swe-2027/versions/abc123.pdf',
+    ]);
+    const versionWrite = writes.find((w) => w.table === resumeVersions);
+    expect(versionWrite).toBeDefined();
+    expect(versionWrite?.method).toBe('insert');
+    expect(versionWrite?.arg).toEqual({
+      resumeId: 'resume-1',
+      commitSha: 'abc123',
+      texSource: input.texSource,
+      pdfStoragePath: 'resumes/swe-2027/versions/abc123.pdf',
+      runId: 'run-1',
+      kind: 'write',
+    });
+  });
+
+  it('version (fork kind): a NEW resume records its first version against the inserted id', async () => {
+    const { storage, puts } = createFakeStorage();
+    const db = createFakeDb({
+      selectResults: [[]],
+      insertResults: [[{ id: 'doc-1' }], [{ id: 'resume-new' }]],
+      writes,
+    });
+
+    await publishResume(db, storage, {
+      ...input,
+      name: 'stripe-2027',
+      version: { kind: 'fork', runId: 'run-2' },
+    });
+
+    expect(puts.map((p) => p.path)).toContain(
+      'resumes/stripe-2027/versions/abc123.pdf',
+    );
+    const versionWrite = writes.find((w) => w.table === resumeVersions);
+    expect(versionWrite?.arg).toMatchObject({
+      resumeId: 'resume-new',
+      kind: 'fork',
+      runId: 'run-2',
+    });
+  });
+
+  it('version (sync kind): SKIPS recording when the latest version has identical tex', async () => {
+    const { storage, puts } = createFakeStorage();
+    const db = createFakeDb({
+      selectResults: [
+        [{ id: 'resume-1', name: 'swe-2027', documentId: 'doc-9' }],
+        // Latest recorded version — same source: the repo did not drift.
+        [{ id: 'ver-1', texSource: input.texSource }],
+      ],
+      writes,
+    });
+
+    await publishResume(db, storage, {
+      ...input,
+      version: { kind: 'sync', runId: 'run-3' },
+    });
+
+    expect(puts.map((p) => p.path)).toEqual(['resumes/swe-2027/swe-2027.pdf']);
+    expect(writes.find((w) => w.table === resumeVersions)).toBeUndefined();
+  });
+
+  it('version (sync kind): records drift when the repo tex differs from the last version', async () => {
+    const { storage } = createFakeStorage();
+    const db = createFakeDb({
+      selectResults: [
+        [{ id: 'resume-1', name: 'swe-2027', documentId: 'doc-9' }],
+        [{ id: 'ver-1', texSource: '\\older' }],
+      ],
+      writes,
+    });
+
+    await publishResume(db, storage, {
+      ...input,
+      version: { kind: 'sync', runId: 'run-3' },
+    });
+
+    expect(writes.find((w) => w.table === resumeVersions)?.arg).toMatchObject({
+      kind: 'sync',
+      commitSha: 'abc123',
+      runId: 'run-3',
+    });
+  });
+
+  it('version (sync kind): BACKFILLS a first version for a resume with none', async () => {
+    const { storage } = createFakeStorage();
+    const db = createFakeDb({
+      selectResults: [
+        [{ id: 'resume-1', name: 'swe-2027', documentId: 'doc-9' }],
+        // No versions recorded yet.
+        [],
+      ],
+      writes,
+    });
+
+    await publishResume(db, storage, {
+      ...input,
+      version: { kind: 'sync', runId: 'run-3' },
+    });
+
+    expect(writes.find((w) => w.table === resumeVersions)?.arg).toMatchObject({
+      kind: 'sync',
+      texSource: input.texSource,
+    });
+  });
+
+  it('version: skipped entirely when commitSha is null (no identity to key on)', async () => {
+    const { storage, puts } = createFakeStorage();
+    const db = createFakeDb({
+      selectResults: [
+        [{ id: 'resume-1', name: 'swe-2027', documentId: 'doc-9' }],
+      ],
+      writes,
+    });
+
+    await publishResume(db, storage, {
+      ...input,
+      commitSha: null,
+      version: { kind: 'write', runId: 'run-1' },
+    });
+
+    expect(puts).toHaveLength(1);
+    expect(writes.find((w) => w.table === resumeVersions)).toBeUndefined();
   });
 });

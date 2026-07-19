@@ -90,10 +90,50 @@ describe('AshbyAdapter.discover', () => {
       applyUrl:
         'https://jobs.ashbyhq.com/linear/d3bc1ced-3ce4-4086-a050-555055dbb1ff/application',
       questions: [],
-      // descriptionHtml/descriptionPlain come straight from the posting API.
+      // descriptionHtml comes straight from the posting API; description is
+      // markdown converted from it (the fixture's HTML is one <p>, so the
+      // markdown is its text — note it is NOT descriptionPlain, whose text
+      // was truncated differently).
       descriptionHtml: job0.descriptionHtml,
-      description: job0.descriptionPlain,
+      description:
+        "At Linear, we're building the product development system for teams and agents. AI is fundame… [truncated for fixture]",
     });
+  });
+
+  it('converts structured descriptionHtml to markdown (bullets/bold kept)', async () => {
+    const posting = {
+      ...fixture.jobs[0],
+      descriptionHtml:
+        '<h2>About the role</h2><p><strong>Requirements:</strong></p><ul><li>Ship &amp; iterate</li><li>Talk to users</li></ul>',
+      descriptionPlain:
+        'About the role Requirements: Ship & iterate Talk to users',
+    };
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ jobs: [posting], apiVersion: 1 }),
+    });
+    const spec = await adapter.discover(ref, url);
+    expect(spec.description).toBe(
+      '## About the role\n\n**Requirements:**\n\n- Ship & iterate\n- Talk to users',
+    );
+    expect(spec.description).not.toMatch(/<[^>]+>/);
+  });
+
+  it('falls back to descriptionPlain when no descriptionHtml exists', async () => {
+    const posting = {
+      ...fixture.jobs[0],
+      descriptionHtml: null,
+      descriptionPlain: 'Plain text only.',
+    };
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ jobs: [posting], apiVersion: 1 }),
+    });
+    const spec = await adapter.discover(ref, url);
+    expect(spec.description).toBe('Plain text only.');
+    expect(spec.descriptionHtml).toBeUndefined();
   });
 
   it('maps Intern employment type, team fallback, and compensation tiers', async () => {

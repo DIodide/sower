@@ -1,4 +1,4 @@
-import { type ResumeRun, resumeRuns, resumes } from '@sower/db';
+import { type ResumeRun, resumeRuns, resumes, resumeVersions } from '@sower/db';
 import { desc, eq, isNotNull } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -33,6 +33,19 @@ const editBodySchema = z.object({
 // The natural-language change request for an agent run.
 const askBodySchema = z.object({
   prompt: z.string().trim().min(1).max(4000),
+});
+
+// A fork's new resume name: a filename stem / vault path segment — short,
+// no path bits, no dots. Mirrors FORK_NAME_RE in @sower/resume-editor; the
+// job re-validates and also probes the repo for a .tex collision.
+const forkBodySchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .regex(
+      /^[a-z0-9_-]{2,60}$/i,
+      'name must be 2-60 letters/digits/dashes/underscores',
+    ),
 });
 
 /**
@@ -229,6 +242,97 @@ export function registerResumeRoutes(app: FastifyInstance, deps: Deps): void {
     }
     const fired = await fireResumeJob(deps, runId);
     return reply.code(200).send({ runId, fired });
+  });
+
+  // Fork: copy an existing resume's current source to a brand-new
+  // developer/resumes/<name>.tex. The job (clone-free — Contents API) reads
+  // the source fresh from the repo, validates the compile BEFORE creating
+  // anything, then registers the new resume + its first version.
+  app.post('/resumes/:id/fork', async (request, reply) => {
+    if (!deps.config.RESUME_EDITOR_ENABLED) {
+      return reply.code(503).send({
+        error: 'resume editor is not enabled (RESUME_EDITOR_ENABLED)',
+      });
+    }
+    const params = idParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid resume id', issues: params.error.issues });
+    }
+    const body = forkBodySchema.safeParse(request.body);
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid body', issues: body.error.issues });
+    }
+    const rows = await deps.db
+      .select()
+      .from(resumes)
+      .where(eq(resumes.id, params.data.id))
+      .limit(1);
+    const resume = rows[0];
+    if (!resume) {
+      return reply.code(404).send({ error: 'resume not found' });
+    }
+    // Cheap early collision check on the resumes table; the job's Contents
+    // GET on the target path is the definitive repo-side check.
+    const collisions = await deps.db
+      .select({ id: resumes.id })
+      .from(resumes)
+      .where(eq(resumes.name, body.data.name))
+      .limit(1);
+    if (collisions[0]) {
+      return reply
+        .code(409)
+        .send({ error: `a resume named '${body.data.name}' already exists` });
+    }
+    const inserted = await deps.db
+      .insert(resumeRuns)
+      .values({
+        // The SOURCE resume: the new one has no row until the job creates it.
+        resumeId: resume.id,
+        kind: 'fork',
+        prompt: JSON.stringify({
+          sourceResumeId: resume.id,
+          newName: body.data.name,
+        }),
+        status: 'running',
+      })
+      .returning({ id: resumeRuns.id });
+    const runId = inserted[0]?.id;
+    if (runId === undefined) {
+      return reply.code(500).send({ error: 'failed to record resume run' });
+    }
+    const fired = await fireResumeJob(deps, runId);
+    return reply.code(200).send({ runId, fired });
+  });
+
+  // Version history, newest first. Each row carries pdfStoragePath (the
+  // immutable vault path resumes/<name>/versions/<sha>.pdf); the DASHBOARD
+  // streams those bytes through its own IAP-gated route — the api serves no
+  // version-PDF bytes, keeping this a pure metadata read.
+  app.get('/resumes/:id/versions', async (request, reply) => {
+    const params = idParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid resume id', issues: params.error.issues });
+    }
+    const rows = await deps.db
+      .select({ id: resumes.id })
+      .from(resumes)
+      .where(eq(resumes.id, params.data.id))
+      .limit(1);
+    if (!rows[0]) {
+      return reply.code(404).send({ error: 'resume not found' });
+    }
+    const versions = await deps.db
+      .select()
+      .from(resumeVersions)
+      .where(eq(resumeVersions.resumeId, params.data.id))
+      .orderBy(desc(resumeVersions.createdAt));
+    return { versions };
   });
 
   // Run status/transcript — what the dashboard polls after sync/edit/ask.

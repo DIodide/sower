@@ -111,6 +111,13 @@ const envSchema = z
      * fully dormant until infra wires the Job + secrets and flips it.
      */
     RESUME_EDITOR_ENABLED: z.string().optional(),
+    /**
+     * Public base URL of THIS api service (e.g. https://sower-api-....run.app),
+     * used to render resume share-link URLs (/r/<token>). Optional: when
+     * unset, link URLs are derived from the incoming request's host — which
+     * is right whenever the caller reaches the api by its public name.
+     */
+    PUBLIC_API_BASE_URL: z.string().optional(),
   })
   .transform((env) => ({
     ...env,
