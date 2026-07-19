@@ -2,10 +2,15 @@
 
 // Client shell around the (server-rendered) Applications sections. Holds the
 // two bits of cross-row state the rows can't own alone: the checkbox
-// selection (with its sticky "Discard N selected" bar) and the single toast
-// (the discard undo, action errors). Rows reach it via useWorkspace().
+// selection (with its sticky "Discard N selected" bar) and the toast layer
+// (discard undo, action errors). Rows reach it via useWorkspace().
+//
+// Toast rules: one toast at a time, but a live UNDO toast is never evicted —
+// anything that arrives while an undo window is open queues behind it and
+// shows when the window ends (expiry or undo). Errors render as role="alert";
+// info toasts sit inside a persistent polite live region.
 
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   createContext,
   type ReactNode,
@@ -17,12 +22,17 @@ import {
   useTransition,
 } from 'react';
 import { discardTaskIds } from './actions';
+import { restoreTask } from './tasks/[id]/actions';
 
 export interface ToastOptions {
+  /** 'error' renders as role="alert"; default 'info' is a polite status. */
+  kind?: 'info' | 'error';
   /** "Undo" button handler — its presence renders the button. */
   onUndo?: () => void;
   /** Runs when the toast expires (or is replaced) without Undo being hit. */
   onExpire?: () => void;
+  /** Move focus to the Undo button (keyboard-initiated discards). */
+  focusUndo?: boolean;
 }
 
 interface WorkspaceApi {
@@ -44,21 +54,43 @@ const TOAST_MS = 6_000;
 interface ToastState {
   key: number;
   message: string;
+  kind: 'info' | 'error';
   onUndo?: (() => void) | undefined;
+  focusUndo?: boolean | undefined;
 }
+
+let toastKey = 0;
 
 export function Workspace({ children }: { children: ReactNode }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [selected, setSelectedSet] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
   const [toast, setToastState] = useState<ToastState | null>(null);
   const [pending, startTransition] = useTransition();
+  // Mirror of the live toast for the (ref-only) queueing machinery.
+  const toastRef = useRef<ToastState | null>(null);
+  // Toasts waiting behind a live undo toast.
+  const queueRef = useRef<{ message: string; options?: ToastOptions }[]>([]);
+  const undoBtnRef = useRef<HTMLButtonElement | null>(null);
   // The live toast's expiry: timer id + the not-yet-fired onExpire callback.
   const expiryRef = useRef<{
     timer: ReturnType<typeof setTimeout>;
     onExpire?: (() => void) | undefined;
   } | null>(null);
+
+  // H4: a changed filter/search shows a different list — a selection made
+  // against the old list must not survive into it (render-time reset, the
+  // React "derive state from a changed key" pattern).
+  const filterKey = ['q', 'bucket', 'state', 'platform']
+    .map((k) => `${k}=${searchParams?.get(k) ?? ''}`)
+    .join('&');
+  const [prevFilterKey, setPrevFilterKey] = useState(filterKey);
+  if (filterKey !== prevFilterKey) {
+    setPrevFilterKey(filterKey);
+    setSelectedSet(new Set());
+  }
 
   const clearToastTimer = useCallback((fireExpire: boolean) => {
     const expiry = expiryRef.current;
@@ -70,24 +102,56 @@ export function Workspace({ children }: { children: ReactNode }) {
 
   useEffect(() => () => clearToastTimer(false), [clearToastTimer]);
 
-  const showToast = useCallback(
+  const setToast = useCallback((state: ToastState | null) => {
+    toastRef.current = state;
+    setToastState(state);
+  }, []);
+
+  // display/showNext only touch refs and stable setters, so the closures the
+  // expiry timers capture can never go stale.
+  const displayToast = useCallback(
     (message: string, options?: ToastOptions) => {
-      // A new toast replaces the old one; the old one's pending onExpire
-      // (typically a router.refresh) still runs so nothing is left stale.
+      // Replacing a (non-undo) toast still runs its pending onExpire
+      // (typically a router.refresh) so nothing is left stale.
       clearToastTimer(true);
-      const key = Date.now();
-      setToastState({ key, message, onUndo: options?.onUndo });
+      toastKey += 1;
+      setToast({
+        key: toastKey,
+        message,
+        kind: options?.kind ?? 'info',
+        onUndo: options?.onUndo,
+        focusUndo: options?.focusUndo,
+      });
       expiryRef.current = {
         timer: setTimeout(() => {
           expiryRef.current = null;
-          setToastState(null);
           options?.onExpire?.();
+          const next = queueRef.current.shift();
+          if (next) displayToast(next.message, next.options);
+          else setToast(null);
         }, TOAST_MS),
         onExpire: options?.onExpire,
       };
     },
-    [clearToastTimer],
+    [clearToastTimer, setToast],
   );
+
+  const showToast = useCallback(
+    (message: string, options?: ToastOptions) => {
+      // Never evict a live undo toast — its window is a promise to the user.
+      if (toastRef.current?.onUndo && expiryRef.current) {
+        queueRef.current.push(options ? { message, options } : { message });
+        return;
+      }
+      displayToast(message, options);
+    },
+    [displayToast],
+  );
+
+  // H7: a keyboard-initiated discard moves focus to the Undo button.
+  useEffect(() => {
+    if (toast?.focusUndo && toast.onUndo) undoBtnRef.current?.focus();
+  }, [toast]);
 
   const setSelected = useCallback((id: string, on: boolean) => {
     setSelectedSet((prev) => {
@@ -105,9 +169,44 @@ export function Workspace({ children }: { children: ReactNode }) {
     const ids = [...selected];
     if (ids.length === 0) return;
     startTransition(async () => {
-      const result = await discardTaskIds(ids);
+      let result: Awaited<ReturnType<typeof discardTaskIds>>;
+      try {
+        result = await discardTaskIds(ids);
+      } catch {
+        showToast('Discard failed — could not reach the server.', {
+          kind: 'error',
+        });
+        return;
+      }
       setSelectedSet(new Set());
-      showToast(result.message);
+      const restorable = result.discardedIds;
+      if (restorable.length > 0) {
+        showToast(`${result.message} — Undo returns them to "Waiting on you"`, {
+          kind: result.ok ? 'info' : 'error',
+          onUndo: async () => {
+            // Sequential restores (≤100 per batch) — plenty fast, and the
+            // api treats an already-restored task as a no-op.
+            let failedRestores = 0;
+            for (const id of restorable) {
+              try {
+                const r = await restoreTask(id);
+                if (!r.ok) failedRestores += 1;
+              } catch {
+                failedRestores += 1;
+              }
+            }
+            if (failedRestores > 0) {
+              showToast(
+                `Could not restore ${failedRestores} of ${restorable.length} — check the Archive.`,
+                { kind: 'error' },
+              );
+            }
+            router.refresh();
+          },
+        });
+      } else {
+        showToast(result.message, { kind: result.ok ? 'info' : 'error' });
+      }
       router.refresh();
     });
   };
@@ -116,7 +215,9 @@ export function Workspace({ children }: { children: ReactNode }) {
     if (!toast?.onUndo) return;
     const undo = toast.onUndo;
     clearToastTimer(false); // undone — the expire callback must NOT run
-    setToastState(null);
+    const next = queueRef.current.shift();
+    if (next) displayToast(next.message, next.options);
+    else setToast(null);
     undo();
   };
 
@@ -128,20 +229,29 @@ export function Workspace({ children }: { children: ReactNode }) {
         {children}
       </div>
       <div className="bottom-dock">
-        {toast ? (
-          <div key={toast.key} className="toast" role="status">
-            <span>{toast.message}</span>
-            {toast.onUndo ? (
-              <button
-                type="button"
-                className="btn btn--sm btn--primary"
-                onClick={undoToast}
-              >
-                Undo
-              </button>
-            ) : null}
-          </div>
-        ) : null}
+        {/* Persistent polite region: info toasts announce without stealing
+            focus; errors get their own role="alert" inside it. */}
+        <div aria-live="polite">
+          {toast ? (
+            <div
+              key={toast.key}
+              className="toast"
+              role={toast.kind === 'error' ? 'alert' : 'status'}
+            >
+              <span>{toast.message}</span>
+              {toast.onUndo ? (
+                <button
+                  ref={undoBtnRef}
+                  type="button"
+                  className="btn btn--sm btn--primary"
+                  onClick={undoToast}
+                >
+                  Undo
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
         {selected.size > 0 ? (
           <div className="select-bar" role="toolbar" aria-label="selection">
             <button

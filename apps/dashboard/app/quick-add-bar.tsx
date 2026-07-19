@@ -6,13 +6,11 @@
 // makes a newline. A small "add manually" link opens a 3-field mini-form for
 // URL-less jobs (recruiter conversations, career-fair leads).
 
-import { useRouter } from 'next/navigation';
 import { useState, useTransition } from 'react';
 import { manualAdd, pasteIngest } from './quick-add/actions';
 import type { ActionResult } from './tasks/[id]/actions';
 
 export function QuickAddBar() {
-  const router = useRouter();
   const [text, setText] = useState('');
   const [focused, setFocused] = useState(false);
   const [result, setResult] = useState<ActionResult | null>(null);
@@ -25,15 +23,14 @@ export function QuickAddBar() {
   const [manualResult, setManualResult] = useState<ActionResult | null>(null);
   const [manualPending, startManual] = useTransition();
 
+  // No router.refresh() after either action: they revalidatePath('/'), which
+  // already refreshes this route on the same server-action round trip.
   const submitPaste = () => {
     if (text.trim() === '' || pending) return;
     startTransition(async () => {
       const r = await pasteIngest(text);
       setResult(r);
-      if (r.ok) {
-        setText('');
-        router.refresh();
-      }
+      if (r.ok) setText('');
     });
   };
 
@@ -50,7 +47,6 @@ export function QuickAddBar() {
         setCompany('');
         setTitle('');
         setNote('');
-        router.refresh();
       }
     });
   };
@@ -70,7 +66,13 @@ export function QuickAddBar() {
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
+            // isComposing: Enter inside an IME composition picks a candidate,
+            // it must never submit.
+            if (
+              e.key === 'Enter' &&
+              !e.shiftKey &&
+              !e.nativeEvent.isComposing
+            ) {
               e.preventDefault();
               submitPaste();
             }
@@ -113,7 +115,9 @@ export function QuickAddBar() {
             maxLength={200}
             onChange={(e) => setCompany(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter') submitManual();
+              if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                submitManual();
+              }
             }}
           />
           <input
@@ -124,7 +128,9 @@ export function QuickAddBar() {
             maxLength={300}
             onChange={(e) => setTitle(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter') submitManual();
+              if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                submitManual();
+              }
             }}
           />
           <input
@@ -134,7 +140,9 @@ export function QuickAddBar() {
             aria-label="Note"
             onChange={(e) => setNote(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter') submitManual();
+              if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                submitManual();
+              }
             }}
           />
           <button

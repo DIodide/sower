@@ -82,6 +82,12 @@ export interface MessageIngestSummary {
   errors: number;
   /** Image attachments stored + parked for dashboard triage. */
   screenshots: number;
+  /**
+   * URLs beyond the MAX_URLS_PER_MESSAGE cap that were NOT processed (0 or
+   * absent when everything fit). Surfaced so ingresses can tell the user
+   * instead of silently dropping links.
+   */
+  truncatedUrls?: number;
   outcomes: UrlOutcome[];
   /** Per-screenshot outcomes so the reply can link each parked task. */
   screenshotOutcomes: AttachmentOutcome[];
@@ -303,14 +309,17 @@ export async function ingestMessageLinks(
   text: string,
   source: string = SOURCE,
 ): Promise<MessageIngestSummary> {
-  const urls = extractUrlsFromText(text)
-    .filter((url) => !isSelfReferentialUrl(url, deps.config))
-    .slice(0, MAX_URLS_PER_MESSAGE);
+  const found = extractUrlsFromText(text).filter(
+    (url) => !isSelfReferentialUrl(url, deps.config),
+  );
+  const urls = found.slice(0, MAX_URLS_PER_MESSAGE);
   const outcomes: UrlOutcome[] = [];
   for (const url of urls) {
     outcomes.push(await classifyAndIngest(deps, url, 0, source));
   }
-  return summarize(urls.length, outcomes);
+  const summary = summarize(urls.length, outcomes);
+  summary.truncatedUrls = found.length - urls.length;
+  return summary;
 }
 
 /**

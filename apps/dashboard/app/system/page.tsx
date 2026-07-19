@@ -1,8 +1,11 @@
 // /system — the merged ops surface: ingest health, the local capture agent &
 // Workday sessions, and the platform overview. The old /ingestion, /sessions,
 // and /platforms routes redirect here; per-platform and tenant drill-downs
-// stay at their own URLs, linked from the Platforms section.
-import { SectionHeading } from '../../lib/ui';
+// stay at their own URLs, linked from the Platforms section. Each section
+// streams in behind its own Suspense boundary so one slow query never blanks
+// the whole page.
+import { Suspense } from 'react';
+import { Empty, SectionHeading } from '../../lib/ui';
 import { IngestSection } from './ingest-section';
 import { PlatformsSection } from './platforms-section';
 import { SessionsSection } from './sessions-section';
@@ -20,17 +23,23 @@ export default function SystemPage() {
 
       <section id="ingest-health">
         <SectionHeading>Ingest health</SectionHeading>
-        <IngestSection />
+        <Suspense fallback={<Empty>loading ingest health…</Empty>}>
+          <IngestSection />
+        </Suspense>
       </section>
 
       <section id="sessions">
         <SectionHeading>Local agent &amp; Workday sessions</SectionHeading>
-        <SessionsSection />
+        <Suspense fallback={<Empty>loading sessions…</Empty>}>
+          <SessionsSection />
+        </Suspense>
       </section>
 
       <section id="platforms">
         <SectionHeading>Platforms</SectionHeading>
-        <PlatformsSection />
+        <Suspense fallback={<Empty>loading platforms…</Empty>}>
+          <PlatformsSection />
+        </Suspense>
       </section>
     </div>
   );

@@ -183,7 +183,7 @@ describe('POST /ingest/paste', () => {
     for (const payload of [
       {},
       { text: '' },
-      { text: 'x'.repeat(10_001) },
+      { text: 'x'.repeat(50_001) },
       { text: 42 },
     ]) {
       const res = await inject(app, payload);
@@ -207,6 +207,7 @@ describe('POST /ingest/paste', () => {
       unsupported: 0,
       directories: 0,
       errors: 0,
+      truncated: 0,
       outcomes: [],
     });
     expect(ingestState.calls).toEqual([]);
@@ -229,6 +230,7 @@ describe('POST /ingest/paste', () => {
       unsupported: 0,
       directories: 0,
       errors: 0,
+      truncated: 0,
       outcomes: [
         {
           url: 'https://gh/1',
@@ -357,5 +359,28 @@ describe('POST /ingest/paste', () => {
         platform: 'greenhouse',
       },
     ]);
+  });
+
+  it('reports urls beyond the 25-per-message cap as truncated (never silently dropped)', async () => {
+    for (let i = 1; i <= 28; i += 1) {
+      platformState.byUrl[`https://gh/${i}`] = {
+        platform: 'greenhouse',
+        tenant: 'acme',
+        externalId: String(i),
+      };
+    }
+    const text = Array.from(
+      { length: 28 },
+      (_, i) => `https://gh/${i + 1}`,
+    ).join(' ');
+    const app = buildServer(createDeps());
+    const res = await inject(app, { text });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      urls: 25,
+      ingested: 25,
+      truncated: 3,
+    });
+    expect(ingestState.calls).toHaveLength(25);
   });
 });

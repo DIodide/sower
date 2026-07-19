@@ -207,9 +207,19 @@ function NextStep({
                     ? 'Capturing now.'
                     : 'Session capture requested.'}
                 </strong>{' '}
-                {status === 'capturing'
-                  ? 'Complete the sign-in in the browser window that opened on your machine.'
-                  : `The local agent will open a browser on your machine to sign in to ${tenant ?? 'this tenant'}. If nothing opens, make sure the agent is running (see the Sessions tab).`}
+                {status === 'capturing' ? (
+                  'Complete the sign-in in the browser window that opened on your machine.'
+                ) : (
+                  <>
+                    The local agent will open a browser on your machine to sign
+                    in to {tenant ?? 'this tenant'}. If nothing opens, check
+                    that the agent is alive under{' '}
+                    <Link href="/system#sessions">
+                      System → Local agent &amp; sessions
+                    </Link>
+                    .
+                  </>
+                )}
               </p>
             </div>
           );

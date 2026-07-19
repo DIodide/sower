@@ -69,8 +69,10 @@ const taskMetaBodySchema = z
   });
 
 // The dashboard quick-add paste box (free text; urls are extracted from it).
+// 50k comfortably fits a whole job-links email; the dashboard action mirrors
+// this cap so the user sees a friendly message instead of a 400.
 const pasteBodySchema = z.object({
-  text: z.string().min(1).max(10_000),
+  text: z.string().min(1).max(50_000),
 });
 
 // Manual entry without a URL: company is the one required handle.
@@ -538,7 +540,10 @@ export function buildServer(deps: Deps): FastifyInstance {
 
   // User-facing task metadata (notes + priority), PATCH-style over POST: only
   // the provided fields are written (notes: null clears the note). No events
-  // row — note edits are chatty user annotations, not pipeline state.
+  // row — note edits are chatty user annotations, not pipeline state. For the
+  // same reason updatedAt is left alone: annotating a task is not activity,
+  // and touching it would re-sort the dashboard's recency-ordered lists under
+  // the user's hands.
   app.post('/tasks/:id/meta', async (request, reply) => {
     const params = taskParamsSchema.safeParse(request.params);
     if (!params.success) {
@@ -562,10 +567,9 @@ export function buildServer(deps: Deps): FastifyInstance {
       return reply.code(404).send({ error: 'task not found' });
     }
     const set: {
-      updatedAt: Date;
       notes?: string | null;
       priority?: TaskPriority;
-    } = { updatedAt: new Date() };
+    } = {};
     if (body.data.notes !== undefined) {
       set.notes = body.data.notes;
     }
@@ -997,6 +1001,10 @@ export function buildServer(deps: Deps): FastifyInstance {
       unsupported: summary.unsupported,
       directories: summary.directories,
       errors: summary.errors,
+      // URLs beyond the per-message cap that were NOT processed — the UI
+      // tells the user to paste the rest separately instead of silently
+      // dropping them.
+      truncated: summary.truncatedUrls ?? 0,
       outcomes: flattenOutcomes(summary.outcomes),
     });
   });

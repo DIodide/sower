@@ -12,6 +12,7 @@ import {
   eq,
   ilike,
   inArray,
+  notInArray,
   or,
   type SQL,
 } from 'drizzle-orm';
@@ -30,6 +31,7 @@ import {
 } from '../lib/format';
 import { Empty, SectionHeading } from '../lib/ui';
 import { QuickAddBar } from './quick-add-bar';
+import { SearchBox } from './search-box';
 import { TaskRow, type TaskRowData } from './task-row';
 import { Workspace } from './workspace';
 
@@ -37,7 +39,9 @@ export const dynamic = 'force-dynamic';
 
 const TASK_STATES = Object.keys(STATE_META) as TaskState[];
 
-/** List cap: enough to scan, never the whole history. */
+/** Cap for the non-action sections: enough to scan, never the whole history.
+ *  "Waiting on you" is deliberately NEVER capped — work waiting on the user
+ *  must never be silently hidden. */
 const LIST_CAP = 200;
 
 /** Sent rows shown before the "show all" expander. */
@@ -123,11 +127,21 @@ function RowList({ rows }: { rows: TaskRowData[] }) {
   );
 }
 
-/** One section: heading + grid rows, or a one-line "none". */
-function Section({ title, rows }: { title: string; rows: TaskRowData[] }) {
+/** One section: heading + grid rows, or a one-line "none". `count` is the
+ *  TRUE total under the current filters (it may exceed the rows fetched when
+ *  the shared list cap truncated this section). */
+function Section({
+  title,
+  rows,
+  count,
+}: {
+  title: string;
+  rows: TaskRowData[];
+  count?: number;
+}) {
   return (
     <section>
-      <SectionHeading count={rows.length}>{title}</SectionHeading>
+      <SectionHeading count={count ?? rows.length}>{title}</SectionHeading>
       {rows.length === 0 ? <Empty>none</Empty> : <RowList rows={rows} />}
     </section>
   );
@@ -181,39 +195,66 @@ export default async function Page({
     );
   }
 
-  const [platformRows, stateCounts, taskRows] = await Promise.all([
-    db
-      .selectDistinct({ platform: jobs.platform })
-      .from(jobs)
-      .orderBy(jobs.platform),
-    db
-      .select({ state: applicationTasks.state, n: count() })
-      .from(applicationTasks)
-      .innerJoin(jobs, eq(applicationTasks.jobId, jobs.id))
-      .where(baseConditions.length > 0 ? and(...baseConditions) : undefined)
-      .groupBy(applicationTasks.state),
-    db
-      .select({
-        id: applicationTasks.id,
-        state: applicationTasks.state,
-        priority: applicationTasks.priority,
-        notes: applicationTasks.notes,
-        updatedAt: applicationTasks.updatedAt,
-        jobSpec: applicationTasks.jobSpec,
-        company: jobs.company,
-        title: jobs.title,
-        platform: jobs.platform,
-        url: jobs.url,
-      })
-      .from(applicationTasks)
-      .innerJoin(jobs, eq(applicationTasks.jobId, jobs.id))
-      .where(listConditions.length > 0 ? and(...listConditions) : undefined)
-      .orderBy(
-        desc(applicationTasks.priority),
-        desc(applicationTasks.updatedAt),
-      )
-      .limit(LIST_CAP),
-  ]);
+  const taskSelection = {
+    id: applicationTasks.id,
+    state: applicationTasks.state,
+    priority: applicationTasks.priority,
+    notes: applicationTasks.notes,
+    updatedAt: applicationTasks.updatedAt,
+    jobSpec: applicationTasks.jobSpec,
+    company: jobs.company,
+    title: jobs.title,
+    platform: jobs.platform,
+    url: jobs.url,
+  };
+
+  // Two row queries: the action bucket ("Waiting on you") is NEVER capped —
+  // work waiting on the user must all be visible — while everything else
+  // shares the LIST_CAP.
+  const [platformRows, stateCounts, waitingRows, otherRows] = await Promise.all(
+    [
+      db
+        .selectDistinct({ platform: jobs.platform })
+        .from(jobs)
+        .orderBy(jobs.platform),
+      db
+        .select({ state: applicationTasks.state, n: count() })
+        .from(applicationTasks)
+        .innerJoin(jobs, eq(applicationTasks.jobId, jobs.id))
+        .where(baseConditions.length > 0 ? and(...baseConditions) : undefined)
+        .groupBy(applicationTasks.state),
+      db
+        .select(taskSelection)
+        .from(applicationTasks)
+        .innerJoin(jobs, eq(applicationTasks.jobId, jobs.id))
+        .where(
+          and(
+            ...listConditions,
+            inArray(applicationTasks.state, [...WAITING_STATES]),
+          ),
+        )
+        .orderBy(
+          desc(applicationTasks.priority),
+          desc(applicationTasks.updatedAt),
+        ),
+      db
+        .select(taskSelection)
+        .from(applicationTasks)
+        .innerJoin(jobs, eq(applicationTasks.jobId, jobs.id))
+        .where(
+          and(
+            ...listConditions,
+            notInArray(applicationTasks.state, [...WAITING_STATES]),
+          ),
+        )
+        .orderBy(
+          desc(applicationTasks.priority),
+          desc(applicationTasks.updatedAt),
+        )
+        .limit(LIST_CAP),
+    ],
+  );
+  const taskRows = [...waitingRows, ...otherRows];
   const platforms = platformRows.map((r) => r.platform);
 
   const countByState = new Map(
@@ -229,6 +270,31 @@ export default async function Page({
     : bucketFilter
       ? bucketCount(bucketFilter)
       : totalTasks;
+
+  // True per-section totals under the CURRENT filters, computed from the same
+  // grouped counts the chips use — a heading can never disagree with a chip,
+  // and stays honest even when the fetched list was capped.
+  const filteredStates: readonly TaskState[] | null = stateFilter
+    ? [stateFilter]
+    : bucketFilter
+      ? BUCKETS[bucketFilter].states
+      : null;
+  const sectionTotal = (states: readonly TaskState[]) =>
+    states
+      .filter((s) => filteredStates === null || filteredStates.includes(s))
+      .reduce((sum, s) => sum + (countByState.get(s) ?? 0), 0);
+  const waitingTotal = sectionTotal(WAITING_STATES);
+  const processingTotal = sectionTotal(PROCESSING_STATES);
+  const sentTotal = sectionTotal(SENT_STATES);
+  // Archive is the catch-all, so its total absorbs unknown legacy states too.
+  const archiveTotal =
+    totalSelected - waitingTotal - processingTotal - sentTotal;
+  // How many capped-section rows the LIST_CAP actually cut off (0 = no cap
+  // notice; the waiting query is uncapped and never truncates).
+  const capTruncated = Math.max(
+    0,
+    processingTotal + sentTotal + archiveTotal - otherRows.length,
+  );
 
   // Latest investigation run per unsupported task (newest-first, first wins)
   // — drives the "unsupported site — …" annotation.
@@ -334,25 +400,7 @@ export default async function Page({
       {/* ---- filter strip: search left, bucket chips + overflow right ---- */}
       <div className="filter-strip">
         <search className="filter-search">
-          <form method="GET" action="/">
-            <input
-              type="search"
-              name="q"
-              defaultValue={qFilter ?? ''}
-              className="field"
-              placeholder="Search company, role, notes"
-              aria-label="Search applications"
-            />
-            {bucketFilter && !stateFilter ? (
-              <input type="hidden" name="bucket" value={bucketFilter} />
-            ) : null}
-            {stateFilter ? (
-              <input type="hidden" name="state" value={stateFilter} />
-            ) : null}
-            {platformFilter ? (
-              <input type="hidden" name="platform" value={platformFilter} />
-            ) : null}
-          </form>
+          <SearchBox />
         </search>
         <div className="filter-chips">
           {bucketChip('action')}
@@ -446,9 +494,13 @@ export default async function Page({
       ) : (
         <Workspace>
           <Section title="Waiting on you" rows={waiting} />
-          <Section title="New & processing" rows={processing} />
+          <Section
+            title="New & processing"
+            rows={processing}
+            count={processingTotal}
+          />
           <section>
-            <SectionHeading count={sent.length}>Sent</SectionHeading>
+            <SectionHeading count={sentTotal}>Sent</SectionHeading>
             {sent.length === 0 ? (
               <Empty>none</Empty>
             ) : sent.length <= SENT_VISIBLE ? (
@@ -459,7 +511,7 @@ export default async function Page({
                   <TaskRow key={row.id} row={row} />
                 ))}
                 <details className="show-more">
-                  <summary>show all {sent.length}</summary>
+                  <summary>show {sent.length - SENT_VISIBLE} more</summary>
                   {sent.slice(SENT_VISIBLE).map((row) => (
                     <TaskRow key={row.id} row={row} />
                   ))}
@@ -475,7 +527,7 @@ export default async function Page({
             <summary>
               Archive{' '}
               <span className="hint">
-                {archive.length} task{archive.length === 1 ? '' : 's'} — failed,
+                {archiveTotal} task{archiveTotal === 1 ? '' : 's'} — failed,
                 duplicates, discarded
               </span>
             </summary>
@@ -489,8 +541,13 @@ export default async function Page({
           </details>
         </Workspace>
       )}
-      {totalSelected > rows.length ? (
-        <Empty>{totalSelected - rows.length} more — refine your search.</Empty>
+      {/* Only shown when the shared cap actually truncated something —
+          "Waiting on you" is never capped, so it is never affected. */}
+      {capTruncated > 0 ? (
+        <Empty>
+          {capTruncated} more (outside "Waiting on you") not shown — refine your
+          search or filters to see them.
+        </Empty>
       ) : null}
     </div>
   );

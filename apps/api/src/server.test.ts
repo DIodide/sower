@@ -1720,7 +1720,9 @@ describe('buildServer', () => {
       );
       const set = update?.arg as Record<string, unknown>;
       expect(set.notes).toBe('ping recruiter on Friday');
-      expect(set.updatedAt).toBeInstanceOf(Date);
+      // Annotations are not activity: updatedAt is never touched, so the
+      // dashboard's recency-ordered lists don't re-sort under a note edit.
+      expect('updatedAt' in set).toBe(false);
       // PATCH semantics: an omitted field is never written.
       expect('priority' in set).toBe(false);
       expect('state' in set).toBe(false);

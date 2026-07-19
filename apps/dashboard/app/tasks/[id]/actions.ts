@@ -331,8 +331,10 @@ export async function saveAnswers(
 /**
  * Update a task's user-facing metadata (notes and/or priority) via the api
  * service. PATCH semantics: only the provided fields change (notes: null
- * clears the note). Revalidates the task page plus the home/queue lists,
- * whose ordering priority affects.
+ * clears the note). Only the task page is revalidated — deliberately NOT the
+ * home list: the row owns its optimistic note/priority state, and a list
+ * revalidation mid-edit would re-sort rows under the user's hands. Order
+ * settles on the next natural refresh.
  */
 export async function updateTaskMeta(
   taskId: string,
@@ -342,6 +344,12 @@ export async function updateTaskMeta(
   if (!idParse.success) return { ok: false, message: 'invalid task id.' };
   const metaParse = taskMetaSchema.safeParse(meta);
   if (!metaParse.success) {
+    if (typeof meta.notes === 'string' && meta.notes.length > 20_000) {
+      return {
+        ok: false,
+        message: 'note is too long (max 20,000 characters).',
+      };
+    }
     return {
       ok: false,
       message: 'nothing to update — provide notes or a priority.',
@@ -349,7 +357,6 @@ export async function updateTaskMeta(
   }
   const result = await callApi(idParse.data, 'meta', metaParse.data);
   revalidatePath(`/tasks/${idParse.data}`);
-  revalidatePath('/');
   return result;
 }
 

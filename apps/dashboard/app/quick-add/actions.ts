@@ -14,7 +14,8 @@ import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import type { ActionResult } from '../tasks/[id]/actions';
 
-const pasteTextSchema = z.string().min(1).max(10_000);
+/** Mirrors the api's POST /ingest/paste cap. */
+const PASTE_MAX_CHARS = 50_000;
 
 const taskPrioritySchema = z.union([z.literal(-1), z.literal(0), z.literal(1)]);
 const manualAddSchema = z.object({
@@ -35,6 +36,8 @@ const pasteResponseSchema = z.object({
   unsupported: z.number(),
   directories: z.number(),
   errors: z.number(),
+  /** URLs beyond the api's 25-per-paste cap that were NOT processed. */
+  truncated: z.number().optional(),
 });
 
 const manualResponseSchema = z.object({
@@ -110,15 +113,19 @@ async function failureMessage(
  * message summarizes them; text with no URLs is a friendly no-op.
  */
 export async function pasteIngest(text: string): Promise<ActionResult> {
-  const parsed = pasteTextSchema.safeParse(text);
-  if (!parsed.success) {
+  // Distinct messages: an empty paste and an oversized one are different
+  // user mistakes and deserve different fixes.
+  if (typeof text !== 'string' || text.trim() === '') {
+    return { ok: false, message: 'paste some text first.' };
+  }
+  if (text.length > PASTE_MAX_CHARS) {
     return {
       ok: false,
-      message: 'paste some text first (up to 10,000 characters).',
+      message: "that's over the 50,000-character limit — trim it down.",
     };
   }
 
-  const response = await postApi('/ingest/paste', { text: parsed.data });
+  const response = await postApi('/ingest/paste', { text });
   if (!(response instanceof Response)) return response;
   if (!response.ok) return failureMessage('paste ingest', response);
 
@@ -138,24 +145,32 @@ export async function pasteIngest(text: string): Promise<ActionResult> {
         'no links found in the pasted text — for a job without a URL, use manual add.',
     };
   }
+  // Human words, no pipeline jargon: "Added 1 · already tracked 1 · saved
+  // for review 1".
   const parts: string[] = [];
-  if (summary.ingested > 0) parts.push(`${summary.ingested} queued`);
-  if (summary.unsupported > 0) {
-    parts.push(`${summary.unsupported} recorded (unsupported)`);
-  }
+  if (summary.ingested > 0) parts.push(`Added ${summary.ingested}`);
   if (summary.duplicates > 0) {
-    parts.push(`${summary.duplicates} already known`);
+    parts.push(`already tracked ${summary.duplicates}`);
+  }
+  if (summary.unsupported > 0) {
+    parts.push(`saved for review ${summary.unsupported}`);
   }
   if (summary.directories > 0) {
     parts.push(
-      `${summary.directories} director${summary.directories === 1 ? 'y' : 'ies'} expanded`,
+      `opened ${summary.directories} link list${summary.directories === 1 ? '' : 's'}`,
     );
   }
   if (summary.errors > 0) parts.push(`${summary.errors} failed`);
+  const truncated = summary.truncated ?? 0;
+  if (truncated > 0) {
+    parts.push(
+      `only the first 25 links were processed (${truncated} skipped) — paste the rest separately`,
+    );
+  }
   return {
     // Errors are reported, not swallowed — but partial success is success.
     ok: summary.errors < summary.urls,
-    message: `${summary.urls} link${summary.urls === 1 ? '' : 's'} processed: ${parts.join(', ')}.`,
+    message: parts.join(' · '),
   };
 }
 
@@ -183,9 +198,8 @@ export async function manualAdd(input: {
   if (!(response instanceof Response)) return response;
   if (!response.ok) return failureMessage('manual add', response);
 
-  let result: z.infer<typeof manualResponseSchema>;
   try {
-    result = manualResponseSchema.parse(await response.json());
+    manualResponseSchema.parse(await response.json());
   } catch {
     return { ok: false, message: 'unexpected api response — see api logs.' };
   }
@@ -193,6 +207,6 @@ export async function manualAdd(input: {
   revalidatePath('/');
   return {
     ok: true,
-    message: `added ${parsed.data.company} — parked as needs-input${result.taskId ? '' : ' (task id unavailable)'}.`,
+    message: `${parsed.data.company} saved — it's in "Waiting on you".`,
   };
 }
