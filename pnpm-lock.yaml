@@ -239,6 +239,9 @@ importers:
       '@sower/core':
         specifier: workspace:*
         version: link:../core
+      '@sower/db':
+        specifier: workspace:*
+        version: link:../db
       yaml:
         specifier: ^2.8.0
         version: 2.9.0

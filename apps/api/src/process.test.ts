@@ -147,8 +147,16 @@ vi.mock('@sower/platforms', () => ({
   },
 }));
 
+const profileState = vi.hoisted(() => ({
+  /** What getProfile resolves; `empty: true` marks the empty sentinel. */
+  profile: {} as Record<string, unknown>,
+}));
+
 vi.mock('@sower/answers', () => ({
-  loadProfile: async () => ({}),
+  getProfile: async () => profileState.profile,
+  // The real isEmptyProfile checks the identity fields; the fake keys off a
+  // bare marker so tests can flip emptiness without building full profiles.
+  isEmptyProfile: (profile: Record<string, unknown>) => profile.empty === true,
   resolveAnswers: (_questions: unknown, _profile: unknown, opts?: unknown) => {
     answersState.lastOpts = opts;
     return answersState.result;
@@ -512,6 +520,7 @@ beforeEach(() => {
   adapterState.formAccess = undefined;
   answersState.result = { resolved: [], missing: [] };
   answersState.lastOpts = undefined;
+  profileState.profile = {};
   workdayState.session = null;
   workdayState.questionnaireId = null;
   workdayState.fields = [];
@@ -585,6 +594,50 @@ describe('processTask', () => {
       ['PROCESS_START', 'QUEUED', 'PREPARING'],
       ['RESOLVED_PARTIAL', 'PREPARING', 'NEEDS_INPUT'],
     ]);
+  });
+
+  it('processes WITHOUT failing when no profile is configured, noting it on the resolution', async () => {
+    const { db, task } = createFakeTaskDb({ state: 'QUEUED' });
+    // The empty-profile sentinel: prod's old behavior was a loadProfile
+    // THROW here (ENOENT on the gitignored file), burning attempts with
+    // "Failed to read profile file" as lastError. getProfile never throws.
+    profileState.profile = { empty: true };
+    answersState.result = { resolved: [], missing: [] };
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome).toEqual({
+      kind: 'processed',
+      state: 'REVIEW',
+      resolved: 0,
+      missing: 0,
+    });
+    expect(task.lastError).toBeNull();
+    expect((task.resolution as { note?: string }).note).toContain(
+      'No profile configured — set one up in Answers → Profile',
+    );
+  });
+
+  it('joins the no-profile note with the account-required note when both apply', async () => {
+    const { db, task } = createFakeTaskDb({ state: 'QUEUED' });
+    profileState.profile = { empty: true };
+    adapterState.formAccess = 'account-required';
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'NEEDS_INPUT' });
+    const note = (task.resolution as { note?: string }).note ?? '';
+    expect(note).toMatch(/Workday/);
+    expect(note).toContain('No profile configured');
+  });
+
+  it('leaves the resolution note unset when a profile is configured', async () => {
+    const { db, task } = createFakeTaskDb({ state: 'QUEUED' });
+    answersState.result = { resolved: [], missing: [] };
+
+    await processTask(createDeps(db), 'task-1');
+
+    expect((task.resolution as { note?: string }).note).toBeUndefined();
   });
 
   it('passes the startup-loaded curated answer bank through to resolveAnswers', async () => {

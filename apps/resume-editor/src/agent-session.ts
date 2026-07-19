@@ -63,12 +63,20 @@ export function buildSubprocessEnv(gitHome: string): Record<string, string> {
   return env;
 }
 
-export function buildSystemPrompt(texPath: string): string {
+export function buildSystemPrompt(
+  texPath: string,
+  isSubmodule: boolean,
+): string {
+  // The commit/push instruction matches how developer/resumes is actually
+  // tracked (detected at clone time — see git.ts detectResumesLayout).
+  const finishStep = isSubmodule
+    ? 'When you are done, commit with a descriptive message and push — both in the developer/resumes submodule and in the parent repo (bump the submodule pointer) when the submodule changed.'
+    : 'developer/resumes is part of this repository (not a submodule). When you are done, commit with a descriptive message and push here, in this repository — a single commit and push covers everything.';
   return [
     `You are editing ${texPath} in the user's portfolio repo per their request.`,
     "Follow the repo's conventions (read README/CLAUDE.md if present). You may change other files in the repo when the request requires it.",
     "After LaTeX changes run `tectonic <file>` (from the file's directory) to verify it compiles; fix any errors before finishing.",
-    'When you are done, commit with a descriptive message and push — both in the developer/resumes submodule and in the parent repo (bump the submodule pointer) when the submodule changed.',
+    finishStep,
   ].join('\n');
 }
 
@@ -79,6 +87,8 @@ export interface AgentSessionInput {
   gitHome: string;
   /** Repo-relative path of the resume being edited. */
   texPath: string;
+  /** Whether developer/resumes is a real submodule (see git.ts detection). */
+  isSubmodule: boolean;
   /** The user's natural-language request. */
   prompt: string;
   maxTurns?: number;
@@ -102,7 +112,7 @@ export async function runResumeAgent(
     prompt: input.prompt,
     options: {
       cwd: input.cwd,
-      systemPrompt: buildSystemPrompt(input.texPath),
+      systemPrompt: buildSystemPrompt(input.texPath, input.isSubmodule),
       // Base tool set: file tools + Bash (trusted repo — see module comment).
       tools: [...AGENT_TOOLS],
       disallowedTools: [...DENIED_TOOLS],

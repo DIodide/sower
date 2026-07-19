@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { BankValue } from '@sower/answers';
-import { loadProfile, resolveAnswers } from '@sower/answers';
+import { getProfile, isEmptyProfile, resolveAnswers } from '@sower/answers';
 import type {
   JobSpec,
   Platform,
@@ -215,7 +215,11 @@ export async function processTask(
       };
     }
 
-    const profile = await loadProfile(config.PROFILE_PATH);
+    // DB-first profile: the profiles row wins; config.PROFILE_PATH is only
+    // the dev fallback. NEVER throws — an unconfigured profile resolves as
+    // the empty profile (nothing profile-derived resolves; see the note
+    // below) instead of burning attempts with "Failed to read profile file".
+    const profile = await getProfile(db, config.PROFILE_PATH);
     // The curated answer bank (loaded once at startup, on deps), the answers
     // bank (user-entered values keyed by normalized label), and stored
     // documents (resume/cover letter files) extend the profile as answer
@@ -271,9 +275,19 @@ export async function processTask(
       requiredMissingCount: requiredMissing.length,
       optionalMissingCount: missing.length - requiredMissing.length,
     };
+    const notes: string[] = [];
     if (accountRequired) {
-      resolution.note =
-        'Applying to this Workday job requires a per-tenant candidate account and a browser session, which the account/browser tier has not run yet. The title, company, and description are captured; the application form is not yet automatable.';
+      notes.push(
+        'Applying to this Workday job requires a per-tenant candidate account and a browser session, which the account/browser tier has not run yet. The title, company, and description are captured; the application form is not yet automatable.',
+      );
+    }
+    if (isEmptyProfile(profile)) {
+      notes.push(
+        'No profile configured — set one up in Answers → Profile. Resolution ran without profile facts (only saved answers and documents could auto-fill).',
+      );
+    }
+    if (notes.length > 0) {
+      resolution.note = notes.join(' ');
     }
     await db
       .update(applicationTasks)

@@ -198,6 +198,71 @@ describe('refreshIngestReply', () => {
     expect(text).not.toContain('no form found');
   });
 
+  it('renders a discarded sibling with its latest DISCARD note (the expanded-listing line)', async () => {
+    const discarded = row('disc-1xx');
+    const siblings = [
+      { ...discarded, task: { ...discarded.task, state: 'DISCARDED' } },
+      row('plain-1x'),
+    ];
+    const discardEvents = [
+      // Newest first: the listing auto-discard's note wins…
+      {
+        taskId: 'disc-1xx',
+        data: { reason: 'auto', note: 'listing (2 jobs added)' },
+      },
+      // …over an older note-less manual discard.
+      { taskId: 'disc-1xx', data: { reason: 'manual' } },
+    ];
+    const { deps, select, editChannelMessage } = fakeDeps([
+      REF_ROW,
+      siblings,
+      [], // no investigation runs
+      discardEvents,
+    ]);
+
+    await refreshIngestReply(deps, TASK_ID);
+
+    // ref + siblings + runs + discard events (the last one only because a
+    // discarded row exists).
+    expect(select).toHaveBeenCalledTimes(4);
+    const text = editChannelMessage.mock.calls[0]?.[2] as string;
+    expect(text.split('\n')).toEqual([
+      `🗑️ [${URL_LABEL}](${BASE_URL}/tasks/disc-1xx) · discarded — listing (2 jobs added) · ${DATE}`,
+      `⚠️ [${URL_LABEL}](${BASE_URL}/tasks/plain-1x) · recorded (unsupported) · ${DATE}`,
+    ]);
+  });
+
+  it('the LATEST discard decides even when it is note-less (older notes never resurface)', async () => {
+    const discarded = row('disc-2xx');
+    const { deps, editChannelMessage } = fakeDeps([
+      REF_ROW,
+      [{ ...discarded, task: { ...discarded.task, state: 'DISCARDED' } }],
+      [], // no investigation runs
+      [
+        // Newest first: a re-discard without a note…
+        { taskId: 'disc-2xx', data: { reason: 'manual' } },
+        // …must not resurface the older listing note.
+        {
+          taskId: 'disc-2xx',
+          data: { reason: 'auto', note: 'listing (2 jobs added)' },
+        },
+      ],
+    ]);
+
+    await refreshIngestReply(deps, TASK_ID);
+
+    const text = editChannelMessage.mock.calls[0]?.[2] as string;
+    expect(text).toContain('· discarded ·');
+    expect(text).not.toContain('listing (2 jobs added)');
+  });
+
+  it('skips the discard-note query entirely when no sibling is discarded', async () => {
+    const { deps, select } = fakeDeps([REF_ROW, [row('plain-1x')], []]);
+    await refreshIngestReply(deps, TASK_ID);
+    // ref + siblings + runs only.
+    expect(select).toHaveBeenCalledTimes(3);
+  });
+
   it('swallows a Discord edit rejection (never throws into the caller)', async () => {
     const { deps, editChannelMessage } = fakeDeps([
       REF_ROW,
@@ -283,6 +348,21 @@ describe('renderTaskLine (discarded)', () => {
     );
     expect(line).toBe(
       `🗑️ [Data Scientist · TickPick](${BASE_URL}/tasks/disc-1xx) · discarded · ${DATE}`,
+    );
+  });
+
+  it('appends the discard note when provided (the listing auto-discard)', () => {
+    const line = renderTaskLine(
+      asRow(
+        row('disc-5xx', { title: 'Careers', company: 'Databricks' }),
+        'DISCARDED',
+      ),
+      undefined,
+      BASE_URL,
+      'listing (12 jobs added)',
+    );
+    expect(line).toBe(
+      `🗑️ [Careers · Databricks](${BASE_URL}/tasks/disc-5xx) · discarded — listing (12 jobs added) · ${DATE}`,
     );
   });
 

@@ -71,7 +71,11 @@ const repo: RepoContext = {
   submoduleDir,
   branch: 'main',
   submoduleBranch: 'main',
+  isSubmodule: true,
 };
+
+/** The REAL repo layout: developer/resumes is a plain directory. */
+const plainRepo: RepoContext = { ...repo, isSubmodule: false };
 
 afterAll(async () => {
   await rm(workdir, { recursive: true, force: true });
@@ -101,8 +105,11 @@ const storage = {
   exists: async () => false,
 };
 
-function deps(db: ModeDeps['db'] = selectDb([])): ModeDeps {
-  return { db, storage, repo };
+function deps(
+  db: ModeDeps['db'] = selectDb([]),
+  repoCtx: RepoContext = repo,
+): ModeDeps {
+  return { db, storage, repo: repoCtx };
 }
 
 /** Per-dir queues for the mocked head(); the last value repeats. */
@@ -202,6 +209,33 @@ describe('runSync', () => {
       'good',
     ]);
   });
+
+  it('plain directory + the real filename: Ibraheem_Amin_Resume.tex syncs at the PARENT head with underscores/case intact', async () => {
+    await writeFile(
+      path.join(submoduleDir, 'Ibraheem_Amin_Resume.tex'),
+      '\\resume',
+    );
+    // Plain mode reads the sha from the parent repo, not the resumes dir.
+    queueHeads({ [repo.root]: ['parentsha'] });
+
+    const outcome = await runSync(deps(selectDb([]), plainRepo));
+
+    expect(outcome).toEqual({ commitSha: 'parentsha', transcript: null });
+    expect(vi.mocked(compileTex).mock.calls).toEqual([
+      [submoduleDir, 'Ibraheem_Amin_Resume.tex'],
+    ]);
+    expect(vi.mocked(publishResume).mock.calls[0]?.[2]).toMatchObject({
+      name: 'Ibraheem_Amin_Resume',
+      texPath: 'developer/resumes/Ibraheem_Amin_Resume.tex',
+      texSource: '\\resume',
+      commitSha: 'parentsha',
+    });
+    expect(vi.mocked(publishResume).mock.calls[0]?.[2]?.pdf.toString()).toBe(
+      '%PDF Ibraheem_Amin_Resume',
+    );
+    expect(commitAll).not.toHaveBeenCalled();
+    expect(push).not.toHaveBeenCalled();
+  });
 });
 
 describe('runWrite', () => {
@@ -254,6 +288,32 @@ describe('runWrite', () => {
     expect(publishResume).toHaveBeenCalledTimes(1);
     expect(outcome.commitSha).toBe('samesha');
   });
+
+  it('plain directory: ONE commit + ONE push in the parent repo, and NO gitlink bump', async () => {
+    vi.mocked(isDirty).mockResolvedValue(true);
+    queueHeads({ [repo.root]: ['parentsha'] });
+
+    const outcome = await runWrite(deps(selectDb([]), plainRepo), run);
+
+    // Dirtiness is judged on the parent repo (the only repo there is).
+    expect(isDirty).toHaveBeenCalledWith(plainRepo, plainRepo.root);
+    // Single commit in the parent, single push to the parent branch.
+    expect(commitAll).toHaveBeenCalledTimes(1);
+    expect(commitAll).toHaveBeenCalledWith(
+      plainRepo,
+      plainRepo.root,
+      'resume: manual edit via sower',
+    );
+    expect(push).toHaveBeenCalledTimes(1);
+    expect(push).toHaveBeenCalledWith(plainRepo, plainRepo.root, 'main');
+    // No second repo to touch: the gitlink bump is never attempted.
+    expect(bumpSubmodulePointer).not.toHaveBeenCalled();
+    expect(vi.mocked(publishResume).mock.calls[0]?.[2]).toMatchObject({
+      name: 'swe-2027',
+      commitSha: 'parentsha',
+    });
+    expect(outcome).toEqual({ commitSha: 'parentsha', transcript: null });
+  });
 });
 
 describe('runAgent', () => {
@@ -290,6 +350,7 @@ describe('runAgent', () => {
       gitHome: repo.gitHome,
       texPath: 'developer/resumes/swe-2027.tex',
       prompt: 'Add my Acme internship.',
+      isSubmodule: true,
     });
     // Nothing left to reconcile: no commits, no pushes from the driver.
     expect(commitAll).not.toHaveBeenCalled();
@@ -350,6 +411,107 @@ describe('runAgent', () => {
     expect(outcome.commitSha).toBeNull();
     expect(publishResume).not.toHaveBeenCalled();
     expect(push).not.toHaveBeenCalled();
+  });
+
+  describe('plain directory (the real repo layout)', () => {
+    const resumeRowPlain = {
+      id: RESUME_ID,
+      name: 'Ibraheem_Amin_Resume',
+      texPath: 'developer/resumes/Ibraheem_Amin_Resume.tex',
+    };
+
+    it('agent committed and pushed: verifies via SHA compare on the PARENT only, republishes the real tex file', async () => {
+      queueHeads({ [repo.root]: ['par-before', 'par-after'] });
+      vi.mocked(isDirty).mockResolvedValue(false);
+      // Remote already matches local — the agent pushed the parent repo.
+      vi.mocked(remoteBranchSha).mockResolvedValue('par-after');
+      // Parent-repo diff paths are repo-relative; only the top-level
+      // developer/resumes/*.tex entries republish.
+      vi.mocked(changedFiles).mockResolvedValue([
+        'developer/resumes/Ibraheem_Amin_Resume.tex',
+        'developer/resumes/assets/x.cls',
+        'src/pages/index.tsx',
+      ]);
+      await writeFile(
+        path.join(submoduleDir, 'Ibraheem_Amin_Resume.tex'),
+        '\\edited',
+      );
+
+      const outcome = await runAgent(
+        deps(selectDb([resumeRowPlain]), plainRepo),
+        run,
+      );
+
+      // The session is told the single-repo truth.
+      expect(runResumeAgent).toHaveBeenCalledWith({
+        cwd: plainRepo.root,
+        gitHome: plainRepo.gitHome,
+        texPath: 'developer/resumes/Ibraheem_Amin_Resume.tex',
+        prompt: 'Add my Acme internship.',
+        isSubmodule: false,
+      });
+      // Nothing left to reconcile: no commits, no pushes, and NO gitlink
+      // bump is ever attempted in the plain layout.
+      expect(commitAll).not.toHaveBeenCalled();
+      expect(push).not.toHaveBeenCalled();
+      expect(bumpSubmodulePointer).not.toHaveBeenCalled();
+      // The diff runs in the parent repo between the parent shas.
+      expect(changedFiles).toHaveBeenCalledWith(
+        plainRepo,
+        plainRepo.root,
+        'par-before',
+        'par-after',
+      );
+      expect(
+        vi.mocked(publishResume).mock.calls.map((c) => c[2]?.name),
+      ).toEqual(['Ibraheem_Amin_Resume']);
+      expect(vi.mocked(publishResume).mock.calls[0]?.[2]).toMatchObject({
+        texPath: 'developer/resumes/Ibraheem_Amin_Resume.tex',
+        texSource: '\\edited',
+        commitSha: 'par-after',
+      });
+      expect(outcome.commitSha).toBe('par-after');
+    });
+
+    it('agent stopped short: driver commits + pushes the PARENT once, no gitlink bump', async () => {
+      queueHeads({ [repo.root]: ['par-before', 'par-after'] });
+      // Parent dirty (uncommitted agent edits).
+      vi.mocked(isDirty).mockResolvedValue(true);
+      // Remote still at the old sha — the push did NOT happen.
+      vi.mocked(remoteBranchSha).mockResolvedValue('par-before');
+      vi.mocked(changedFiles).mockResolvedValue([]);
+
+      const outcome = await runAgent(
+        deps(selectDb([resumeRowPlain]), plainRepo),
+        run,
+      );
+
+      expect(commitAll).toHaveBeenCalledTimes(1);
+      expect(commitAll).toHaveBeenCalledWith(
+        plainRepo,
+        plainRepo.root,
+        'resume: edits via sower agent',
+      );
+      expect(push).toHaveBeenCalledTimes(1);
+      expect(push).toHaveBeenCalledWith(plainRepo, plainRepo.root, 'main');
+      expect(bumpSubmodulePointer).not.toHaveBeenCalled();
+      expect(outcome.commitSha).toBe('par-after');
+    });
+
+    it('no changes: null commitSha, no publishes, no pushes', async () => {
+      queueHeads({ [repo.root]: ['par-same'] });
+      vi.mocked(isDirty).mockResolvedValue(false);
+
+      const outcome = await runAgent(
+        deps(selectDb([resumeRowPlain]), plainRepo),
+        run,
+      );
+
+      expect(outcome.commitSha).toBeNull();
+      expect(publishResume).not.toHaveBeenCalled();
+      expect(push).not.toHaveBeenCalled();
+      expect(bumpSubmodulePointer).not.toHaveBeenCalled();
+    });
   });
 
   it('rejects runs without a resume row / prompt', async () => {

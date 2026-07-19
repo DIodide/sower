@@ -116,3 +116,25 @@ jobs:
           --region us-east1
           --project ${{ secrets.GCP_PROJECT_ID }}
           --quiet
+
+      - name: Build resume-editor image
+        # Resume editor Cloud Run Job (git + tectonic + Agent SDK; no
+        # optional-dep pruning — the SDK ships its binary via optional deps).
+        run: >
+          docker build
+          -t us-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/sower/resume-editor:${{ github.sha }}
+          -f Dockerfile.resume-editor .
+
+      - name: Push resume-editor image
+        run: docker push us-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/sower/resume-editor:${{ github.sha }}
+
+      - name: Deploy resume-editor job to Cloud Run
+        # Tolerate the job not existing yet: Terraform creates it on the next
+        # infra apply; until then the update is a no-op skip, not a CI failure.
+        run: >
+          gcloud run jobs update sower-resume-editor
+          --image us-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/sower/resume-editor:${{ github.sha }}
+          --region us-east1
+          --project ${{ secrets.GCP_PROJECT_ID }}
+          --quiet
+          || echo "sower-resume-editor job not created yet — skipping image roll"

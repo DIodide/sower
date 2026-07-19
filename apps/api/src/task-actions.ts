@@ -1,4 +1,4 @@
-import { loadProfile } from '@sower/answers';
+import { getProfile, isEmptyProfile } from '@sower/answers';
 import type {
   JobSpec,
   Platform,
@@ -304,7 +304,17 @@ async function fillWorkdayOnApprove(
       ? jobSpec.meta.questionnaireId
       : undefined;
 
-  const profile = await loadProfile(deps.config.PROFILE_PATH);
+  // DB-first profile (config.PROFILE_PATH is only the dev fallback).
+  // getProfile never throws, but a Workday fill writes the profile's
+  // name/email/phone into a REAL draft application — filling blanks would be
+  // worse than failing, so an unconfigured profile fails the approve with an
+  // actionable message (caught below into lastError, like a missing session).
+  const profile = await getProfile(deps.db, deps.config.PROFILE_PATH);
+  if (isEmptyProfile(profile)) {
+    throw new Error(
+      'no profile configured — set one up in Answers → Profile before approving a Workday fill (the applicant name/email/phone come from the profile)',
+    );
+  }
 
   // The reviewed answers, keyed by question id. Workday questionnaire fields
   // never map to multiselect, so values are strings; arrays (if any) are

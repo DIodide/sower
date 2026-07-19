@@ -40,6 +40,7 @@ import {
   processTask,
   recordJobDescription,
 } from './process.js';
+import { registerProfileRoutes } from './profile-routes.js';
 import {
   midpointRank,
   RANK_GAP,
@@ -1350,12 +1351,19 @@ export function buildServer(deps: Deps): FastifyInstance {
         // Listing expansion: the browser agent rendered a jobs LISTING page
         // (the databricks JS-rendered SPA case — raw-HTML directory expansion
         // saw no anchors at ingest) and extracted its individual job links.
-        // Classify + ingest EACH at CHILD depth (no investigation fan-out, no
-        // nested directory expansion) so the jobs land in the queue instead
-        // of being dropped. Custom-domain greenhouse children (gh_jid) flow
-        // through ingestJob's verified tenant probe to full parses. The
-        // original task stays parked; its timeline records ONE
-        // LISTING_EXPANDED event with the funnel counts.
+        // Classify + ingest EACH at TOP depth (0) — exactly as if the user
+        // had pasted the links themselves: greenhouse sniff/probe, directory
+        // expansion, and Tier-2 form discovery for unsupported children all
+        // apply, so the children are first-class tasks. Dedupe + the 50-link
+        // cap keep it bounded: a child later identified as a listing recurses
+        // through this same flow, while a link back to an already-known page
+        // (including the listing itself) dedupes inside classifyAndIngest —
+        // a duplicate never parks a fresh task, so it can never re-fire an
+        // investigation, and the loop damps out. The listing itself is NOT a
+        // task: after expansion its task is auto-discarded below (the jobs
+        // row stays untouched — that IS the dedupe entry), with the
+        // LISTING_EXPANDED event written FIRST so the timeline reads
+        // expansion → discard.
         if (
           !result.formFound &&
           result.listingLinks &&
@@ -1366,26 +1374,49 @@ export function buildServer(deps: Deps): FastifyInstance {
               deps,
               result.listingLinks,
               'listing-expansion',
-              1,
+              0,
             );
-            listing = {
+            const counts = {
               count: outcomes.length,
               ingested: 0,
               duplicates: 0,
               unsupported: 0,
               errors: 0,
             };
+            // Recursive: a depth-0 child may itself expand as a directory —
+            // its grandchildren belong in the funnel too (mirrors summarize).
+            const tally = (outcome: UrlOutcome): void => {
+              if (outcome.kind === 'ingested') counts.ingested += 1;
+              else if (outcome.kind === 'duplicate') counts.duplicates += 1;
+              else if (outcome.kind === 'unsupported') counts.unsupported += 1;
+              else if (outcome.kind === 'error') counts.errors += 1;
+              else if (outcome.kind === 'directory') {
+                for (const child of outcome.children) tally(child);
+              }
+            };
             for (const outcome of outcomes) {
-              if (outcome.kind === 'ingested') listing.ingested += 1;
-              else if (outcome.kind === 'duplicate') listing.duplicates += 1;
-              else if (outcome.kind === 'unsupported') listing.unsupported += 1;
-              else if (outcome.kind === 'error') listing.errors += 1;
+              tally(outcome);
             }
+            listing = counts;
             await deps.db.insert(events).values({
               taskId,
               type: 'LISTING_EXPANDED',
               data: listing,
             });
+            // "Listings are not tasks": with its jobs now in the queue, the
+            // listing's own task leaves it — auto-discarded (regardless of
+            // child outcomes) into the Archive, where Restore stays available
+            // if this was a misclassification. canTransition guards the race
+            // where the task already moved on (skip silently); the discarded
+            // rendering everywhere reuses the event's note below.
+            const added = counts.ingested + counts.unsupported;
+            const note = `listing (${added} job${added === 1 ? '' : 's'} added)`;
+            if (canTransition(row.task.state, 'DISCARD')) {
+              await transitionTask(deps.db, taskId, row.task.state, 'DISCARD', {
+                reason: 'auto',
+                note,
+              });
+            }
           } catch (error) {
             // An expansion hiccup must not force a Cloud Run Job retry:
             // record it on the run (per-link errors are already tolerated
@@ -1411,9 +1442,11 @@ export function buildServer(deps: Deps): FastifyInstance {
       }
 
       // Edit the #ingest reply that announced this task so it reflects the
-      // outcome (form discovered / no form found / listing expanded). Never
-      // throws — a Discord failure must not change the 200 the investigator
-      // Job relies on.
+      // outcome (form discovered / no form found / listing expanded — whose
+      // task is auto-discarded above, so its line flips to the discarded
+      // rendering with the "listing (N jobs added)" note). Never throws — a
+      // Discord failure must not change the 200 the investigator Job relies
+      // on.
       await refreshIngestReply(deps, taskId);
 
       return reply.code(200).send({
@@ -1811,6 +1844,8 @@ export function buildServer(deps: Deps): FastifyInstance {
   // /resumes (list/sync/edit/ask + run polling; x-api-key via the same
   // server-wide preHandler).
   registerResumeRoutes(app, deps);
+
+  registerProfileRoutes(app, deps);
 
   // POST /discord/interactions (signature-authenticated, raw-body parsed).
   registerDiscordRoutes(app, deps);

@@ -8,7 +8,7 @@ import type {
 // file) but benign: both modules only call across the cycle inside functions,
 // never during evaluation.
 import { type AnswerBank, resolveFromAnswerBank } from './answer-bank.js';
-import type { Profile } from './profile.js';
+import { isEmptyProfile, type Profile } from './profile.js';
 
 /**
  * Normalize a question label for matching: lowercase, strip punctuation,
@@ -552,6 +552,16 @@ export function resolveAnswers(
   const documents = opts?.documents ?? [];
   const answerBank = opts?.answerBank;
 
+  // TRUTHFULNESS: the empty-profile sentinel (no profile configured — see
+  // emptyProfile/getProfile) carries required booleans that default to false,
+  // which the profile stages would happily render as 'No' ("requires
+  // sponsorship?" answered for a user who never said so). So with an empty
+  // profile every profile-DERIVED stage (standard ids / label dictionary /
+  // yes-no regexes and the curated answer bank's profile strategies) is
+  // skipped entirely; only the user's saved bank answers and documents may
+  // resolve, and everything else goes to a human.
+  const profileConfigured = !isEmptyProfile(profile);
+
   for (const question of questions) {
     // File questions resolve ONLY from stored documents of the matching
     // kind (never from text stages); otherwise they go to a human.
@@ -583,14 +593,16 @@ export function resolveAnswers(
 
     const label = normalizeLabel(question.label);
     const answer =
-      finalize(
-        question,
-        computeProfileValue(question, label, profile),
-        'profile',
-      ) ??
-      (answerBank === undefined
-        ? null
-        : resolveFromAnswerBank(question, profile, answerBank)) ??
+      (profileConfigured
+        ? finalize(
+            question,
+            computeProfileValue(question, label, profile),
+            'profile',
+          )
+        : null) ??
+      (profileConfigured && answerBank !== undefined
+        ? resolveFromAnswerBank(question, profile, answerBank)
+        : null) ??
       finalize(question, selectBankValue(question, bank, company), 'bank') ??
       finalize(question, customByNormalizedLabel.get(label), 'profile');
 

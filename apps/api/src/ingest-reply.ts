@@ -1,6 +1,7 @@
 import type { JobSpec, Platform } from '@sower/core';
 import {
   applicationTasks,
+  events,
   type InvestigationRunKind,
   type InvestigationRunStatus,
   investigationRuns,
@@ -8,7 +9,7 @@ import {
   jobs,
 } from '@sower/db';
 import { getAdapter } from '@sower/platforms';
-import { asc, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import {
   formatEasternDate,
   renderReplyLines,
@@ -67,6 +68,9 @@ export function renderTaskLine(
   row: ReplyTaskRow,
   run: LatestRun | undefined,
   dashboardBaseUrl?: string,
+  /** The latest DISCARD event's "why" note (DISCARDED tasks only) — e.g. the
+   *  listing auto-discard's "listing (N jobs added)". */
+  discardNote?: string,
 ): string {
   const { task, job } = row;
   const spec = task.jobSpec;
@@ -84,10 +88,13 @@ export function renderTaskLine(
   );
   const date = job.createdAt ? ` · ${formatEasternDate(job.createdAt)}` : '';
 
-  // Discarded wins over everything: a human removed the task from the queue,
-  // so no lifecycle line (queued/investigating/…) applies anymore.
+  // Discarded wins over everything: the task left the queue (a human, or an
+  // auto rule like the listing expansion), so no lifecycle line
+  // (queued/investigating/…) applies anymore. The discard note carries the
+  // "why" — for an expanded listing it reads "listing (N jobs added)".
   if (task.state === 'DISCARDED') {
-    return `🗑️ ${ref} · discarded${date}`;
+    const note = discardNote ? ` — ${discardNote}` : '';
+    return `🗑️ ${ref} · discarded${note}${date}`;
   }
 
   // Sent wins next: whether the pipeline submitted it or a human marked it
@@ -199,12 +206,46 @@ export async function refreshIngestReply(
       }
     }
 
+    // Latest DISCARD note per DISCARDED task (skipped entirely when no row is
+    // discarded): the "why" the discarded line carries — e.g. the listing
+    // auto-discard's "listing (N jobs added)". Newest-first; the latest
+    // DISCARD decides even when it has no note (older notes never resurface).
+    const discardedIds = rows
+      .filter((row) => row.task.state === 'DISCARDED')
+      .map((row) => row.task.id);
+    const discardNotes = new Map<string, string>();
+    if (discardedIds.length > 0) {
+      const discardRows = await db
+        .select({ taskId: events.taskId, data: events.data })
+        .from(events)
+        .where(
+          and(eq(events.type, 'DISCARD'), inArray(events.taskId, discardedIds)),
+        )
+        .orderBy(desc(events.createdAt));
+      const seen = new Set<string>();
+      for (const event of discardRows) {
+        if (seen.has(event.taskId)) continue;
+        seen.add(event.taskId);
+        const data =
+          event.data &&
+          typeof event.data === 'object' &&
+          !Array.isArray(event.data)
+            ? (event.data as Record<string, unknown>)
+            : undefined;
+        const note = data?.note;
+        if (typeof note === 'string' && note !== '') {
+          discardNotes.set(event.taskId, note);
+        }
+      }
+    }
+
     const text = renderReplyLines(
       rows.map((row) =>
         renderTaskLine(
           row,
           latestRuns.get(row.task.id),
           config.DASHBOARD_BASE_URL,
+          discardNotes.get(row.task.id),
         ),
       ),
     );

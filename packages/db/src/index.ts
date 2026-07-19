@@ -75,3 +75,7 @@ export type Resume = typeof schema.resumes.$inferSelect;
 export type NewResume = typeof schema.resumes.$inferInsert;
 export type ResumeRun = typeof schema.resumeRuns.$inferSelect;
 export type NewResumeRun = typeof schema.resumeRuns.$inferInsert;
+// Named *Row to avoid colliding with @sower/answers' Profile (the validated
+// document type); this is the DB row that carries one as its jsonb `data`.
+export type ProfileRow = typeof schema.profiles.$inferSelect;
+export type NewProfileRow = typeof schema.profiles.$inferInsert;

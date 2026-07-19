@@ -40,8 +40,15 @@ vi.mock('@sower/accounts', () => ({
   },
 }));
 
+const profileState = vi.hoisted(() => ({
+  profile: { email: 'ada@example.com' } as { email: string },
+}));
+
 vi.mock('@sower/answers', () => ({
-  loadProfile: async () => ({ email: 'ada@example.com' }),
+  getProfile: async () => profileState.profile,
+  // The real isEmptyProfile also checks name/phone; the fake keys off the
+  // email — the one field startSessionCapture actually needs.
+  isEmptyProfile: (profile: { email?: string }) => (profile.email ?? '') === '',
 }));
 
 const savedSessions = vi.hoisted(() => ({ list: [] as unknown[] }));
@@ -117,6 +124,7 @@ beforeEach(() => {
   accountState.statusSet = [];
   savedSessions.list = [];
   requeueState.calls = [];
+  profileState.profile = { email: 'ada@example.com' };
 });
 
 describe('startSessionCapture', () => {
@@ -196,6 +204,17 @@ describe('startSessionCapture', () => {
       'nope',
     );
     expect(outcome).toEqual({ kind: 'not_found' });
+  });
+
+  it('fails with an actionable error (no account provisioned) when no profile is configured', async () => {
+    profileState.profile = { email: '' };
+    const { db, inserts } = makeDb({ taskJoin: workdayTaskJoin });
+    await expect(
+      startSessionCapture({ db, storage, config } as Deps, 'task-1'),
+    ).rejects.toThrowError(/no profile configured/);
+    // Never provision an account with a blank email or request a capture.
+    expect(accountState.ensured).toEqual([]);
+    expect(inserts).toEqual([]);
   });
 });
 

@@ -24,6 +24,8 @@ const repoCtx = {
   submoduleDir: '/w/portfolio/developer/resumes',
   branch: 'main',
   submoduleBranch: 'main',
+  // The real repo layout: developer/resumes is a plain tracked directory.
+  isSubmodule: false,
 };
 
 vi.mock('@sower/db', () => {

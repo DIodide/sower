@@ -29,6 +29,13 @@ const envSchema = z
     GCP_REGION: z.string().optional(),
     TASKS_QUEUE: z.string().default('apply-queue'),
     TASKS_TARGET_BASE_URL: z.string().optional(),
+    /**
+     * DEV FALLBACK only: the profile now lives in the DB (profiles row,
+     * edited via the dashboard's Answers → Profile) and getProfile reads
+     * DB-first. This YAML path is consulted only when NO row exists (handy
+     * locally with the gitignored config/profile.yaml); a missing/broken
+     * file yields the empty profile instead of an error.
+     */
     PROFILE_PATH: z.string().default(DEFAULT_PROFILE_PATH),
     /**
      * Curated answer bank (alias dedup + range strategies). Defaults to the

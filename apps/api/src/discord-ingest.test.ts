@@ -655,6 +655,44 @@ describe('classifyMany', () => {
     expect(vi.mocked(fetchPageHtml)).not.toHaveBeenCalled();
   });
 
+  it('at depth 0 (listing expansion) gives children the FULL first-class treatment: page fetch, directory expansion, investigation fan-out', async () => {
+    const { fetchPageHtml } = await import('./link-extract.js');
+    vi.mocked(fetchPageHtml).mockClear();
+    triggerState.fires = true;
+    platformState.byUrl['https://gh/3'] = {
+      platform: 'greenhouse',
+      tenant: 'a',
+      externalId: '3',
+    };
+    dirState.byUrl['https://dir/inner'] = ['https://gh/3'];
+
+    const outcomes = await classifyMany(
+      {} as Deps,
+      ['https://dir/inner', 'https://weird/x'],
+      'listing-expansion',
+      0,
+    );
+
+    // Exactly what a directly-pasted message gets: the unknown page was
+    // fetched and expanded as a directory (its own children at child depth)…
+    expect(outcomes[0]).toMatchObject({ kind: 'directory' });
+    const children = (outcomes[0] as { children: UrlOutcome[] }).children;
+    expect(children).toHaveLength(1);
+    expect(children[0]).toMatchObject({ kind: 'ingested' });
+    // …and the unsupported child parked AND fired Tier-2 form discovery.
+    expect(outcomes[1]).toMatchObject({
+      kind: 'unsupported',
+      taskId: 'task-1',
+      investigating: true,
+    });
+    expect(triggerState.calls).toEqual(['task-1']);
+    expect(vi.mocked(fetchPageHtml)).toHaveBeenCalled();
+    expect(ingestState.sources).toEqual([
+      'listing-expansion',
+      'listing-expansion',
+    ]);
+  });
+
   it('caps the batch at 50 links', async () => {
     const urls = Array.from({ length: 60 }, (_, i) => `https://weird/job-${i}`);
     const outcomes = await classifyMany({} as Deps, urls, 'listing-expansion');

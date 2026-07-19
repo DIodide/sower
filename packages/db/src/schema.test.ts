@@ -11,6 +11,7 @@ import {
   investigationRuns,
   jobDescriptions,
   jobs,
+  profiles,
   resumeRuns,
   resumes,
 } from './schema.js';
@@ -372,6 +373,29 @@ describe('schema', () => {
     expect(config.indexes.map((idx) => idx.config.name ?? null)).toContain(
       'resume_runs_resume_id_idx',
     );
+  });
+
+  it('defines the profiles table', () => {
+    expect(getTableName(profiles)).toBe('profiles');
+    expect(sqlColumnNames(profiles)).toEqual(['data', 'id', 'updated_at']);
+    // The whole profile is one jsonb document — NOT NULL: a row without a
+    // profile is meaningless (absence is modeled as NO row, and readers fall
+    // back to the empty profile in code).
+    expect(profiles.data.notNull).toBe(true);
+    expect(profiles.data.columnType).toBe('PgJsonb');
+    // updated_at drives "newest row wins" reads; NOT NULL with a now()
+    // default so every write is orderable.
+    expect(profiles.updatedAt.notNull).toBe(true);
+    expect(profiles.updatedAt.columnType).toBe('PgTimestamp');
+  });
+
+  it('keeps profiles single-row by convention, not constraint', () => {
+    // SINGLE-PROFILE-PER-DEPLOYMENT is enforced in code (PUT /profile
+    // upserts the first row): no unique index or FK exists to fight future
+    // multi-profile support.
+    const config = getTableConfig(profiles);
+    expect(config.indexes).toHaveLength(0);
+    expect(config.foreignKeys).toHaveLength(0);
   });
 
   it('references application_tasks + jobs and indexes task_id on investigation_runs', () => {

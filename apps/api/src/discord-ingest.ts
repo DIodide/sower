@@ -235,10 +235,15 @@ async function classifyAndIngest(
         originalCreatedAt: result.originalCreatedAt,
       };
     }
-    // Tier 2: fire form discovery for a directly-sent unsupported link ONLY
-    // (depth 0). Directory children never trigger — a 50-link directory must
-    // not spawn 50 browser Jobs. triggerInvestigation self-gates on the
-    // enabled flag and never throws, so the parked task is never at risk.
+    // Tier 2: fire form discovery for depth-0 unsupported links ONLY — a
+    // directly-sent link or a listing-expansion child (first-class, exactly
+    // as if the user had pasted it). Directory children (depth 1) never
+    // trigger — a 50-link directory must not spawn 50 browser Jobs. Note the
+    // duplicate return above happens BEFORE this block: an already-known URL
+    // (e.g. a listing linking back to itself) can never re-fire an
+    // investigation, which is what damps expansion loops. triggerInvestigation
+    // self-gates on the enabled flag and never throws, so the parked task is
+    // never at risk.
     let investigating = false;
     if (depth === 0) {
       investigating = await triggerInvestigation(deps, result.taskId);
@@ -261,12 +266,15 @@ async function classifyAndIngest(
 
 /**
  * Classify + ingest a batch of URLs at a fixed depth, capped at
- * MAX_DIRECTORY_LINKS. Extracted from the directory-expansion loop; also the
- * LISTING-EXPANSION entry point — the investigation-result endpoint feeds the
- * job links the browser agent extracted from a rendered listings page through
- * here at CHILD depth (the default, 1). Depth 1 means: no page fetch, no
- * nested directory expansion, and no per-link investigation fan-out — a
- * 50-link listing must never spawn 50 browser Jobs.
+ * MAX_DIRECTORY_LINKS. Extracted from the directory-expansion loop (which
+ * enters at CHILD depth — the default, 1: no page fetch, no nested
+ * expansion, no per-link investigation fan-out). Also the LISTING-EXPANSION
+ * entry point: the investigation-result endpoint feeds the job links the
+ * browser agent extracted from a rendered listings page through here at TOP
+ * depth (0), so each child gets the full first-class treatment — sniff/probe,
+ * directory logic, and Tier-2 form discovery for unsupported children —
+ * exactly as if the user had pasted the links themselves. Dedupe (the early
+ * duplicate return in classifyAndIngest) plus this cap keep that bounded.
  */
 export async function classifyMany(
   deps: Deps,

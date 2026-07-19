@@ -877,6 +877,38 @@ describe('POST /tasks/:id/approve (workday calypso fill)', () => {
     expect(res.json().error).toMatch(/needs vault storage/);
     expect(state.task?.state).toBe('FAILED');
   });
+
+  it('fails with an actionable error (never fills blanks) when no profile is configured', async () => {
+    // Silence getProfile's fallback warning — the unconfigured path logs.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const state = workdayState();
+      const { calls } = mockCalypsoFetch();
+      // No profiles row in the fake db AND a missing fallback file: the real
+      // getProfile yields the empty profile, and the fill must refuse to
+      // write blank name/email/phone into a real Workday draft.
+      const { deps } = createDeps(state, {
+        config: { ...config, PROFILE_PATH: '/nonexistent/profile.yaml' },
+        storage: sessionVault(SESSION),
+      });
+      const app = buildServer(deps);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/tasks/${TASK_ID}/approve`,
+        headers: { 'x-api-key': 'test-key' },
+      });
+
+      expect(res.statusCode).toBe(500);
+      expect(res.json().error).toMatch(/no profile configured/);
+      expect(state.task?.state).toBe('FAILED');
+      expect(state.task?.lastError).toMatch(/Answers → Profile/);
+      // No calypso HTTP happened — nothing was filled with blanks.
+      expect(calls.some((c) => c.url.includes(WORKDAY_HOST))).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe('GET /tasks/:id', () => {

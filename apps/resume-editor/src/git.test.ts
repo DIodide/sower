@@ -42,6 +42,7 @@ import { afterAll } from 'vitest';
 import {
   bumpSubmodulePointer,
   defaultBranch,
+  detectResumesLayout,
   type RepoContext,
   remoteBranchSha,
   setupPortfolioRepo,
@@ -64,10 +65,22 @@ function argsOfCall(i: number): string[] {
   return execState.calls[i]?.args ?? [];
 }
 
+/** ls-files -s output for a gitlink at developer/resumes (a real submodule). */
+const GITLINK_LS_FILES =
+  '160000 5c8f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b 0\tdeveloper/resumes';
+
+/** ls-files -s output for the REAL repo layout: a plain tracked directory. */
+const PLAIN_DIR_LS_FILES = [
+  '100644 aaaa1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b 0\tdeveloper/resumes/Ibraheem_Amin_Resume.pdf',
+  '100644 bbbb1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b 0\tdeveloper/resumes/Ibraheem_Amin_Resume.tex',
+  '100644 cccc1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b 0\tdeveloper/resumes/README.md',
+].join('\n');
+
 describe('setupPortfolioRepo', () => {
   beforeEach(() => {
     execState.respond = (args) => {
       if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'main';
+      if (args[0] === 'ls-files') return GITLINK_LS_FILES;
       if (args[0] === 'ls-remote' && args[1] === '--symref') {
         return 'ref: refs/heads/master\tHEAD\nabc123\tHEAD';
       }
@@ -111,6 +124,16 @@ describe('setupPortfolioRepo', () => {
       path.join(workdir, 'portfolio'),
     ]);
 
+    // Layout detection runs against the parent checkout.
+    const lsFiles = execState.calls.find((c) => c.args[0] === 'ls-files');
+    expect(lsFiles?.args).toEqual([
+      'ls-files',
+      '-s',
+      '--',
+      'developer/resumes',
+    ]);
+    expect(lsFiles?.cwd).toBe(path.join(workdir, 'portfolio'));
+
     // The private submodule is initialized (insteadOf authenticates it too).
     const submodule = execState.calls.find((c) => c.args[0] === 'submodule');
     expect(submodule?.args).toEqual([
@@ -126,6 +149,7 @@ describe('setupPortfolioRepo', () => {
       path.join(workdir, 'portfolio', 'developer', 'resumes'),
     );
     expect(ctx.branch).toBe('main');
+    expect(ctx.isSubmodule).toBe(true);
     // Parsed from ls-remote --symref, then checked out at origin's tip.
     expect(ctx.submoduleBranch).toBe('master');
     const checkout = execState.calls.find((c) => c.args[0] === 'checkout');
@@ -135,6 +159,55 @@ describe('setupPortfolioRepo', () => {
       'master',
       'origin/master',
     ]);
+  });
+
+  it('plain tracked directory (the real repo layout): SKIPS submodule init entirely', async () => {
+    execState.respond = (args) => {
+      if (args[0] === 'rev-parse' && args[1] === '--abbrev-ref') return 'main';
+      if (args[0] === 'ls-files') return PLAIN_DIR_LS_FILES;
+      return '';
+    };
+
+    const ctx = await setupPortfolioRepo(workdir, TOKEN);
+
+    expect(ctx.isSubmodule).toBe(false);
+    // The clone already materialized the directory; the path is unchanged.
+    expect(ctx.submoduleDir).toBe(
+      path.join(workdir, 'portfolio', 'developer', 'resumes'),
+    );
+    // Resume pushes target the PARENT branch — there is no submodule branch.
+    expect(ctx.branch).toBe('main');
+    expect(ctx.submoduleBranch).toBe('main');
+    // No submodule init, no submodule checkout, no submodule branch probing.
+    expect(execState.calls.some((c) => c.args[0] === 'submodule')).toBe(false);
+    expect(execState.calls.some((c) => c.args[0] === 'checkout')).toBe(false);
+    expect(execState.calls.some((c) => c.args[0] === 'ls-remote')).toBe(false);
+    expect(execState.calls.some((c) => c.args[0] === 'fetch')).toBe(false);
+  });
+});
+
+describe('detectResumesLayout', () => {
+  const auth = { gitHome: '/h', token: TOKEN };
+
+  it('mode 160000 gitlink → submodule', async () => {
+    execState.respond = () => GITLINK_LS_FILES;
+    await expect(detectResumesLayout(auth, '/repo')).resolves.toEqual({
+      isSubmodule: true,
+    });
+  });
+
+  it('blob entries under the path (plain tracked directory) → not a submodule', async () => {
+    execState.respond = () => PLAIN_DIR_LS_FILES;
+    await expect(detectResumesLayout(auth, '/repo')).resolves.toEqual({
+      isSubmodule: false,
+    });
+  });
+
+  it('throws when developer/resumes is not tracked at all', async () => {
+    execState.respond = () => '';
+    await expect(detectResumesLayout(auth, '/repo')).rejects.toThrow(
+      /not tracked/,
+    );
   });
 });
 
@@ -168,6 +241,7 @@ describe('bumpSubmodulePointer', () => {
     submoduleDir: '/repo/developer/resumes',
     branch: 'main',
     submoduleBranch: 'main',
+    isSubmodule: true,
   };
 
   it('stages ONLY the submodule path, commits, and pushes when remote is behind', async () => {

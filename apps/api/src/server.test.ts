@@ -77,6 +77,17 @@ vi.mock('./investigate-trigger.js', () => ({
   }),
 }));
 
+// Depth-0 listing-expansion children reach classifyAndIngest's page fetch.
+// The listings in these tests are JS-rendered SPAs whose raw HTML yields
+// nothing (the very reason the browser agent extracted the links), so the
+// fetch serves null and unknown children fall through to record+park. The
+// real fetch/sniff/directory behavior is proven in discord-ingest.test.ts;
+// every pure helper here stays real.
+vi.mock('./link-extract.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./link-extract.js')>()),
+  fetchPageHtml: vi.fn(async () => null),
+}));
+
 vi.mock('@sower/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@sower/core')>()),
   canonicalizeUrl: (url: string) => url.toLowerCase().replace(/\/+$/, ''),
@@ -119,7 +130,8 @@ vi.mock('@sower/platforms', () => ({
 }));
 
 vi.mock('@sower/answers', () => ({
-  loadProfile: async () => ({}),
+  getProfile: async () => ({}),
+  isEmptyProfile: () => false,
   resolveAnswers: () => ({ resolved: [], missing: [] }),
 }));
 
@@ -1012,8 +1024,9 @@ describe('buildServer', () => {
         deadline: null,
       };
       // The task half of the endpoint's task+job join (jobSpec is what the
-      // not_found employmentType merge reads).
-      const taskRow = { id: TASK_ID, jobSpec: null };
+      // not_found employmentType merge reads; state feeds the listing
+      // auto-discard's canTransition guard).
+      const taskRow = { id: TASK_ID, state: 'NEEDS_INPUT', jobSpec: null };
       const joinRow = { task: taskRow, job: jobRow };
       const discoveredForm = {
         formFound: true,
@@ -1678,7 +1691,7 @@ describe('buildServer', () => {
       });
 
       describe('listing expansion (not_found + listingLinks)', () => {
-        it('classifies + ingests each link at child depth, records ONE LISTING_EXPANDED event, and reports counts', async () => {
+        it('expands each link FIRST-CLASS (depth 0) and auto-discards the listing task, LISTING_EXPANDED before DISCARD', async () => {
           // A supported child and an unknown one — the databricks shape:
           // custom-domain greenhouse links plus the odd unclassifiable link.
           platformState.byUrl['https://gh/child1'] = {
@@ -1710,6 +1723,7 @@ describe('buildServer', () => {
               [], // child2 PARSE_OK event
               [], // child2 PARK event
               [], // LISTING_EXPANDED event
+              [], // DISCARD event (the auto-discarded listing task)
             ],
             writes,
           });
@@ -1750,15 +1764,18 @@ describe('buildServer', () => {
           expect(enqueueProcess).toHaveBeenCalledTimes(1);
           expect(enqueueProcess).toHaveBeenCalledWith('task-c1');
 
-          // Depth-1 no-fanout: children NEVER trigger the investigator Job
-          // (a 50-link listing must not spawn 50 browser Jobs).
-          expect(investigateState.calls).toEqual([]);
+          // Depth 0 = first-class: the unsupported child DOES fire Tier-2
+          // form discovery, exactly as if its link had been pasted directly
+          // (dedupe + the 50-link cap keep the fan-out bounded).
+          expect(investigateState.calls).toEqual(['task-c2']);
 
           // ONE LISTING_EXPANDED event on the ORIGINAL task, with the funnel.
-          const listingEvents = writes
+          const eventInserts = writes
             .filter((w) => w.method === 'insert' && w.table === events)
-            .map((w) => w.arg as Record<string, unknown>)
-            .filter((arg) => arg.type === 'LISTING_EXPANDED');
+            .map((w) => w.arg as Record<string, unknown>);
+          const listingEvents = eventInserts.filter(
+            (arg) => arg.type === 'LISTING_EXPANDED',
+          );
           expect(listingEvents).toHaveLength(1);
           expect(listingEvents[0]).toEqual({
             taskId: TASK_ID,
@@ -1772,7 +1789,41 @@ describe('buildServer', () => {
             },
           });
 
-          // The run stays an honest not_found and the reply refreshes.
+          // The listing is not a task: the ORIGINAL task is auto-discarded
+          // with the note (N = ingested + unsupported children)...
+          const discardEvent = eventInserts.find(
+            (arg) => arg.type === 'DISCARD',
+          );
+          expect(discardEvent).toMatchObject({
+            taskId: TASK_ID,
+            fromState: 'NEEDS_INPUT',
+            toState: 'DISCARDED',
+            data: { reason: 'auto', note: 'listing (2 jobs added)' },
+          });
+          expect(
+            writes.some(
+              (w) =>
+                w.method === 'update' &&
+                w.table === applicationTasks &&
+                (w.arg as Record<string, unknown>).state === 'DISCARDED',
+            ),
+          ).toBe(true);
+          // ...AFTER the expansion audit: the timeline reads expansion →
+          // discard, never the reverse.
+          const types = eventInserts.map((arg) => arg.type);
+          expect(types.indexOf('LISTING_EXPANDED')).toBeGreaterThanOrEqual(0);
+          expect(types.indexOf('LISTING_EXPANDED')).toBeLessThan(
+            types.indexOf('DISCARD'),
+          );
+
+          // The listing's own jobs row is untouched — it stays as the dedupe
+          // entry ("listings are not tasks, but they dedupe").
+          expect(
+            writes.some((w) => w.method === 'update' && w.table === jobs),
+          ).toBe(false);
+
+          // The run stays an honest not_found and the reply refreshes (the
+          // line flips to the auto-discarded rendering).
           const runUpdate = writes.find(
             (w) => w.method === 'update' && w.table === investigationRuns,
           );
@@ -1836,16 +1887,191 @@ describe('buildServer', () => {
           expect(
             writes.some((w) => w.method === 'insert' && w.table === jobs),
           ).toBe(false);
-          const listingEvent = writes
+          const eventInserts = writes
             .filter((w) => w.method === 'insert' && w.table === events)
-            .map((w) => w.arg as Record<string, unknown>)
-            .find((arg) => arg.type === 'LISTING_EXPANDED');
+            .map((w) => w.arg as Record<string, unknown>);
+          const listingEvent = eventInserts.find(
+            (arg) => arg.type === 'LISTING_EXPANDED',
+          );
           expect(listingEvent?.data).toEqual({
             count: 1,
             ingested: 0,
             duplicates: 1,
             unsupported: 0,
             errors: 0,
+          });
+          // The expansion happened, so the listing task is auto-discarded
+          // REGARDLESS of child outcomes — duplicates added 0 new jobs and
+          // the note says so.
+          const discardEvent = eventInserts.find(
+            (arg) => arg.type === 'DISCARD',
+          );
+          expect(discardEvent).toMatchObject({
+            taskId: TASK_ID,
+            toState: 'DISCARDED',
+            data: { reason: 'auto', note: 'listing (0 jobs added)' },
+          });
+        });
+
+        it('a child equal to the listing URL dedupes: duplicate, no recursion (self-link loop damping)', async () => {
+          // The listing links back to itself. classifyAndIngest's duplicate
+          // return fires BEFORE the depth-0 investigation trigger, so the
+          // self-link can never park a fresh task nor re-fire a browser Job —
+          // a listing linking back to itself is a duplicate, never a
+          // re-expansion.
+          platformState.byUrl['https://weirdats.example/jobs/1'] = {
+            platform: 'unknown',
+            tenant: null,
+            externalId: null,
+          };
+          const writes: DbWrite[] = [];
+          const db = createFakeDb({
+            selectResults: [
+              [{ id: 'run-1' }], // latest run
+              [joinRow], // task+job join
+              // self-link ingest dup check: it IS the listing's own job row
+              [
+                {
+                  id: 'job-u',
+                  source: 'discord',
+                  createdAt: new Date('2026-07-01T00:00:00Z'),
+                },
+              ],
+              [{ id: TASK_ID }], // the existing job's earliest task: itself
+            ],
+            insertResults: [[]], // FORM_NOT_FOUND event
+            writes,
+          });
+          const { deps, enqueueProcess } = createDeps(db);
+          const app = buildServer(deps);
+
+          const res = await inject(app, {
+            kind: 'form',
+            result: {
+              ...formNotFound,
+              pageKind: 'listing',
+              listingLinks: ['https://weirdats.example/jobs/1'],
+            },
+            transcript: formTranscript,
+          });
+
+          expect(res.statusCode).toBe(200);
+          expect(res.json()).toEqual({
+            ok: true,
+            listing: {
+              count: 1,
+              ingested: 0,
+              duplicates: 1,
+              unsupported: 0,
+              errors: 0,
+            },
+          });
+          // No fresh job/task, no enqueue, and — crucially — no re-fired
+          // investigation: the loop damps out at the dedupe.
+          expect(
+            writes.some((w) => w.method === 'insert' && w.table === jobs),
+          ).toBe(false);
+          expect(
+            writes.some(
+              (w) => w.method === 'insert' && w.table === applicationTasks,
+            ),
+          ).toBe(false);
+          expect(enqueueProcess).not.toHaveBeenCalled();
+          expect(investigateState.calls).toEqual([]);
+
+          // The listing task still expands + auto-discards (0 jobs added),
+          // audit event first.
+          const eventInserts = writes
+            .filter((w) => w.method === 'insert' && w.table === events)
+            .map((w) => w.arg as Record<string, unknown>);
+          const types = eventInserts.map((arg) => arg.type);
+          expect(types.indexOf('LISTING_EXPANDED')).toBeGreaterThanOrEqual(0);
+          expect(types.indexOf('LISTING_EXPANDED')).toBeLessThan(
+            types.indexOf('DISCARD'),
+          );
+          expect(
+            eventInserts.find((arg) => arg.type === 'DISCARD'),
+          ).toMatchObject({
+            data: { reason: 'auto', note: 'listing (0 jobs added)' },
+          });
+        });
+
+        it('skips the auto-discard silently when the task already left NEEDS_INPUT', async () => {
+          platformState.byUrl['https://gh/child1'] = {
+            platform: 'greenhouse',
+            tenant: 'acme',
+            externalId: '77',
+          };
+          const writes: DbWrite[] = [];
+          const db = createFakeDb({
+            selectResults: [
+              [{ id: 'run-1' }], // latest run
+              // The user marked it applied while the agent ran: DISCARD is
+              // not a legal transition from SUBMITTED.
+              [{ task: { ...taskRow, state: 'SUBMITTED' }, job: jobRow }],
+              [], // child1 ingest dup check: fresh
+            ],
+            insertResults: [
+              [], // FORM_NOT_FOUND event
+              [{ id: 'job-c1' }], // child1 job
+              [{ id: 'task-c1' }], // child1 task
+              [], // child1 PARSE_OK event
+              [], // child1 ENQUEUE event
+              [], // LISTING_EXPANDED event
+            ],
+            writes,
+          });
+          const { deps, enqueueProcess } = createDeps(db);
+          const app = buildServer(deps);
+
+          const res = await inject(app, {
+            kind: 'form',
+            result: {
+              ...formNotFound,
+              pageKind: 'listing',
+              listingLinks: ['https://gh/child1'],
+            },
+            transcript: formTranscript,
+          });
+
+          // No crash, the children still landed, the audit event is written —
+          // only the discard is skipped.
+          expect(res.statusCode).toBe(200);
+          expect(res.json()).toEqual({
+            ok: true,
+            listing: {
+              count: 1,
+              ingested: 1,
+              duplicates: 0,
+              unsupported: 0,
+              errors: 0,
+            },
+          });
+          expect(enqueueProcess).toHaveBeenCalledWith('task-c1');
+          const eventInserts = writes
+            .filter((w) => w.method === 'insert' && w.table === events)
+            .map((w) => w.arg as Record<string, unknown>);
+          expect(
+            eventInserts.some((arg) => arg.type === 'LISTING_EXPANDED'),
+          ).toBe(true);
+          expect(eventInserts.some((arg) => arg.type === 'DISCARD')).toBe(
+            false,
+          );
+          expect(
+            writes.some(
+              (w) =>
+                w.method === 'update' &&
+                w.table === applicationTasks &&
+                (w.arg as Record<string, unknown>).state === 'DISCARDED',
+            ),
+          ).toBe(false);
+          // The run stays an honest not_found (the skip is not an error).
+          const runUpdate = writes.find(
+            (w) => w.method === 'update' && w.table === investigationRuns,
+          );
+          expect(runUpdate?.arg).toMatchObject({
+            status: 'not_found',
+            error: null,
           });
         });
 
@@ -1874,12 +2100,17 @@ describe('buildServer', () => {
           expect(
             writes.some((w) => w.method === 'insert' && w.table === jobs),
           ).toBe(false);
+          const eventInserts = writes
+            .filter((w) => w.method === 'insert' && w.table === events)
+            .map((w) => w.arg as Record<string, unknown>);
           expect(
-            writes
-              .filter((w) => w.method === 'insert' && w.table === events)
-              .map((w) => w.arg as Record<string, unknown>)
-              .some((arg) => arg.type === 'LISTING_EXPANDED'),
+            eventInserts.some((arg) => arg.type === 'LISTING_EXPANDED'),
           ).toBe(false);
+          // A discovered form means this IS an application page — the task
+          // stays parked for verification, never auto-discarded.
+          expect(eventInserts.some((arg) => arg.type === 'DISCARD')).toBe(
+            false,
+          );
         });
 
         it('rejects more than 50 listingLinks and over-long urls (400)', async () => {

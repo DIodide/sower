@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { type Database, profiles } from '@sower/db';
 import YAML from 'yaml';
 import { z } from 'zod';
 
@@ -136,4 +137,101 @@ export function loadProfile(path: string): Profile {
     throw new Error(`Profile file at "${path}" is invalid: ${issues}`);
   }
   return result.data;
+}
+
+/**
+ * A well-typed Profile whose every field is empty/default (the arrays and
+ * maps empty, the strings '', the required authorization booleans false, the
+ * optional sections absent — mirroring ProfileSchema's shape and defaults).
+ * It deliberately does NOT pass ProfileSchema validation (the identity
+ * fields are min-1), which is exactly what makes it a safe sentinel: no
+ * stored profile can ever look empty (see isEmptyProfile). Resolution over
+ * it never throws — questions simply fall through to the bank/documents or
+ * a human.
+ */
+export function emptyProfile(): Profile {
+  return {
+    name: { first: '', last: '' },
+    email: '',
+    phone: '',
+    location: { city: '', state: '', country: '' },
+    links: {},
+    education: [],
+    work: [],
+    authorization: { usWorkAuthorized: false, requiresSponsorship: false },
+    custom: {},
+  };
+}
+
+/**
+ * True when `profile` is the empty sentinel from emptyProfile() (i.e. no
+ * profile is configured). Checked on the identity fields, all of which
+ * ProfileSchema requires to be non-empty — so a profile that ever passed
+ * validation (DB row or YAML file) can never read as empty.
+ */
+export function isEmptyProfile(profile: Profile): boolean {
+  return (
+    profile.name.first === '' &&
+    profile.name.last === '' &&
+    profile.email === '' &&
+    profile.phone === ''
+  );
+}
+
+/**
+ * Load the user's profile, DB-first and NEVER throwing:
+ *
+ *  1. The newest `profiles` row (by updated_at) wins. Its jsonb `data` is
+ *     validated with ProfileSchema; an invalid row logs a warning and yields
+ *     emptyProfile() — never an exception, and never a silent fall-through
+ *     to a stale file (the DB row is the source of truth once one exists).
+ *  2. No row + `fallbackPath`: the YAML file loader runs WRAPPED — a
+ *     missing/broken/invalid file logs a warning and yields emptyProfile()
+ *     instead of throwing (prod never had the gitignored file; the old
+ *     throw burned task attempts with ENOENT).
+ *  3. No row + no fallbackPath: emptyProfile().
+ *
+ * A DB read failure is treated like "no row" (logged), so a transient DB
+ * hiccup degrades to the file fallback rather than an exception. Callers
+ * can detect the unconfigured case with isEmptyProfile() and surface it
+ * (e.g. the resolution note pointing at Answers → Profile).
+ */
+export async function getProfile(
+  db: Database,
+  fallbackPath?: string,
+): Promise<Profile> {
+  let rows: Array<{ data: unknown; updatedAt: Date }> = [];
+  try {
+    // One row is expected (single-profile-per-deployment); ordering is done
+    // here in JS so this package needs no drizzle-orm operator imports.
+    rows = await db.select().from(profiles);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[sower] profile DB read failed: ${message}`);
+  }
+  const row = [...rows].sort(
+    (a, b) => b.updatedAt.getTime() - a.updatedAt.getTime(),
+  )[0];
+
+  if (row !== undefined) {
+    const result = ProfileSchema.safeParse(row.data);
+    if (result.success) {
+      return result.data;
+    }
+    const issues = result.error.issues
+      .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
+      .join('; ');
+    console.warn(`[sower] stored profile row is invalid: ${issues}`);
+    return emptyProfile();
+  }
+
+  if (fallbackPath !== undefined) {
+    try {
+      return loadProfile(fallbackPath);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[sower] profile file fallback failed: ${message}`);
+    }
+  }
+  return emptyProfile();
 }

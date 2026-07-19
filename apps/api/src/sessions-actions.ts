@@ -1,5 +1,5 @@
 import { AccountManager } from '@sower/accounts';
-import { loadProfile } from '@sower/answers';
+import { getProfile, isEmptyProfile } from '@sower/answers';
 import type { JobSpec } from '@sower/core';
 import {
   agentHeartbeats,
@@ -71,8 +71,16 @@ export async function startSessionCapture(
 
   // The candidate account email must match the application email (Workday
   // rule), which is the profile email the fill uses. One account per tenant
-  // (distinct vaulted password), same email.
-  const profile = await loadProfile(config.PROFILE_PATH);
+  // (distinct vaulted password), same email. DB-first profile (the file is
+  // only the dev fallback); an unconfigured profile has NO email to register
+  // the account under, so it throws an actionable error rather than
+  // provisioning a broken account.
+  const profile = await getProfile(db, config.PROFILE_PATH);
+  if (isEmptyProfile(profile)) {
+    throw new Error(
+      'no profile configured — set one up in Answers → Profile before capturing a Workday session (the candidate account email comes from the profile)',
+    );
+  }
   await new AccountManager(db, storage).ensureAccount({
     platform: 'workday',
     tenant,

@@ -32,12 +32,24 @@ export interface GitAuth {
 export interface RepoContext extends GitAuth {
   /** Absolute path of the portfolio checkout. */
   root: string;
-  /** Absolute path of the developer/resumes submodule checkout. */
+  /**
+   * Absolute path of the developer/resumes checkout — a submodule worktree
+   * when isSubmodule, otherwise a plain directory of the parent repo.
+   */
   submoduleDir: string;
   /** Checked-out default branch of the parent repo. */
   branch: string;
-  /** Checked-out default branch of the submodule. */
+  /**
+   * Branch resume pushes target: the submodule's default branch when
+   * developer/resumes is a submodule, otherwise the parent branch.
+   */
   submoduleBranch: string;
+  /**
+   * Whether developer/resumes is tracked as a gitlink (a real submodule) or
+   * as a plain directory of the parent repo. Decides the commit/push shape:
+   * two repos + pointer bump vs a single parent-repo commit.
+   */
+  isSubmodule: boolean;
 }
 
 function gitEnv(auth: GitAuth): NodeJS.ProcessEnv {
@@ -118,7 +130,7 @@ export async function push(
   await git(auth, dir, ['push', 'origin', `HEAD:refs/heads/${branch}`]);
 }
 
-/** Files changed between two submodule commits (diff --name-only). */
+/** Files changed between two commits of the repo at `dir` (diff --name-only). */
 export async function changedFiles(
   auth: GitAuth,
   dir: string,
@@ -130,11 +142,38 @@ export async function changedFiles(
 }
 
 /**
+ * Detect how developer/resumes is tracked in the parent checkout:
+ * `git ls-files -s -- developer/resumes` lists a single mode-160000 entry
+ * for the path itself when it is a gitlink (a real submodule), or the blob
+ * entries of the files inside it when it is a plain tracked directory.
+ * Untracked entirely is an error — the job has nothing to operate on.
+ */
+export async function detectResumesLayout(
+  auth: GitAuth,
+  root: string,
+): Promise<{ isSubmodule: boolean }> {
+  const out = await git(auth, root, ['ls-files', '-s', '--', SUBMODULE_PATH]);
+  if (out === '') {
+    throw new Error(
+      `${SUBMODULE_PATH} is not tracked in the portfolio repo (neither a submodule nor a plain directory)`,
+    );
+  }
+  const isSubmodule = out
+    .split('\n')
+    .some(
+      (line) =>
+        line.startsWith('160000 ') && line.endsWith(`\t${SUBMODULE_PATH}`),
+    );
+  return { isSubmodule };
+}
+
+/**
  * Record the submodule's current HEAD in the parent repo (the gitlink bump):
  * stage ONLY the submodule path, commit when it actually moved, and push the
  * parent when its local tip isn't on origin yet. Safe to call when the agent
  * already bumped and/or pushed — every step no-ops when there is nothing to
- * do. Returns the parent HEAD after any commit.
+ * do. Returns the parent HEAD after any commit. Only meaningful when
+ * ctx.isSubmodule — the plain-directory layout has no gitlink to bump.
  */
 export async function bumpSubmodulePointer(
   ctx: RepoContext,
@@ -162,12 +201,17 @@ export async function bumpSubmodulePointer(
  * Full checkout setup for a run:
  *  1. isolated HOME with the tokenized insteadOf config + a commit identity,
  *  2. clone of the portfolio default branch (full history — pushes need it),
- *  3. `git submodule update --init developer/resumes` (the insteadOf config
- *     authenticates the PRIVATE submodule too, whichever URL form
- *     .gitmodules uses),
- *  4. submodule checked out on its default branch at origin's tip (edits and
- *     syncs both want the freshest resumes, and a branch — not the detached
- *     gitlink HEAD — is what push/pull expect).
+ *  3. detect how developer/resumes is tracked (detectResumesLayout):
+ *     - PLAIN DIRECTORY (the current reality of DIodide/portfolio): the
+ *       clone already materialized it — no submodule init, and edits will be
+ *       committed/pushed in the parent repo directly;
+ *     - GITLINK (kept working in case the repo ever moves to a submodule):
+ *       `git submodule update --init -- developer/resumes` (the insteadOf
+ *       config authenticates a PRIVATE submodule too, whichever URL form
+ *       .gitmodules uses), then the submodule is checked out on its default
+ *       branch at origin's tip (edits and syncs both want the freshest
+ *       resumes, and a branch — not the detached gitlink HEAD — is what
+ *       push/pull expect).
  */
 export async function setupPortfolioRepo(
   workdir: string,
@@ -215,6 +259,23 @@ export async function setupPortfolioRepo(
   ]);
   const branch = await git(auth, root, ['rev-parse', '--abbrev-ref', 'HEAD']);
 
+  const { isSubmodule } = await detectResumesLayout(auth, root);
+  const submoduleDir = path.join(root, SUBMODULE_PATH);
+
+  if (!isSubmodule) {
+    // Plain tracked directory: nothing to initialize, and resume pushes go
+    // to the parent branch.
+    return {
+      gitHome,
+      token,
+      root,
+      submoduleDir,
+      branch,
+      submoduleBranch: branch,
+      isSubmodule,
+    };
+  }
+
   await git(auth, root, [
     'submodule',
     'update',
@@ -222,7 +283,6 @@ export async function setupPortfolioRepo(
     '--',
     SUBMODULE_PATH,
   ]);
-  const submoduleDir = path.join(root, SUBMODULE_PATH);
 
   const submoduleBranch = await defaultBranch(auth, submoduleDir);
   await git(auth, submoduleDir, ['fetch', 'origin', submoduleBranch]);
@@ -238,5 +298,13 @@ export async function setupPortfolioRepo(
     submoduleBranch,
   ]);
 
-  return { gitHome, token, root, submoduleDir, branch, submoduleBranch };
+  return {
+    gitHome,
+    token,
+    root,
+    submoduleDir,
+    branch,
+    submoduleBranch,
+    isSubmodule,
+  };
 }

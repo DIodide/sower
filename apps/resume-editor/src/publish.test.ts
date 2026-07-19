@@ -89,6 +89,12 @@ describe('vaultPathFor', () => {
   it('uses the fixed overwritten per-resume path', () => {
     expect(vaultPathFor('swe-2027')).toBe('resumes/swe-2027/swe-2027.pdf');
   });
+
+  it('keeps underscores and mixed case intact (the real resume name)', () => {
+    expect(vaultPathFor('Ibraheem_Amin_Resume')).toBe(
+      'resumes/Ibraheem_Amin_Resume/Ibraheem_Amin_Resume.pdf',
+    );
+  });
 });
 
 describe('publishResume', () => {

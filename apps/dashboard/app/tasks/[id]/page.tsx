@@ -520,17 +520,26 @@ function NextStep({
         </div>
       );
     case 'DISCARDED':
-      // The auto rule (e.g. full-time postings while hunting internships)
-      // gets its own phrasing plus a Restore action — a human never chose
-      // this, so the banner invites overriding it.
+      // The auto rule (e.g. full-time postings while hunting internships, or
+      // a listings page expanded into individual tasks) gets its own phrasing
+      // plus a Restore action — a human never chose this, so the banner
+      // invites overriding it. A listing's note ("listing (N jobs added)")
+      // additionally points at the queue: the individual jobs ARE the work
+      // now, this page never held an application of its own.
       if (discard?.auto) {
+        const listingNote = discard.note?.startsWith('listing') ?? false;
         return (
           <div className="banner banner--neutral">
             <div style={{ flex: '1 1 20rem' }}>
               <p style={{ marginBottom: '0.625rem' }}>
                 <strong>Auto discarded</strong>
-                {discard.note ? <> — {discard.note}</> : null}. Restore it if
-                this rule got it wrong.
+                {discard.note ? <> — {discard.note}</> : null}.{' '}
+                {listingNote ? (
+                  <>
+                    The individual jobs are in <Link href="/">your queue</Link>.{' '}
+                  </>
+                ) : null}
+                Restore it if this rule got it wrong.
               </p>
               <TaskActions taskId={task.id} mode="restore" />
             </div>

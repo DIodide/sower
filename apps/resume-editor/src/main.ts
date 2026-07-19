@@ -1,15 +1,18 @@
 /**
  * Cloud Run Job entrypoint for the resume editor. Reads the resume_runs row
  * named by RESUME_RUN_ID and executes it against a fresh clone of the user's
- * private portfolio repo (DIodide/portfolio + the developer/resumes
- * submodule, authenticated via GITHUB_PORTFOLIO_TOKEN — see git.ts for the
- * token mechanics and redact.ts/exec.ts for why it can never leak into logs
- * or the run row):
+ * private portfolio repo (DIodide/portfolio, authenticated via
+ * GITHUB_PORTFOLIO_TOKEN — see git.ts for the token mechanics, the
+ * developer/resumes layout detection (plain directory vs submodule), and
+ * redact.ts/exec.ts for why the token can never leak into logs or the run
+ * row):
  *
  * - sync:  compile every developer/resumes/*.tex, upload the PDFs to the
  *          vault, upsert resumes + documents rows. No commits.
- * - write: the manual editor's save — write the file, commit + push
- *          (submodule, then the parent pointer bump), compile, upload.
+ * - write: the manual editor's save — write the file, commit + push (a
+ *          single parent-repo commit when developer/resumes is a plain
+ *          directory; the submodule + pointer-bump flow when it is a
+ *          gitlink), compile, upload.
  * - agent: a Claude Agent SDK session inside the checkout (trusted-repo
  *          posture — see agent-session.ts), then reconcile commits/pushes
  *          and republish whatever the session changed.

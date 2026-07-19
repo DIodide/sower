@@ -593,3 +593,74 @@ export const agentHeartbeats = pgTable('agent_heartbeats', {
   /** Free-form status detail (e.g. 'idle', 'capturing caci'). */
   detail: text('detail'),
 });
+
+/**
+ * Mirror of @sower/answers' `Profile` (z.infer<typeof ProfileSchema>) — the
+ * user's answer-resolution profile. Re-declared locally (like
+ * InvestigationResult above) because @sower/answers itself depends on
+ * @sower/db to read the profiles table (getProfile), so importing the type
+ * from @sower/answers here would create a package cycle. Keep in sync with
+ * ProfileSchema in packages/answers/src/profile.ts.
+ */
+export interface ProfileData {
+  name: { first: string; last: string };
+  email: string;
+  phone: string;
+  location: { city: string; state: string; country: string };
+  links: {
+    website?: string;
+    github?: string;
+    linkedin?: string;
+    twitter?: string;
+  };
+  education: Array<{
+    school: string;
+    degree: string;
+    major: string;
+    gpa?: number;
+    startDate: string;
+    endDate: string;
+  }>;
+  work: Array<{
+    company: string;
+    title: string;
+    startDate: string;
+    endDate?: string;
+    description?: string;
+  }>;
+  authorization: {
+    usWorkAuthorized: boolean;
+    requiresSponsorship: boolean;
+    usCitizen?: boolean;
+    usPerson?: boolean;
+    hasActiveSecurityClearance?: boolean;
+    everEmployedByUSGovernment?: boolean;
+  };
+  graduation?: { date?: string; year?: number };
+  academics?: { satTotal?: number; actComposite?: number; gpaBandLow?: number };
+  preferences?: {
+    openToRelocation?: boolean;
+    howDidYouHear?: string;
+    preferredLocations?: string[];
+    pronouns?: string;
+  };
+  custom: Record<string, string>;
+}
+
+/**
+ * The user's answer-resolution profile, stored as ONE jsonb document (edited
+ * via the dashboard's Answers → Profile page, served by the api's
+ * GET/PUT /profile). SINGLE-PROFILE-PER-DEPLOYMENT: one row is expected —
+ * enforced in code (PUT /profile updates the first row when one exists and
+ * inserts otherwise; readers take the newest by updated_at), not by a DB
+ * constraint. The DB row is the source of truth; the legacy PROFILE_PATH
+ * YAML file is only a dev-time fallback when no row exists (prod never had
+ * the gitignored file — the ENOENT attempt-burn this table fixes).
+ */
+export const profiles = pgTable('profiles', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  data: jsonb('data').$type<ProfileData>().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
