@@ -55,6 +55,7 @@ describe('schema', () => {
       'approval_message_id',
       'attempt',
       'created_at',
+      'due_date',
       'id',
       'ingest_channel_id',
       'ingest_message_id',
@@ -69,6 +70,7 @@ describe('schema', () => {
       'pending_otp',
       'priority',
       'resolution',
+      'sort_rank',
       'state',
       'updated_at',
     ]);
@@ -76,10 +78,18 @@ describe('schema', () => {
     expect(applicationTasks.attempt.notNull).toBe(true);
     // Freeform user notes: nullable (absent until the user writes one).
     expect(applicationTasks.notes.notNull).toBe(false);
-    // Priority is an int (1/0/-1) so ORDER BY priority DESC works; NOT NULL
+    // Priority is an int (2/1/0/-1) so ORDER BY priority DESC works; NOT NULL
     // with a 0 (normal) default so every pre-existing row sorts as normal.
     expect(applicationTasks.priority.notNull).toBe(true);
     expect(applicationTasks.priority.default).toBe(0);
+    // Manual "Waiting on you" position: nullable double precision — unranked
+    // rows fall back to the priority sort; midpoints need fractional ranks.
+    expect(applicationTasks.sortRank.notNull).toBe(false);
+    expect(applicationTasks.sortRank.columnType).toBe('PgDoublePrecision');
+    // The user's own due date (distinct from jobs.deadline): nullable
+    // timestamptz, absent until the user sets one.
+    expect(applicationTasks.dueDate.notNull).toBe(false);
+    expect(applicationTasks.dueDate.columnType).toBe('PgTimestamp');
     // Both nullable: Discord may be disabled or the card post may fail.
     expect(applicationTasks.approvalChannelId.notNull).toBe(false);
     expect(applicationTasks.approvalMessageId.notNull).toBe(false);

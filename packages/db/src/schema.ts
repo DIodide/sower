@@ -7,6 +7,7 @@ import type {
 } from '@sower/core';
 import {
   boolean,
+  doublePrecision,
   index,
   integer,
   jsonb,
@@ -120,10 +121,28 @@ export const applicationTasks = pgTable('application_tasks', {
   /** Freeform user notes (dashboard-only; never sent to any platform). */
   notes: text('notes'),
   /**
-   * User-facing priority: 1=high, 0=normal, -1=low (@sower/core TaskPriority).
-   * An int (not an enum) so `ORDER BY priority DESC` sorts High → Low.
+   * User-facing priority: 2=highest, 1=high, 0=normal, -1=low (@sower/core
+   * TaskPriority). An int (not an enum) so `ORDER BY priority DESC` sorts
+   * Highest → Low — a new level needs no migration.
    */
   priority: integer('priority').$type<TaskPriority>().notNull().default(0),
+  /**
+   * Manual position within the dashboard's "Waiting on you" section, set by
+   * drag-and-drop (POST /tasks/:id/reorder). Nullable: unranked tasks fall
+   * back to priority desc / updatedAt desc AFTER every ranked row. Double
+   * precision so a drop between neighbors is a midpoint write; the api
+   * resequences to 1024-spaced integers when midpoints run out of room.
+   * Setting a priority clears the rank (the user's explicit rule).
+   */
+  sortRank: doublePrecision('sort_rank'),
+  /**
+   * The USER'S own due date for this application (dashboard ⏰ chip / task
+   * header), distinct from jobs.deadline (the POSTING'S parsed deadline,
+   * never user-editable). Nullable; when set it wins over jobs.deadline
+   * everywhere the dashboard displays a deadline. Stored UTC-midnight like
+   * jobs.deadline so both render identically.
+   */
+  dueDate: timestamp('due_date', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });

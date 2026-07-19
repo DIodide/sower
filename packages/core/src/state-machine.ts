@@ -91,6 +91,12 @@ export const ALLOWED: Record<
   SUBMITTED: {
     CONFIRM: 'CONFIRMED',
     FAIL: 'FAILED',
+    // Undo of an out-of-band MARK_SUBMITTED (a mis-click on "Mark applied").
+    // The table allows it from any SUBMITTED task; the api endpoint adds the
+    // history guard — only a task whose latest SUBMITTED-entering event is
+    // MARK_SUBMITTED may be un-marked (a real SUBMIT_OK can't be taken back).
+    // Like RESTORE, it lands in NEEDS_INPUT: a human decides what's next.
+    UNMARK_SUBMITTED: 'NEEDS_INPUT',
   },
   CONFIRMED: {},
   FAILED: {

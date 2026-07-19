@@ -16,9 +16,11 @@ import {
   notInArray,
   or,
   type SQL,
+  sql,
 } from 'drizzle-orm';
 import Link from 'next/link';
 import { getDb } from '../lib/db';
+import { pickDeadline, toDateInputValue } from '../lib/deadline';
 import {
   BUCKETS,
   type Bucket,
@@ -33,6 +35,7 @@ import {
   type Tone,
 } from '../lib/format';
 import { Empty, SectionHeading } from '../lib/ui';
+import { OrderedList } from './ordered-list';
 import { QuickAddBar } from './quick-add-bar';
 import { SearchBox } from './search-box';
 import { TaskRow, type TaskRowData } from './task-row';
@@ -138,20 +141,30 @@ function RowList({ rows }: { rows: TaskRowData[] }) {
 
 /** One section: heading + grid rows, or a one-line "none". `count` is the
  *  TRUE total under the current filters (it may exceed the rows fetched when
- *  the shared list cap truncated this section). */
+ *  the shared list cap truncated this section). `reorderable` routes the rows
+ *  through the client OrderedList (drag-and-drop manual order — "Waiting on
+ *  you" only). */
 function Section({
   title,
   rows,
   count,
+  reorderable = false,
 }: {
   title: string;
   rows: TaskRowData[];
   count?: number;
+  reorderable?: boolean;
 }) {
   return (
     <section>
       <SectionHeading count={count ?? rows.length}>{title}</SectionHeading>
-      {rows.length === 0 ? <Empty>none</Empty> : <RowList rows={rows} />}
+      {rows.length === 0 ? (
+        <Empty>none</Empty>
+      ) : reorderable ? (
+        <OrderedList rows={rows} />
+      ) : (
+        <RowList rows={rows} />
+      )}
     </section>
   );
 }
@@ -211,6 +224,7 @@ export default async function Page({
     notes: applicationTasks.notes,
     updatedAt: applicationTasks.updatedAt,
     jobSpec: applicationTasks.jobSpec,
+    dueDate: applicationTasks.dueDate,
     company: jobs.company,
     title: jobs.title,
     platform: jobs.platform,
@@ -220,7 +234,9 @@ export default async function Page({
 
   // Two row queries: the action bucket ("Waiting on you") is NEVER capped —
   // work waiting on the user must all be visible — while everything else
-  // shares the LIST_CAP.
+  // shares the LIST_CAP. Waiting-on-you additionally honors the manual
+  // drag order: ranked rows first (sort_rank asc), then the unranked block
+  // by the usual priority/recency sort. Other sections never rank.
   const [platformRows, stateCounts, waitingRows, otherRows] = await Promise.all(
     [
       db
@@ -244,6 +260,7 @@ export default async function Page({
           ),
         )
         .orderBy(
+          sql`${applicationTasks.sortRank} asc nulls last`,
           desc(applicationTasks.priority),
           desc(applicationTasks.updatedAt),
         ),
@@ -317,7 +334,13 @@ export default async function Page({
   const discardedIds = taskRows
     .filter((r) => r.state === 'DISCARDED')
     .map((r) => r.id);
-  const [runRows, discardRows] = await Promise.all([
+  // Sent-section SUBMITTED rows: the latest event that ENTERED SUBMITTED
+  // decides whether "Un-mark applied" is offered (MARK_SUBMITTED = out of
+  // band, reversible; SUBMIT_OK = sower really sent it, not reversible).
+  const submittedIds = taskRows
+    .filter((r) => r.state === 'SUBMITTED')
+    .map((r) => r.id);
+  const [runRows, discardRows, submitRows] = await Promise.all([
     unsupportedIds.length > 0
       ? db
           .select({
@@ -340,11 +363,30 @@ export default async function Page({
           )
           .orderBy(desc(events.createdAt))
       : [],
+    submittedIds.length > 0
+      ? db
+          .select({ taskId: events.taskId, type: events.type })
+          .from(events)
+          .where(
+            and(
+              eq(events.toState, 'SUBMITTED'),
+              inArray(events.taskId, submittedIds),
+            ),
+          )
+          .orderBy(desc(events.createdAt))
+      : [],
   ]);
   const latestRuns = new Map<string, { status: InvestigationRunStatus }>();
   for (const run of runRows) {
     if (!latestRuns.has(run.taskId)) {
       latestRuns.set(run.taskId, { status: run.status });
+    }
+  }
+  // Newest-first, so the FIRST row per task is its latest SUBMITTED entry.
+  const latestSubmitTypes = new Map<string, string>();
+  for (const row of submitRows) {
+    if (!latestSubmitTypes.has(row.taskId)) {
+      latestSubmitTypes.set(row.taskId, row.type);
     }
   }
   // Newest-first, so the FIRST row per task is its latest DISCARD.
@@ -383,11 +425,18 @@ export default async function Page({
     if (discard?.auto) phrase = 'Auto discarded';
     const statusNote = discard?.note ?? null;
     const employmentType = row.jobSpec?.employmentType?.trim() || null;
-    // Compact deadline chip — only while the task can still be acted on
-    // (never on Sent or Archive rows). Precomputed on the server so
-    // hydration never disagrees on "now".
-    const showDeadline =
-      row.deadline !== null && !DEADLINE_HIDDEN_STATES.has(row.state);
+    // ⏰ chip — only while the task can still be acted on (never on Sent or
+    // Archive rows). The user's own due date wins over the posting's parsed
+    // deadline; labels are precomputed on the server so hydration never
+    // disagrees on "now". Waiting/processing rows get the click-to-edit
+    // affordance (a ghost ⏰ when neither date exists).
+    const deadlineEditable =
+      (WAITING_STATES as string[]).includes(row.state) ||
+      (PROCESSING_STATES as string[]).includes(row.state);
+    const picked = DEADLINE_HIDDEN_STATES.has(row.state)
+      ? null
+      : pickDeadline(row.dueDate, row.deadline);
+    const fallbackLabel = deadlineChipLabel(row.deadline);
     return {
       id: row.id,
       state: row.state,
@@ -405,8 +454,21 @@ export default async function Page({
           ? employmentType
           : null,
       canInvestigate,
-      deadline: showDeadline ? deadlineChipLabel(row.deadline) : null,
-      deadlineSoon: showDeadline ? isDeadlineSoon(row.deadline) : false,
+      canUnmark:
+        row.state === 'SUBMITTED' &&
+        latestSubmitTypes.get(row.id) === 'MARK_SUBMITTED',
+      deadline: picked
+        ? {
+            label: deadlineChipLabel(picked.date) ?? '',
+            soon: isDeadlineSoon(picked.date),
+            kind: picked.kind,
+          }
+        : null,
+      dueDateISO: toDateInputValue(row.dueDate),
+      deadlineFallback: fallbackLabel
+        ? { label: fallbackLabel, soon: isDeadlineSoon(row.deadline) }
+        : null,
+      deadlineEditable,
       updatedRel: relativeTime(row.updatedAt),
       updatedAbs: formatLocal(row.updatedAt),
     };
@@ -560,7 +622,7 @@ export default async function Page({
         </div>
       ) : (
         <Workspace>
-          <Section title="Waiting on you" rows={waiting} />
+          <Section title="Waiting on you" rows={waiting} reorderable />
           <Section
             title="New & processing"
             rows={processing}

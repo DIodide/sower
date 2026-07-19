@@ -30,18 +30,50 @@ export interface ActionResult {
 const uuidSchema = z.string().uuid();
 const textAnswerSchema = z.string().trim().min(1).max(20_000);
 
-// PATCH-style task meta (notes/priority) — mirrors the api's /tasks/:id/meta
-// contract: only provided fields are written, notes: null clears the note,
-// and at least one field must be present.
-const taskPrioritySchema = z.union([z.literal(-1), z.literal(0), z.literal(1)]);
+// PATCH-style task meta (notes/priority/dueDate) — mirrors the api's
+// /tasks/:id/meta contract: only provided fields are written, notes/dueDate:
+// null clears, and at least one field must be present.
+const taskPrioritySchema = z.union([
+  z.literal(-1),
+  z.literal(0),
+  z.literal(1),
+  z.literal(2),
+]);
+const taskDueDateSchema = z
+  .string()
+  .trim()
+  .max(64)
+  .refine((value) => !Number.isNaN(Date.parse(value)), {
+    message: 'dueDate must be a parseable ISO date',
+  });
 const taskMetaSchema = z
   .object({
     notes: z.string().max(20_000).nullable().optional(),
     priority: taskPrioritySchema.optional(),
+    dueDate: taskDueDateSchema.nullable().optional(),
   })
-  .refine((meta) => meta.notes !== undefined || meta.priority !== undefined, {
-    message: 'provide at least one of notes, priority',
-  });
+  .refine(
+    (meta) =>
+      meta.notes !== undefined ||
+      meta.priority !== undefined ||
+      meta.dueDate !== undefined,
+    { message: 'provide at least one of notes, priority, dueDate' },
+  );
+
+// Reorder within "Waiting on you": the row's new neighbors (beforeTaskId
+// immediately above, afterTaskId immediately below); the api computes the
+// rank. At least one must be present (both absent would mean "nowhere").
+const reorderNeighborsSchema = z
+  .object({
+    beforeTaskId: z.string().uuid().optional(),
+    afterTaskId: z.string().uuid().optional(),
+  })
+  .refine(
+    (neighbors) =>
+      neighbors.beforeTaskId !== undefined ||
+      neighbors.afterTaskId !== undefined,
+    { message: 'provide at least one neighbor' },
+  );
 
 const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
 
@@ -354,16 +386,23 @@ export async function saveAnswers(
 }
 
 /**
- * Update a task's user-facing metadata (notes and/or priority) via the api
- * service. PATCH semantics: only the provided fields change (notes: null
- * clears the note). Only the task page is revalidated — deliberately NOT the
- * home list: the row owns its optimistic note/priority state, and a list
- * revalidation mid-edit would re-sort rows under the user's hands. Order
- * settles on the next natural refresh.
+ * Update a task's user-facing metadata (notes, priority, and/or the user's
+ * own due date) via the api service. PATCH semantics: only the provided
+ * fields change (notes/dueDate: null clears). Only the task page is
+ * revalidated — deliberately NOT the home list: the row owns its optimistic
+ * note/priority/due-date state, and a list revalidation mid-edit would
+ * re-sort rows under the user's hands. Order settles on the next natural
+ * refresh. Note the api side: setting a priority also clears any manual
+ * "Waiting on you" sort rank (choosing a priority means "sort me by
+ * priority again").
  */
 export async function updateTaskMeta(
   taskId: string,
-  meta: { notes?: string | null; priority?: TaskPriority },
+  meta: {
+    notes?: string | null;
+    priority?: TaskPriority;
+    dueDate?: string | null;
+  },
 ): Promise<ActionResult> {
   const idParse = uuidSchema.safeParse(taskId);
   if (!idParse.success) return { ok: false, message: 'invalid task id.' };
@@ -375,14 +414,40 @@ export async function updateTaskMeta(
         message: 'note is too long (max 20,000 characters).',
       };
     }
+    if (
+      typeof meta.dueDate === 'string' &&
+      Number.isNaN(Date.parse(meta.dueDate))
+    ) {
+      return { ok: false, message: 'not a valid date.' };
+    }
     return {
       ok: false,
-      message: 'nothing to update — provide notes or a priority.',
+      message: 'nothing to update — provide notes, a priority, or a due date.',
     };
   }
   const result = await callApi(idParse.data, 'meta', metaParse.data);
   revalidatePath(`/tasks/${idParse.data}`);
   return result;
+}
+
+/**
+ * Move a "Waiting on you" row to a new manual position via the api service:
+ * the client reports the row's new NEIGHBORS, the api computes the sort rank
+ * (midpoint / end-gap, resequencing when needed). Deliberately no list
+ * revalidation: the OrderedList owns the optimistic order and refreshes
+ * explicitly once the write lands.
+ */
+export async function reorderTask(
+  taskId: string,
+  neighbors: { beforeTaskId?: string; afterTaskId?: string },
+): Promise<ActionResult> {
+  const idParse = uuidSchema.safeParse(taskId);
+  if (!idParse.success) return { ok: false, message: 'invalid task id.' };
+  const neighborsParse = reorderNeighborsSchema.safeParse(neighbors);
+  if (!neighborsParse.success) {
+    return { ok: false, message: 'invalid drop position.' };
+  }
+  return callApi(idParse.data, 'reorder', neighborsParse.data);
 }
 
 /** Requeue a NEEDS_INPUT / FAILED task via the api service. */
@@ -500,6 +565,22 @@ export async function markApplied(
 }
 
 /**
+ * Un-mark a task that was mistakenly "Marked applied" via the api service.
+ * Allowed ONLY when the task is SUBMITTED via an out-of-band MARK_SUBMITTED —
+ * an application sower actually submitted (SUBMIT_OK) is refused with a 409.
+ * Lands back in NEEDS_INPUT, like Restore. Revalidates the task page plus
+ * the home list the row moves within.
+ */
+export async function unmarkApplied(taskId: string): Promise<ActionResult> {
+  const idParse = uuidSchema.safeParse(taskId);
+  if (!idParse.success) return { ok: false, message: 'invalid task id.' };
+  const result = await callApi(idParse.data, 'unmark-applied');
+  revalidatePath(`/tasks/${idParse.data}`);
+  revalidatePath('/');
+  return result;
+}
+
+/**
  * Restore a DISCARDED task via the api service (the Archive's Restore and the
  * discard toast's Undo). Lands back in NEEDS_INPUT; restoring a task that is
  * already NEEDS_INPUT is a no-op on the api side, so a double-clicked undo
@@ -565,6 +646,7 @@ const apiResponseSchema = z.object({
       fileCount: z.number(),
     })
     .optional(),
+  sortRank: z.number().optional(),
   error: z.string().optional(),
   message: z.string().optional(),
 });
@@ -584,8 +666,10 @@ async function callApi(
     | 'discard'
     | 'restore'
     | 'mark-applied'
+    | 'unmark-applied'
     | 'investigate'
-    | 'meta',
+    | 'meta'
+    | 'reorder',
   jsonBody?: Record<string, unknown>,
 ): Promise<ActionResult> {
   const base = process.env.API_BASE_URL;
@@ -686,8 +770,19 @@ async function callApi(
     };
   }
 
+  if (action === 'unmark-applied') {
+    return {
+      ok: true,
+      message: 'un-marked — back in "Waiting on you" as needs-input.',
+    };
+  }
+
   if (action === 'meta') {
     return { ok: true, message: 'saved.' };
+  }
+
+  if (action === 'reorder') {
+    return { ok: true, message: 'order saved.' };
   }
 
   if (action === 'investigate') {

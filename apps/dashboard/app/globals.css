@@ -1299,6 +1299,70 @@ details.filter-pop > summary::-webkit-details-marker {
   opacity: 1;
 }
 
+/* "Waiting on you" rows carry a drag grip in an extra leading column (each
+   section is its own .row-list, so cross-section alignment is unaffected) */
+.grid-row--grip {
+  grid-template-columns:
+    1.125rem 1rem max-content minmax(0, 1.8fr) minmax(0, 1.2fr)
+    minmax(0, 1fr) 4rem max-content;
+}
+
+/* grip appears at the row's left edge on hover/focus (always on touch) */
+.tr-grip {
+  display: inline-flex;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+
+.grid-row:hover .tr-grip,
+.grid-row:focus-within .tr-grip {
+  opacity: 1;
+}
+
+.tr-grip-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.125rem;
+  min-height: 1.125rem;
+  border: none;
+  border-radius: var(--r-ctl);
+  background: none;
+  padding: 0;
+  font-size: 0.6875rem;
+  line-height: 1;
+  letter-spacing: -0.09em;
+  color: var(--ink-faint);
+  cursor: grab;
+  transition:
+    background 120ms ease,
+    color 120ms ease;
+}
+
+.tr-grip-btn:hover {
+  background: var(--well);
+  color: var(--ink);
+}
+
+.tr-grip-btn:active {
+  cursor: grabbing;
+}
+
+/* the row being dragged ghosts; the insertion line is a 2px accent edge on
+   the row the drop would land against */
+.grid-row--dragging {
+  opacity: 0.45;
+}
+
+.grid-row--drop-above {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.grid-row--drop-below {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
 .tr-label {
   display: flex;
   align-items: center;
@@ -1337,9 +1401,10 @@ details.filter-pop > summary::-webkit-details-marker {
   white-space: nowrap;
 }
 
-/* Compact "⏰ Jul 30" application-deadline chip after the status phrase —
-   faint by default, red-tinted when the deadline is within 7 days (or
-   past). Deliberately quiet: sections keep their priority sort. */
+/* Compact "⏰ Jul 30" deadline/due-date chip after the status phrase —
+   faint by default, red-tinted when the date is within 7 days (or past).
+   Identical whether it shows the user's own due date or the posting's
+   parsed deadline (the tooltip says which). */
 .deadline-chip {
   margin-left: 0.5rem;
   font-size: 0.75rem;
@@ -1349,6 +1414,91 @@ details.filter-pop > summary::-webkit-details-marker {
 
 .deadline-chip--soon {
   color: var(--danger-fg);
+}
+
+/* the chip doubles as the due-date editor on actionable rows */
+.due-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+}
+
+button.due-btn {
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: inherit;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+button.due-btn:hover {
+  color: var(--ink);
+}
+
+button.due-btn.deadline-chip--soon:hover {
+  color: var(--danger-fg);
+}
+
+/* rows with neither date: a ghost ⏰ affordance on hover/focus (always on
+   touch), like the Add note… ghost */
+.due-ghost {
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+
+.grid-row:hover .due-ghost,
+.grid-row:focus-within .due-ghost,
+.due-ghost:focus-visible {
+  opacity: 1;
+}
+
+/* tiny inline popover: native date input + Clear */
+.due-pop {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 0.25rem);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.5rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  /* floating layer — needs separation from the page, kept minimal */
+  box-shadow: 0 4px 12px rgba(20, 24, 40, 0.1);
+}
+
+.due-input {
+  width: 9.5rem;
+  font-size: 0.8125rem;
+}
+
+.due-err {
+  font-size: 0.6875rem;
+  margin-left: 0.375rem;
+}
+
+/* the task header's Deadline cell as a click-to-edit control */
+button.due-cell-btn {
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: 0.875rem;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+button.due-cell-btn:hover {
+  color: var(--accent-deep);
+}
+
+.due-ghost-cell {
+  color: var(--ink-faint);
+  font-style: italic;
 }
 
 /* Recovery actions (Retry/Restore/Investigate) are ALWAYS visible; only the
@@ -1452,6 +1602,15 @@ details.filter-pop > summary::-webkit-details-marker {
 
 .pri-level--high {
   color: var(--attention-fg);
+}
+
+/* the top level reads STRONGER than High's amber text: a filled danger-toned
+   chip — still flat, still hairline-scale */
+.pri-level--highest {
+  padding: 0.0625rem 0.3125rem;
+  border-radius: var(--r-ctl);
+  background: var(--danger-fg);
+  color: #fff;
 }
 
 .pri-level--normal {
@@ -1651,7 +1810,12 @@ details.show-more[open] > summary {
     opacity: 1;
   }
 
-  .note-ghost {
+  .note-ghost,
+  .due-ghost {
+    opacity: 1;
+  }
+
+  .tr-grip {
     opacity: 1;
   }
 }
@@ -1665,6 +1829,27 @@ details.show-more[open] > summary {
       "status status note actions";
     row-gap: 0.25rem;
     padding: 0.5rem 0.625rem;
+  }
+
+  /* grip rows: the grip spans both lines at the far left */
+  .grid-row--grip {
+    grid-template-columns: auto auto auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "grip pri label label check"
+      "grip status status note actions";
+  }
+
+  .tr-grip {
+    grid-area: grip;
+    align-self: center;
+    opacity: 1;
+  }
+
+  /* touch-friendly grip: ~28px hit area, row stays compact */
+  .tr-grip-btn {
+    min-width: 1.75rem;
+    min-height: 1.75rem;
+    font-size: 0.8125rem;
   }
 
   .tr-pri {

@@ -2344,6 +2344,133 @@ describe('buildServer', () => {
     });
   });
 
+  describe('POST /tasks/:id/unmark-applied', () => {
+    const TASK_ID = '7d8e9f10-1112-4314-a516-b71819c2d2e2';
+
+    function inject(app: ReturnType<typeof buildServer>, id: string = TASK_ID) {
+      return app.inject({
+        method: 'POST',
+        url: `/tasks/${id}/unmark-applied`,
+        headers: { 'x-api-key': 'test-key' },
+      });
+    }
+
+    it('un-marks an out-of-band SUBMITTED task: UNMARK_SUBMITTED back to NEEDS_INPUT + refresh', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [
+          [{ state: 'SUBMITTED' }],
+          // Latest SUBMITTED-entering event: the out-of-band mark.
+          [{ type: 'MARK_SUBMITTED' }],
+        ],
+        insertResults: [[]], // UNMARK_SUBMITTED event
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true });
+
+      const taskUpdate = writes.find(
+        (w) => w.method === 'update' && w.table === applicationTasks,
+      );
+      expect(taskUpdate?.arg).toMatchObject({ state: 'NEEDS_INPUT' });
+
+      const unmarkEvent = writes
+        .filter((w) => w.method === 'insert' && w.table === events)
+        .map((w) => w.arg as Record<string, unknown>)
+        .find((arg) => arg.type === 'UNMARK_SUBMITTED');
+      expect(unmarkEvent).toMatchObject({
+        taskId: TASK_ID,
+        fromState: 'SUBMITTED',
+        toState: 'NEEDS_INPUT',
+        data: { reason: 'manual' },
+      });
+
+      // The #ingest reply line leaves "applied".
+      expect(refreshState.calls).toEqual([TASK_ID]);
+    });
+
+    it('responds 409 when sower itself submitted (latest SUBMITTED-entering event is SUBMIT_OK)', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[{ state: 'SUBMITTED' }], [{ type: 'SUBMIT_OK' }]],
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app);
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toEqual({
+        error:
+          "this application was submitted by sower — it can't be un-marked",
+      });
+      expect(writes).toEqual([]);
+      expect(refreshState.calls).toEqual([]);
+    });
+
+    it('responds 409 when no SUBMITTED-entering event is recorded (nothing to prove out-of-band)', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[{ state: 'SUBMITTED' }], []],
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app);
+
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toEqual({
+        error:
+          "this application was submitted by sower — it can't be un-marked",
+      });
+      expect(writes).toEqual([]);
+    });
+
+    it('responds 409 for any non-SUBMITTED state (CONFIRMED, NEEDS_INPUT, DISCARDED)', async () => {
+      for (const state of ['CONFIRMED', 'NEEDS_INPUT', 'DISCARDED']) {
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({ selectResults: [[{ state }]], writes });
+        const { deps } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app);
+
+        expect(res.statusCode).toBe(409);
+        expect(res.json()).toEqual({
+          error: `cannot un-mark a task in state '${state}'`,
+        });
+        expect(writes).toEqual([]);
+      }
+      expect(refreshState.calls).toEqual([]);
+    });
+
+    it('responds 404 for a missing task, 400 for an invalid id, 401 without a key', async () => {
+      const { deps } = createDeps(createFakeDb({ selectResults: [[]] }));
+      const app = buildServer(deps);
+
+      const missing = await inject(app);
+      expect(missing.statusCode).toBe(404);
+      expect(missing.json()).toEqual({ error: 'task not found' });
+
+      const invalid = await inject(app, 'not-a-uuid');
+      expect(invalid.statusCode).toBe(400);
+      expect(invalid.json()).toMatchObject({ error: 'invalid task id' });
+
+      const unauthed = await app.inject({
+        method: 'POST',
+        url: `/tasks/${TASK_ID}/unmark-applied`,
+      });
+      expect(unauthed.statusCode).toBe(401);
+    });
+  });
+
   describe('POST /tasks/discard (bulk)', () => {
     const ID_A = '7d8e9f10-1112-4314-a516-b71819c2d2e2';
     const ID_B = 'a1b2c3d4-e5f6-4788-99aa-bbccddeeff00';
@@ -2591,9 +2718,14 @@ describe('buildServer', () => {
       });
     }
 
-    /** Fake db whose first select finds the task; writes are recorded. */
-    function metaDb(writes: DbWrite[]) {
-      return createFakeDb({ selectResults: [[{ id: TASK_ID }]], writes });
+    /** Fake db whose first select finds the task; writes are recorded.
+     *  `sortRank` mimics the task's current manual "Waiting on you" rank
+     *  (null = unranked, the common case). */
+    function metaDb(writes: DbWrite[], sortRank: number | null = null) {
+      return createFakeDb({
+        selectResults: [[{ id: TASK_ID, sortRank }]],
+        writes,
+      });
     }
 
     it('updates notes only (priority untouched)', async () => {
@@ -2666,8 +2798,118 @@ describe('buildServer', () => {
       expect(set.notes).toBeNull();
     });
 
+    it('accepts the Highest priority (2, above High)', async () => {
+      const writes: DbWrite[] = [];
+      const { deps } = createDeps(metaDb(writes));
+      const app = buildServer(deps);
+
+      const res = await inject(app, { priority: 2 });
+
+      expect(res.statusCode).toBe(200);
+      const set = writes.find((w) => w.method === 'update')?.arg as Record<
+        string,
+        unknown
+      >;
+      expect(set.priority).toBe(2);
+    });
+
+    it('setting a priority clears a manual sort rank in the same write', async () => {
+      const writes: DbWrite[] = [];
+      const { deps } = createDeps(metaDb(writes, 2048));
+      const app = buildServer(deps);
+
+      const res = await inject(app, { priority: 1 });
+
+      expect(res.statusCode).toBe(200);
+      const updates = writes.filter((w) => w.method === 'update');
+      expect(updates).toHaveLength(1);
+      expect(updates[0]?.arg).toEqual({ priority: 1, sortRank: null });
+    });
+
+    it('a notes-only update leaves an existing sort rank alone', async () => {
+      const writes: DbWrite[] = [];
+      const { deps } = createDeps(metaDb(writes, 2048));
+      const app = buildServer(deps);
+
+      const res = await inject(app, { notes: 'still hand-ordered' });
+
+      expect(res.statusCode).toBe(200);
+      const set = writes.find((w) => w.method === 'update')?.arg as Record<
+        string,
+        unknown
+      >;
+      expect('sortRank' in set).toBe(false);
+    });
+
+    it('setting a priority on an unranked task writes no sortRank key', async () => {
+      const writes: DbWrite[] = [];
+      const { deps } = createDeps(metaDb(writes));
+      const app = buildServer(deps);
+
+      const res = await inject(app, { priority: -1 });
+
+      expect(res.statusCode).toBe(200);
+      const set = writes.find((w) => w.method === 'update')?.arg as Record<
+        string,
+        unknown
+      >;
+      expect('sortRank' in set).toBe(false);
+    });
+
+    it('sets the user due date (normalized to UTC midnight) without touching updatedAt', async () => {
+      const writes: DbWrite[] = [];
+      const { deps } = createDeps(metaDb(writes));
+      const app = buildServer(deps);
+
+      const res = await inject(app, { dueDate: '2026-08-01' });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true });
+      const set = writes.find((w) => w.method === 'update')?.arg as Record<
+        string,
+        unknown
+      >;
+      expect(set.dueDate).toBeInstanceOf(Date);
+      expect((set.dueDate as Date).toISOString()).toBe(
+        '2026-08-01T00:00:00.000Z',
+      );
+      // Like notes: a due date is an annotation, never activity.
+      expect('updatedAt' in set).toBe(false);
+      expect('notes' in set).toBe(false);
+      expect('priority' in set).toBe(false);
+    });
+
+    it('dueDate: null clears the user due date', async () => {
+      const writes: DbWrite[] = [];
+      const { deps } = createDeps(metaDb(writes));
+      const app = buildServer(deps);
+
+      const res = await inject(app, { dueDate: null });
+
+      expect(res.statusCode).toBe(200);
+      const set = writes.find((w) => w.method === 'update')?.arg as Record<
+        string,
+        unknown
+      >;
+      expect(set.dueDate).toBeNull();
+    });
+
+    it('responds 400 for an unparseable dueDate (nothing written)', async () => {
+      for (const dueDate of ['not-a-date', '2026-13-45garbage', '']) {
+        const writes: DbWrite[] = [];
+        const { deps } = createDeps(metaDb(writes));
+        const app = buildServer(deps);
+
+        const res = await inject(app, { dueDate });
+
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toMatchObject({ error: 'invalid body' });
+        expect(writes).toEqual([]);
+      }
+    });
+
     it('responds 400 for an invalid priority (nothing written)', async () => {
-      for (const priority of [2, -2, 0.5, 'high']) {
+      for (const priority of [3, -2, 0.5, 'high']) {
         const writes: DbWrite[] = [];
         const { deps } = createDeps(metaDb(writes));
         const app = buildServer(deps);
@@ -2725,6 +2967,206 @@ describe('buildServer', () => {
         payload: { priority: 1 },
       });
       expect(res.statusCode).toBe(401);
+    });
+  });
+
+  describe('POST /tasks/:id/reorder', () => {
+    const TASK_ID = '7d8e9f10-1112-4314-a516-b71819c2d2e2';
+    const ID_A = 'a1b2c3d4-e5f6-4788-99aa-bbccddeeff00';
+    const ID_B = '00112233-4455-4677-8899-aabbccddeeff';
+    const ID_C = '99887766-5544-4332-a110-ffeeddccbbaa';
+
+    function inject(
+      app: ReturnType<typeof buildServer>,
+      payload: unknown,
+      id: string = TASK_ID,
+    ) {
+      return app.inject({
+        method: 'POST',
+        url: `/tasks/${id}/reorder`,
+        headers: { 'x-api-key': 'test-key' },
+        payload: payload as Record<string, unknown>,
+      });
+    }
+
+    /** Fake db: first select = the task's state, second = the section in its
+     *  current display order (ranked first, then unranked). */
+    function reorderDb(
+      writes: DbWrite[],
+      section: { id: string; sortRank: number | null }[],
+      state = 'NEEDS_INPUT',
+    ) {
+      return createFakeDb({
+        selectResults: [[{ state }], section],
+        writes,
+      });
+    }
+
+    /** The sortRank values of every recorded update, in write order. */
+    function rankWrites(writes: DbWrite[]): unknown[] {
+      return writes
+        .filter((w) => w.method === 'update' && w.table === applicationTasks)
+        .map((w) => (w.arg as Record<string, unknown>).sortRank);
+    }
+
+    it('drops between two ranked neighbors at their midpoint', async () => {
+      const writes: DbWrite[] = [];
+      const db = reorderDb(writes, [
+        { id: ID_A, sortRank: 1024 },
+        { id: ID_B, sortRank: 2048 },
+        { id: TASK_ID, sortRank: null },
+      ]);
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, { beforeTaskId: ID_A, afterTaskId: ID_B });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, sortRank: 1536 });
+      // Exactly one write: the moved task; the ranked neighbors are reused.
+      expect(rankWrites(writes)).toEqual([1536]);
+    });
+
+    it('drops at the bottom end: beforeTaskId only, rank + 1024', async () => {
+      const writes: DbWrite[] = [];
+      const db = reorderDb(writes, [
+        { id: ID_A, sortRank: 1024 },
+        { id: ID_B, sortRank: 2048 },
+        { id: TASK_ID, sortRank: null },
+      ]);
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, { beforeTaskId: ID_B });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, sortRank: 3072 });
+      expect(rankWrites(writes)).toEqual([3072]);
+    });
+
+    it('drops at the top end: afterTaskId only, rank - 1024', async () => {
+      const writes: DbWrite[] = [];
+      const db = reorderDb(writes, [
+        { id: ID_A, sortRank: 1024 },
+        { id: TASK_ID, sortRank: null },
+      ]);
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, { afterTaskId: ID_A });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, sortRank: 0 });
+      expect(rankWrites(writes)).toEqual([0]);
+    });
+
+    it('assigns ranks lazily when a neighbor is unranked: the section is resequenced first', async () => {
+      const writes: DbWrite[] = [];
+      // A is ranked; B and C exist only via the priority sort (unranked).
+      const db = reorderDb(writes, [
+        { id: ID_A, sortRank: 1024 },
+        { id: ID_B, sortRank: null },
+        { id: ID_C, sortRank: null },
+        { id: TASK_ID, sortRank: null },
+      ]);
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      // Drop the task between the two unranked rows.
+      const res = await inject(app, { beforeTaskId: ID_B, afterTaskId: ID_C });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, sortRank: 2560 });
+      // Resequence writes 1024-spaced integers in the current visual order
+      // (A already holds 1024, so it is NOT rewritten), then the midpoint.
+      expect(rankWrites(writes)).toEqual([2048, 3072, 2560]);
+    });
+
+    it('resequences when the neighbors are too close for a distinct midpoint', async () => {
+      const writes: DbWrite[] = [];
+      const db = reorderDb(writes, [
+        { id: ID_A, sortRank: 1000 },
+        { id: ID_B, sortRank: 1000 + 1e-9 },
+        { id: TASK_ID, sortRank: null },
+      ]);
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, { beforeTaskId: ID_A, afterTaskId: ID_B });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true, sortRank: 1536 });
+      expect(rankWrites(writes)).toEqual([1024, 2048, 1536]);
+    });
+
+    it('responds 409 for a task outside "Waiting on you" (no manual order there)', async () => {
+      for (const state of ['QUEUED', 'SUBMITTED', 'DISCARDED', 'FAILED']) {
+        const writes: DbWrite[] = [];
+        const db = reorderDb(writes, [], state);
+        const { deps } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app, { beforeTaskId: ID_A });
+
+        expect(res.statusCode).toBe(409);
+        expect(res.json()).toEqual({
+          error: `cannot reorder a task in state '${state}' — only "Waiting on you" tasks have a manual order`,
+        });
+        expect(writes).toEqual([]);
+      }
+    });
+
+    it('responds 400 when no neighbor is provided, or a neighbor is the task itself', async () => {
+      const { deps } = createDeps(
+        createFakeDb({ selectResults: [[{ state: 'NEEDS_INPUT' }]] }),
+      );
+      const app = buildServer(deps);
+
+      const empty = await inject(app, {});
+      expect(empty.statusCode).toBe(400);
+      expect(empty.json()).toMatchObject({ error: 'invalid body' });
+
+      const self = await inject(app, { beforeTaskId: TASK_ID });
+      expect(self.statusCode).toBe(400);
+      expect(self.json()).toEqual({
+        error: 'beforeTaskId/afterTaskId must be two OTHER tasks',
+      });
+    });
+
+    it('responds 400 when a neighbor is not in the "Waiting on you" section', async () => {
+      const writes: DbWrite[] = [];
+      const db = reorderDb(writes, [{ id: ID_A, sortRank: 1024 }]);
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      // ID_B is not in the section list.
+      const res = await inject(app, { beforeTaskId: ID_B });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toEqual({
+        error: 'neighbor task is not in the "Waiting on you" section',
+      });
+      expect(writes).toEqual([]);
+    });
+
+    it('responds 404 for a missing task, 400 for an invalid id, 401 without a key', async () => {
+      const { deps } = createDeps(createFakeDb({ selectResults: [[]] }));
+      const app = buildServer(deps);
+
+      const missing = await inject(app, { beforeTaskId: ID_A });
+      expect(missing.statusCode).toBe(404);
+      expect(missing.json()).toEqual({ error: 'task not found' });
+
+      const invalid = await inject(app, { beforeTaskId: ID_A }, 'not-a-uuid');
+      expect(invalid.statusCode).toBe(400);
+      expect(invalid.json()).toMatchObject({ error: 'invalid task id' });
+
+      const unauthed = await app.inject({
+        method: 'POST',
+        url: `/tasks/${TASK_ID}/reorder`,
+        payload: { beforeTaskId: ID_A },
+      });
+      expect(unauthed.statusCode).toBe(401);
     });
   });
 
@@ -2848,7 +3290,7 @@ describe('buildServer', () => {
         {},
         { company: '' },
         { company: '   ' },
-        { company: 'Acme', priority: 2 },
+        { company: 'Acme', priority: 3 },
         { company: 'Acme', notes: 'x'.repeat(20_001) },
       ]) {
         const writes: DbWrite[] = [];

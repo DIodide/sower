@@ -2,16 +2,19 @@
 
 // One Applications-workspace row: priority stepper (▼/▲, see
 // lib/priority-control), label link, plain-words status (tone dot + phrase),
-// inline note, relative time, and actions. Recovery actions
-// (Retry/Investigate/Restore) are always visible; the destructive Discard
-// (with an undo toast), the quiet Mark applied (completed out of band), and
-// the bulk-select checkbox are hover/focus-revealed. Rendered as cells of
-// the page's CSS grid list — never a <table>.
+// due-date ⏰ chip (click-to-edit on actionable rows), inline note, relative
+// time, and actions. Recovery actions (Retry/Investigate/Restore) are always
+// visible; the destructive Discard (with an undo toast), the quiet Mark
+// applied / Un-mark applied, and the bulk-select checkbox are hover/focus-
+// revealed. "Waiting on you" rows additionally carry a drag grip (⋮⋮) wired
+// by the section's OrderedList. Rendered as cells of the page's CSS grid
+// list — never a <table>.
 
 import type { TaskPriority } from '@sower/core';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useRef, useState } from 'react';
+import { DueDateControl, type DueDateDisplay } from '../lib/due-date-control';
 import type { Tone } from '../lib/format';
 import { InlineNote } from '../lib/inline-note';
 import { PriorityControl } from '../lib/priority-control';
@@ -22,8 +25,26 @@ import {
   markApplied,
   requeueTask,
   restoreTask,
+  unmarkApplied,
 } from './tasks/[id]/actions';
 import { useWorkspace } from './workspace';
+
+/** Wiring the OrderedList gives a "Waiting on you" row: its position, the
+ *  drag/drop handlers, and the keyboard move. Absent on every other row. */
+export interface RowReorder {
+  index: number;
+  count: number;
+  /** This row is the one currently being dragged. */
+  dragging: boolean;
+  /** Insertion-line side to highlight while a drag hovers this row. */
+  dropEdge: 'above' | 'below' | null;
+  onDragStart: (index: number, event: React.DragEvent<HTMLElement>) => void;
+  onDragEnd: () => void;
+  onDragOver: (index: number, event: React.DragEvent<HTMLElement>) => void;
+  onDrop: (index: number, event: React.DragEvent<HTMLElement>) => void;
+  /** Keyboard: move one position up (-1) or down (1). */
+  onMove: (index: number, direction: -1 | 1) => void;
+}
 
 export interface TaskRowData {
   id: string;
@@ -46,11 +67,19 @@ export interface TaskRowData {
   employmentType: string | null;
   /** Unsupported row with no agent currently running — offer Investigate. */
   canInvestigate: boolean;
-  /** Compact deadline chip label ("Jul 30"); null = no chip (no deadline,
-   *  or a Sent/Archive row where it would be noise). */
-  deadline: string | null;
-  /** Deadline within 7 days (or past) — the chip gets the red tint. */
-  deadlineSoon: boolean;
+  /** SUBMITTED via an out-of-band "Mark applied" (not a real sower submit) —
+   *  offer the quiet Un-mark applied undo. */
+  canUnmark: boolean;
+  /** ⏰ chip display: the user's own due date when set, else the posting's
+   *  parsed deadline; null = neither (or a Sent/Archive row — noise there).
+   *  Labels precomputed on the server so hydration never disagrees. */
+  deadline: DueDateDisplay | null;
+  /** The user's own due date (yyyy-mm-dd) for the chip's date input. */
+  dueDateISO: string | null;
+  /** Posting-deadline display that resurfaces if the user date is cleared. */
+  deadlineFallback: { label: string; soon: boolean } | null;
+  /** Chip is click-to-edit on Waiting-on-you / New & processing rows. */
+  deadlineEditable: boolean;
   /** Precomputed on the server so hydration never disagrees on "now". */
   updatedRel: string;
   updatedAbs: string;
@@ -82,7 +111,14 @@ const MARKABLE = new Set([
 /** States where a priority no longer means anything — the control goes inert. */
 const PRIORITY_LOCKED = new Set(['SUBMITTED', 'CONFIRMED', 'DISCARDED']);
 
-export function TaskRow({ row }: { row: TaskRowData }) {
+export function TaskRow({
+  row,
+  reorder,
+}: {
+  row: TaskRowData;
+  /** Present only inside the "Waiting on you" OrderedList. */
+  reorder?: RowReorder;
+}) {
   const ws = useWorkspace();
   const router = useRouter();
   const [hidden, setHidden] = useState(false);
@@ -191,10 +227,55 @@ export function TaskRow({ row }: { row: TaskRowData }) {
     row.phrase +
     (row.statusNote ? ` — ${row.statusNote}` : '') +
     (row.employmentType ? ` · ${row.employmentType}` : '') +
-    (row.deadline ? ` · deadline ${row.deadline}` : '');
+    (row.deadline ? ` · deadline ${row.deadline.label}` : '');
+
+  const rowClass = [
+    'grid-row',
+    reorder ? 'grid-row--grip' : '',
+    reorder?.dragging ? 'grid-row--dragging' : '',
+    reorder?.dropEdge === 'above' ? 'grid-row--drop-above' : '',
+    reorder?.dropEdge === 'below' ? 'grid-row--drop-below' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
 
   return (
-    <div className="grid-row">
+    // biome-ignore lint/a11y/noStaticElementInteractions: dragover/drop are pointer-only plumbing for the grip's HTML5 drag — the keyboard path is the grip button's arrow keys
+    <div
+      className={rowClass}
+      onDragOver={
+        reorder
+          ? (event) => reorder.onDragOver(reorder.index, event)
+          : undefined
+      }
+      onDrop={
+        reorder ? (event) => reorder.onDrop(reorder.index, event) : undefined
+      }
+    >
+      {reorder ? (
+        <span className="tr-grip">
+          <button
+            type="button"
+            className="tr-grip-btn"
+            draggable
+            aria-label={`Reorder ${row.label} — position ${reorder.index + 1} of ${reorder.count}; press arrow up or down to move`}
+            title="Drag to reorder (or focus and press ↑/↓)"
+            onDragStart={(event) => reorder.onDragStart(reorder.index, event)}
+            onDragEnd={reorder.onDragEnd}
+            onKeyDown={(event) => {
+              if (event.key === 'ArrowUp') {
+                event.preventDefault();
+                reorder.onMove(reorder.index, -1);
+              } else if (event.key === 'ArrowDown') {
+                event.preventDefault();
+                reorder.onMove(reorder.index, 1);
+              }
+            }}
+          >
+            ⋮⋮
+          </button>
+        </span>
+      ) : null}
       <span className="tr-check">
         {selectable ? (
           <input
@@ -229,19 +310,18 @@ export function TaskRow({ row }: { row: TaskRowData }) {
           {row.employmentType ? (
             <span className="faint"> · {row.employmentType}</span>
           ) : null}
-          {row.deadline ? (
-            <span
-              className={
-                row.deadlineSoon
-                  ? 'deadline-chip deadline-chip--soon'
-                  : 'deadline-chip'
-              }
-              title={`Application deadline: ${row.deadline}`}
-            >
-              ⏰ {row.deadline}
-            </span>
-          ) : null}
         </span>
+        {/* ⏰ chip — sibling of the phrase so its popover never clips on the
+            phrase's ellipsis overflow. Editable rows with neither date show
+            a ghost ⏰ affordance on hover (like Add note…). */}
+        <DueDateControl
+          taskId={row.id}
+          display={row.deadline}
+          dueDateISO={row.dueDateISO}
+          fallback={row.deadlineFallback}
+          editable={row.deadlineEditable}
+          onError={(message) => ws.toast(message, { kind: 'error' })}
+        />
       </span>
       <span className="tr-note">
         <InlineNote taskId={row.id} note={row.notes} />
@@ -297,6 +377,23 @@ export function TaskRow({ row }: { row: TaskRowData }) {
             title="Put this task back in the queue (as needs-input)"
           >
             Restore
+          </button>
+        ) : null}
+        {row.canUnmark ? (
+          <button
+            type="button"
+            className="btn btn--quiet btn--sm tr-reveal"
+            disabled={busy}
+            onClick={() =>
+              runMove(
+                unmarkApplied,
+                'Back in "Waiting on you"',
+                'Un-mark failed — could not reach the server.',
+              )
+            }
+            title={`"Mark applied" was a mistake — moves this back to "Waiting on you" (needs-input)`}
+          >
+            Un-mark applied
           </button>
         ) : null}
         {MARKABLE.has(row.state) ? (

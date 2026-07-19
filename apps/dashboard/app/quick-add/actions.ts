@@ -17,7 +17,12 @@ import type { ActionResult } from '../tasks/[id]/actions';
 /** Mirrors the api's POST /ingest/paste cap. */
 const PASTE_MAX_CHARS = 50_000;
 
-const taskPrioritySchema = z.union([z.literal(-1), z.literal(0), z.literal(1)]);
+const taskPrioritySchema = z.union([
+  z.literal(-1),
+  z.literal(0),
+  z.literal(1),
+  z.literal(2),
+]);
 const manualAddSchema = z.object({
   company: z.string().trim().min(1).max(200),
   title: z.string().trim().min(1).max(300).optional(),

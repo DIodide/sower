@@ -3,7 +3,10 @@
 // Compact priority stepper shared by the Applications rows and the task
 // detail header: ▼ lowers, ▲ raises — one click is one step in an obvious
 // direction — with a micro level indicator between them ("High"/"Low";
-// Normal stays visually quiet as an en dash). Writes are optimistic and
+// Normal stays visually quiet as an en dash, and the top "Highest" level
+// renders as a filled danger-toned chip so it reads stronger than High's
+// amber at a glance). ▲ from High reaches Highest and is disabled there.
+// Writes are optimistic and
 // coalesced: rapid clicks debounce into ONE absolute write of the final
 // value; a stale failure rolls back to the last server-confirmed value and
 // never clobbers a newer choice. `onError` routes failures to the caller's
@@ -12,11 +15,13 @@
 import { TASK_PRIORITY_LABELS, type TaskPriority } from '@sower/core';
 import { useEffect, useRef, useState } from 'react';
 import { updateTaskMeta } from '../app/tasks/[id]/actions';
+import { PRIORITY_MAX, PRIORITY_MIN, stepPriority } from './priority';
 
 /** Rapid stepper clicks coalesce into one absolute write of the latest value. */
 const PRIORITY_DEBOUNCE_MS = 400;
 
 const LEVEL_CLASS: Record<TaskPriority, string> = {
+  2: 'pri-level--highest',
   1: 'pri-level--high',
   0: 'pri-level--normal',
   [-1]: 'pri-level--low',
@@ -76,8 +81,10 @@ export function PriorityControl({
   };
 
   const step = (direction: 1 | -1) => {
-    // In-bounds by construction: the button at each end is disabled.
-    const next = (priority + direction) as TaskPriority;
+    // In-bounds by construction: the button at each end is disabled (and
+    // stepPriority clamps at the stops regardless).
+    const next = stepPriority(priority, direction);
+    if (next === priority) return;
     const seq = ++seqRef.current;
     setPriority(next);
     setInlineError(null);
@@ -117,7 +124,7 @@ export function PriorityControl({
       <button
         type="button"
         className="pri-step"
-        disabled={disabled || priority === -1}
+        disabled={disabled || priority === PRIORITY_MIN}
         onClick={() => step(-1)}
         aria-label="Lower priority"
         title="Lower priority"
@@ -134,7 +141,7 @@ export function PriorityControl({
       <button
         type="button"
         className="pri-step"
-        disabled={disabled || priority === 1}
+        disabled={disabled || priority === PRIORITY_MAX}
         onClick={() => step(1)}
         aria-label="Raise priority"
         title="Raise priority"

@@ -5,6 +5,7 @@ import {
   type JobSpec,
   type Platform,
   type TaskPriority,
+  type TaskState,
 } from '@sower/core';
 import {
   apiCalls,
@@ -16,7 +17,7 @@ import {
   type Job,
   jobs,
 } from '@sower/db';
-import { and, asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { registerAnswerLibraryRoutes } from './answer-library.js';
@@ -60,19 +61,73 @@ const processBodySchema = z.object({
 /** Notes cap — mirrors the dashboard's 20k text-answer cap; above it → 400. */
 const NOTES_MAX_CHARS = 20_000;
 
-// @sower/core TaskPriority: 1=high, 0=normal, -1=low.
-const prioritySchema = z.union([z.literal(-1), z.literal(0), z.literal(1)]);
+// @sower/core TaskPriority: 2=highest, 1=high, 0=normal, -1=low.
+const prioritySchema = z.union([
+  z.literal(-1),
+  z.literal(0),
+  z.literal(1),
+  z.literal(2),
+]);
 
-// PATCH-style: only provided fields are written. notes: null clears the note;
-// at least one field must be present (an empty body is a 400, not a no-op).
+// The user's own due date: an ISO date ("2026-07-30", the native date-input
+// form) or full ISO timestamp. Must parse — an unparseable string is a 400,
+// never a silently-dropped write.
+const dueDateSchema = z
+  .string()
+  .trim()
+  .max(64)
+  .refine((value) => !Number.isNaN(Date.parse(value)), {
+    message: 'dueDate must be a parseable ISO date',
+  });
+
+// PATCH-style: only provided fields are written. notes: null clears the note,
+// dueDate: null clears the user's due date; at least one field must be
+// present (an empty body is a 400, not a no-op).
 const taskMetaBodySchema = z
   .object({
     notes: z.string().max(NOTES_MAX_CHARS).nullable().optional(),
     priority: prioritySchema.optional(),
+    dueDate: dueDateSchema.nullable().optional(),
   })
-  .refine((body) => body.notes !== undefined || body.priority !== undefined, {
-    message: 'provide at least one of notes, priority',
-  });
+  .refine(
+    (body) =>
+      body.notes !== undefined ||
+      body.priority !== undefined ||
+      body.dueDate !== undefined,
+    {
+      message: 'provide at least one of notes, priority, dueDate',
+    },
+  );
+
+// Drag-and-drop reorder within "Waiting on you": at least one neighbor id
+// (beforeTaskId = the row that will sit immediately ABOVE the moved task,
+// afterTaskId = immediately BELOW). The server computes the rank — clients
+// never send positions.
+const reorderBodySchema = z
+  .object({
+    beforeTaskId: z.string().uuid().optional(),
+    afterTaskId: z.string().uuid().optional(),
+  })
+  .refine(
+    (body) => body.beforeTaskId !== undefined || body.afterTaskId !== undefined,
+    { message: 'provide at least one of beforeTaskId, afterTaskId' },
+  );
+
+/** The dashboard's "Waiting on you" section — the only manually orderable
+ *  one, and the only states POST /tasks/:id/reorder accepts. */
+const WAITING_STATES: readonly TaskState[] = [
+  'NEEDS_INPUT',
+  'REVIEW',
+  'AWAITING_OTP',
+];
+
+/** Base spacing between assigned sort ranks: leaves ~10 halvings of headroom
+ *  between any two neighbors before a resequence is needed. */
+const RANK_GAP = 1024;
+
+/** A midpoint closer than this to either neighbor is a collision — the
+ *  section's ranks are resequenced to RANK_GAP-spaced integers first. */
+const RANK_EPSILON = 1e-6;
 
 // The dashboard quick-add paste box (free text; urls are extracted from it).
 // 50k comfortably fits a whole job-links email; the dashboard action mirrors
@@ -635,12 +690,12 @@ export function buildServer(deps: Deps): FastifyInstance {
     return reply.code(200).send({ ok: true, discarded, skipped });
   });
 
-  // User-facing task metadata (notes + priority), PATCH-style over POST: only
-  // the provided fields are written (notes: null clears the note). No events
-  // row — note edits are chatty user annotations, not pipeline state. For the
-  // same reason updatedAt is left alone: annotating a task is not activity,
-  // and touching it would re-sort the dashboard's recency-ordered lists under
-  // the user's hands.
+  // User-facing task metadata (notes + priority + the user's own due date),
+  // PATCH-style over POST: only the provided fields are written (notes/
+  // dueDate: null clears). No events row — these are chatty user
+  // annotations, not pipeline state. For the same reason updatedAt is left
+  // alone: annotating a task is not activity, and touching it would re-sort
+  // the dashboard's recency-ordered lists under the user's hands.
   app.post('/tasks/:id/meta', async (request, reply) => {
     const params = taskParamsSchema.safeParse(request.params);
     if (!params.success) {
@@ -656,27 +711,226 @@ export function buildServer(deps: Deps): FastifyInstance {
     }
     const taskId = params.data.id;
     const rows = await deps.db
-      .select({ id: applicationTasks.id })
+      .select({
+        id: applicationTasks.id,
+        sortRank: applicationTasks.sortRank,
+      })
       .from(applicationTasks)
       .where(eq(applicationTasks.id, taskId))
       .limit(1);
-    if (!rows[0]) {
+    const row = rows[0];
+    if (!row) {
       return reply.code(404).send({ error: 'task not found' });
     }
     const set: {
       notes?: string | null;
       priority?: TaskPriority;
+      sortRank?: null;
+      dueDate?: Date | null;
     } = {};
     if (body.data.notes !== undefined) {
       set.notes = body.data.notes;
     }
     if (body.data.priority !== undefined) {
       set.priority = body.data.priority;
+      // The user's rule: choosing a priority declares "sort me by priority
+      // again" — a manual drag rank on this task is cleared in the SAME
+      // write, so the row immediately rejoins the priority-ordered block.
+      if (row.sortRank !== null && row.sortRank !== undefined) {
+        set.sortRank = null;
+      }
+    }
+    if (body.data.dueDate !== undefined) {
+      // Normalize plain dates to UTC midnight (deadlineFromIsoDate — the
+      // same form jobs.deadline uses) so both render identically; a full
+      // ISO timestamp is stored as sent.
+      set.dueDate =
+        body.data.dueDate === null
+          ? null
+          : new Date(
+              deadlineFromIsoDate(body.data.dueDate) ?? body.data.dueDate,
+            );
     }
     await deps.db
       .update(applicationTasks)
       .set(set)
       .where(eq(applicationTasks.id, taskId));
+    return reply.code(200).send({ ok: true });
+  });
+
+  // Drag-and-drop reorder within the dashboard's "Waiting on you" section.
+  // The server owns the rank scheme: the moved task's sort_rank becomes the
+  // midpoint of its two neighbors' ranks (± RANK_GAP at the ends). Unranked
+  // neighbors get ranks lazily — when a reorder touches one (or a midpoint
+  // would collide within RANK_EPSILON), the whole section is resequenced to
+  // RANK_GAP-spaced integers in its CURRENT display order first, so the
+  // computed rank always lands exactly where the user dropped the row.
+  // 409 when the task isn't in a Waiting-on-you state — other sections have
+  // no manual order.
+  app.post('/tasks/:id/reorder', async (request, reply) => {
+    const params = taskParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid task id', issues: params.error.issues });
+    }
+    const body = reorderBodySchema.safeParse(request.body);
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid body', issues: body.error.issues });
+    }
+    const taskId = params.data.id;
+    const { beforeTaskId, afterTaskId } = body.data;
+    if (
+      beforeTaskId === taskId ||
+      afterTaskId === taskId ||
+      (beforeTaskId !== undefined && beforeTaskId === afterTaskId)
+    ) {
+      return reply
+        .code(400)
+        .send({ error: 'beforeTaskId/afterTaskId must be two OTHER tasks' });
+    }
+    const rows = await deps.db
+      .select({ state: applicationTasks.state })
+      .from(applicationTasks)
+      .where(eq(applicationTasks.id, taskId))
+      .limit(1);
+    const row = rows[0];
+    if (!row) {
+      return reply.code(404).send({ error: 'task not found' });
+    }
+    if (!WAITING_STATES.includes(row.state)) {
+      return reply.code(409).send({
+        error: `cannot reorder a task in state '${row.state}' — only "Waiting on you" tasks have a manual order`,
+      });
+    }
+    // The section in its CURRENT display order — exactly the ORDER BY the
+    // dashboard page uses: ranked rows first (sort_rank asc), then the
+    // unranked block by priority desc / updatedAt desc.
+    const section = await deps.db
+      .select({
+        id: applicationTasks.id,
+        sortRank: applicationTasks.sortRank,
+      })
+      .from(applicationTasks)
+      .where(inArray(applicationTasks.state, [...WAITING_STATES]))
+      .orderBy(
+        sql`${applicationTasks.sortRank} asc nulls last`,
+        desc(applicationTasks.priority),
+        desc(applicationTasks.updatedAt),
+      );
+    const others = section.filter((r) => r.id !== taskId);
+    const before =
+      beforeTaskId !== undefined
+        ? others.find((r) => r.id === beforeTaskId)
+        : undefined;
+    const after =
+      afterTaskId !== undefined
+        ? others.find((r) => r.id === afterTaskId)
+        : undefined;
+    if (
+      (beforeTaskId !== undefined && before === undefined) ||
+      (afterTaskId !== undefined && after === undefined)
+    ) {
+      return reply.code(400).send({
+        error: 'neighbor task is not in the "Waiting on you" section',
+      });
+    }
+
+    // Effective rank per row. A resequence is needed when a named neighbor
+    // has no rank yet (its position exists only via the priority sort) or
+    // when the neighbors' ranks are too close for a distinct midpoint.
+    const needsResequence =
+      (before !== undefined && before.sortRank === null) ||
+      (after !== undefined && after.sortRank === null) ||
+      (before?.sortRank != null &&
+        after?.sortRank != null &&
+        Math.abs(before.sortRank - after.sortRank) < 2 * RANK_EPSILON);
+    const rankOf = new Map<string, number>();
+    if (needsResequence) {
+      others.forEach((r, i) => {
+        rankOf.set(r.id, (i + 1) * RANK_GAP);
+      });
+      for (const r of others) {
+        const next = rankOf.get(r.id);
+        if (next !== undefined && next !== r.sortRank) {
+          await deps.db
+            .update(applicationTasks)
+            .set({ sortRank: next })
+            .where(eq(applicationTasks.id, r.id));
+        }
+      }
+    } else {
+      for (const r of others) {
+        if (r.sortRank !== null) rankOf.set(r.id, r.sortRank);
+      }
+    }
+    const beforeRank = before ? rankOf.get(before.id) : undefined;
+    const afterRank = after ? rankOf.get(after.id) : undefined;
+    const sortRank =
+      beforeRank !== undefined && afterRank !== undefined
+        ? (beforeRank + afterRank) / 2
+        : beforeRank !== undefined
+          ? beforeRank + RANK_GAP
+          : (afterRank as number) - RANK_GAP;
+    // Like notes/priority, a reorder is an annotation: updatedAt is left
+    // alone so the unranked block's recency order never shifts under it.
+    await deps.db
+      .update(applicationTasks)
+      .set({ sortRank })
+      .where(eq(applicationTasks.id, taskId));
+    return reply.code(200).send({ ok: true, sortRank });
+  });
+
+  // Un-mark applied: undo of a mistaken out-of-band "Mark applied". Allowed
+  // ONLY when the task is SUBMITTED via MARK_SUBMITTED — the most recent
+  // event that entered SUBMITTED must be MARK_SUBMITTED, not a real
+  // SUBMIT_OK (an application sower actually sent cannot be taken back).
+  // Lands in NEEDS_INPUT, like RESTORE: a human decides what happens next.
+  app.post('/tasks/:id/unmark-applied', async (request, reply) => {
+    const params = taskParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid task id', issues: params.error.issues });
+    }
+    const taskId = params.data.id;
+    const rows = await deps.db
+      .select({ state: applicationTasks.state })
+      .from(applicationTasks)
+      .where(eq(applicationTasks.id, taskId))
+      .limit(1);
+    const row = rows[0];
+    if (!row) {
+      return reply.code(404).send({ error: 'task not found' });
+    }
+    if (row.state !== 'SUBMITTED') {
+      return reply
+        .code(409)
+        .send({ error: `cannot un-mark a task in state '${row.state}'` });
+    }
+    // The most recent event that ENTERED SUBMITTED decides: MARK_SUBMITTED
+    // (out of band) is reversible; SUBMIT_OK (sower submitted) is not. A
+    // SUBMITTED task with no recorded entering event proves nothing, so it
+    // is refused the same way.
+    const entering = await deps.db
+      .select({ type: events.type })
+      .from(events)
+      .where(and(eq(events.taskId, taskId), eq(events.toState, 'SUBMITTED')))
+      .orderBy(desc(events.createdAt))
+      .limit(1);
+    if (entering[0]?.type !== 'MARK_SUBMITTED') {
+      return reply.code(409).send({
+        error:
+          "this application was submitted by sower — it can't be un-marked",
+      });
+    }
+    await transitionTask(deps.db, taskId, row.state, 'UNMARK_SUBMITTED', {
+      reason: 'manual',
+    });
+    // Best-effort: the reply line for this task leaves "applied".
+    await refreshIngestReply(deps, taskId);
     return reply.code(200).send({ ok: true });
   });
 

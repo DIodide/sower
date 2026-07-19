@@ -24,6 +24,8 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import type { ReactNode } from 'react';
 import { getDb } from '../../../lib/db';
+import { pickDeadline, toDateInputValue } from '../../../lib/deadline';
+import { DueDateControl } from '../../../lib/due-date-control';
 import {
   eventLabel,
   formatDeadline,
@@ -57,6 +59,19 @@ const UUID_RE =
 
 const CALL_GRID_COLUMNS =
   '2.5rem 6.5rem 3.5rem minmax(10rem, 1fr) 3.5rem 5rem 4.5rem';
+
+/** States where the user can still set their own due date (the same rows the
+ *  home page makes the ⏰ chip interactive on: waiting + incoming). */
+const DUE_EDITABLE_STATES = new Set<string>([
+  'INGESTED',
+  'PARSED',
+  'QUEUED',
+  'PREPARING',
+  'FILLING',
+  'NEEDS_INPUT',
+  'REVIEW',
+  'AWAITING_OTP',
+]);
 
 /** Pipeline positions for the stepper (FAILED/DUPLICATE render no stepper). */
 const STEPS: { label: string; states: TaskState[] }[] = [
@@ -269,6 +284,7 @@ function NextStep({
   session,
   tenant,
   discard,
+  canUnmark,
 }: {
   task: { id: string; state: string; lastError: string | null };
   requiredMissing: number;
@@ -282,6 +298,8 @@ function NextStep({
   /** The latest DISCARD event: was it the auto rule, and its "why" note
    *  (DISCARDED tasks only). */
   discard?: { auto: boolean; note: string | null } | null;
+  /** SUBMITTED via an out-of-band "Mark applied" — offer the undo. */
+  canUnmark?: boolean;
 }) {
   switch (task.state) {
     case 'NEEDS_INPUT': {
@@ -412,12 +430,19 @@ function NextStep({
     case 'CONFIRMED':
       return (
         <div className="banner banner--success">
-          <p>
-            <strong>
-              {task.state === 'CONFIRMED' ? 'Confirmed.' : 'Submitted.'}
-            </strong>{' '}
-            Nothing left to do here — the full payload and history are below.
-          </p>
+          <div style={{ flex: '1 1 20rem' }}>
+            <p style={{ marginBottom: canUnmark ? '0.625rem' : 0 }}>
+              <strong>
+                {task.state === 'CONFIRMED' ? 'Confirmed.' : 'Submitted.'}
+              </strong>{' '}
+              Nothing left to do here — the full payload and history are below.
+            </p>
+            {/* Out-of-band marks only: an application sower actually
+                submitted can never be un-marked (the api enforces it too). */}
+            {canUnmark ? (
+              <TaskActions taskId={task.id} mode="unmark-applied" />
+            ) : null}
+          </div>
         </div>
       );
     case 'DUPLICATE':
@@ -562,11 +587,15 @@ export default async function TaskPage({
       ? `${location} · ${locationType}`
       : location
     : locationType;
-  // First-class deadline: the jobs column is authoritative; the spec's value
-  // covers the window before a process run persisted it.
-  const deadlineDate =
+  // Deadline cell: the USER'S own due date wins over the posting's parsed
+  // deadline (jobs column first, then the spec's value for the window before
+  // a process run persisted it). Editing sets the USER date only —
+  // jobs.deadline is never overwritten.
+  const postingDeadline =
     job?.deadline ?? (spec?.deadline ? new Date(spec.deadline) : null);
-  const deadlineSoon = isDeadlineSoon(deadlineDate);
+  const pickedDeadline = pickDeadline(task.dueDate, postingDeadline);
+  const postingOnly = pickDeadline(null, postingDeadline);
+  const dueEditable = DUE_EDITABLE_STATES.has(task.state);
   // Workday parks account-required until a browser session is captured; that
   // NEEDS_INPUT is a "capture a session" state, not an "answer questions" one.
   const needsSession =
@@ -645,6 +674,15 @@ export default async function TaskPage({
           };
         })()
       : null;
+
+  // "Un-mark applied" gate: SUBMITTED tasks whose latest SUBMITTED-entering
+  // event is the out-of-band MARK_SUBMITTED — a real SUBMIT_OK can't be
+  // taken back (the api enforces the same rule with a 409). Events are
+  // ordered ascending, so scan from the end.
+  const canUnmark =
+    task.state === 'SUBMITTED' &&
+    [...eventRows].reverse().find((e) => e.toState === 'SUBMITTED')?.type ===
+      'MARK_SUBMITTED';
 
   return (
     <div>
@@ -747,17 +785,35 @@ export default async function TaskPage({
             )}
           </MetaItem>
           <MetaItem label="Source">{job?.source ?? '—'}</MetaItem>
-          {/* Application deadline — red-tinted inside 7 days, faint
-              otherwise; absent for the (many) postings that state none. */}
-          {deadlineDate && !Number.isNaN(deadlineDate.getTime()) ? (
+          {/* Deadline — the user's own due date (editable while the task is
+              actionable) over the posting's parsed value (shown faintly when
+              no user date); red-tinted inside 7 days. Absent only when the
+              task is no longer actionable AND no date exists. */}
+          {dueEditable || pickedDeadline ? (
             <MetaItem label="Deadline">
-              <span
-                className={deadlineSoon ? undefined : 'faint'}
-                style={deadlineSoon ? { color: 'var(--danger-fg)' } : undefined}
-              >
-                {formatDeadline(deadlineDate)}
-                <span className="faint"> · {relativeTime(deadlineDate)}</span>
-              </span>
+              <DueDateControl
+                taskId={task.id}
+                variant="cell"
+                editable={dueEditable}
+                display={
+                  pickedDeadline
+                    ? {
+                        label: `${formatDeadline(pickedDeadline.date)} · ${relativeTime(pickedDeadline.date)}`,
+                        soon: isDeadlineSoon(pickedDeadline.date),
+                        kind: pickedDeadline.kind,
+                      }
+                    : null
+                }
+                dueDateISO={toDateInputValue(task.dueDate)}
+                fallback={
+                  postingOnly
+                    ? {
+                        label: `${formatDeadline(postingOnly.date)} · ${relativeTime(postingOnly.date)}`,
+                        soon: isDeadlineSoon(postingOnly.date),
+                      }
+                    : null
+                }
+              />
             </MetaItem>
           ) : null}
           {/* Job facts from the spec — absent fields render no cell at all. */}
@@ -836,7 +892,23 @@ export default async function TaskPage({
         session={sessionRow}
         tenant={job?.tenant}
         discard={discard}
+        canUnmark={canUnmark}
       />
+
+      {/* ---- job description — up top, right under the ask: it's what the
+           user reads while answering. Collapsible; open by default for
+           NEEDS_INPUT/REVIEW (defaultOpen). ---- */}
+      {latestDescription ? (
+        <JobDescriptionPanel
+          content={latestDescription.content}
+          version={latestDescription.version}
+          fetchedAt={latestDescription.fetchedAt}
+          versionCount={descriptionRows.length}
+          defaultOpen={task.state === 'NEEDS_INPUT' || task.state === 'REVIEW'}
+        />
+      ) : (
+        <Empty>No job description captured for this posting yet.</Empty>
+      )}
 
       {/* ---- ingested screenshots (manual triage source) ---- */}
       {screenshotDocs.length > 0 ? (
@@ -965,22 +1037,8 @@ export default async function TaskPage({
         )}
       </section>
 
-      {/* ---- secondary: description, history, network ---- */}
+      {/* ---- secondary: history, network ---- */}
       <SectionHeading>Details</SectionHeading>
-
-      {latestDescription ? (
-        <JobDescriptionPanel
-          content={latestDescription.content}
-          version={latestDescription.version}
-          fetchedAt={latestDescription.fetchedAt}
-          versionCount={descriptionRows.length}
-          // Waiting-on-you states: the description is read while answering,
-          // so it starts open instead of a fold away.
-          defaultOpen={task.state === 'NEEDS_INPUT' || task.state === 'REVIEW'}
-        />
-      ) : (
-        <Empty>No job description captured for this posting yet.</Empty>
-      )}
 
       <details className="panel">
         <summary>

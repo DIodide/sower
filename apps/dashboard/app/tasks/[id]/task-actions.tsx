@@ -10,6 +10,7 @@ import {
   requeueTask,
   restoreTask,
   startSessionCapture,
+  unmarkApplied,
   verifyDiscoveredForm,
 } from './actions';
 
@@ -20,7 +21,8 @@ type Mode =
   | 'verify'
   | 'discard'
   | 'restore'
-  | 'mark-applied';
+  | 'mark-applied'
+  | 'unmark-applied';
 
 const LABELS: Record<Mode, { idle: string; className: string; title: string }> =
   {
@@ -65,6 +67,12 @@ const LABELS: Record<Mode, { idle: string; className: string; title: string }> =
       title:
         'Records that you completed this application yourself, outside sower — the task moves to Sent and nothing will run for it anymore',
     },
+    'unmark-applied': {
+      idle: 'Un-mark applied',
+      className: 'btn',
+      title:
+        '"Mark applied" was a mistake — moves this task back to "Waiting on you" (needs-input); only out-of-band marks can be undone, never a real sower submission',
+    },
   };
 
 /** Modes carrying an optional free-text note on the same row as the button. */
@@ -84,6 +92,7 @@ export function TaskActions({ taskId, mode }: { taskId: string; mode: Mode }) {
       if (mode === 'start') return startSessionCapture(taskId);
       if (mode === 'verify') return verifyDiscoveredForm(taskId);
       if (mode === 'restore') return restoreTask(taskId);
+      if (mode === 'unmark-applied') return unmarkApplied(taskId);
       if (mode === 'discard' || mode === 'mark-applied') {
         // The optional note typed next to the button — empty is fine.
         const note = formData.get('note');

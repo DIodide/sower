@@ -41,6 +41,7 @@ const ALL_EVENTS: TaskEvent[] = [
   'DISCARD',
   'RESTORE',
   'MARK_SUBMITTED',
+  'UNMARK_SUBMITTED',
 ];
 
 /** Every state a task may be DISCARDed from (all non-terminal states except
@@ -92,6 +93,7 @@ const VALID_TRANSITIONS: Array<[TaskState, TaskEvent, TaskState]> = [
     'SUBMITTED',
   ]),
   ['DISCARDED', 'RESTORE', 'NEEDS_INPUT'],
+  ['SUBMITTED', 'UNMARK_SUBMITTED', 'NEEDS_INPUT'],
 ];
 
 function isValid(state: TaskState, event: TaskEvent): boolean {
@@ -223,6 +225,28 @@ describe('transition', () => {
     for (const state of ALL_STATES) {
       expect(canTransition(state, 'RESTORE')).toBe(state === 'DISCARDED');
     }
+  });
+
+  it('supports UNMARK_SUBMITTED (un-mark applied) from SUBMITTED back to NEEDS_INPUT', () => {
+    expect(transition('SUBMITTED', 'UNMARK_SUBMITTED')).toBe('NEEDS_INPUT');
+    // Round trip: a mis-clicked "Mark applied" is fully reversible.
+    expect(
+      transition(
+        transition('NEEDS_INPUT', 'MARK_SUBMITTED'),
+        'UNMARK_SUBMITTED',
+      ),
+    ).toBe('NEEDS_INPUT');
+  });
+
+  it('UNMARK_SUBMITTED is valid from SUBMITTED only (CONFIRMED stays terminal)', () => {
+    for (const state of ALL_STATES) {
+      expect(canTransition(state, 'UNMARK_SUBMITTED')).toBe(
+        state === 'SUBMITTED',
+      );
+    }
+    expect(() => transition('CONFIRMED', 'UNMARK_SUBMITTED')).toThrow(
+      InvalidTransitionError,
+    );
   });
 });
 
