@@ -1,5 +1,10 @@
-import { timingSafeEqual } from 'node:crypto';
-import { canTransition, type JobSpec, type Platform } from '@sower/core';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
+import {
+  canTransition,
+  type JobSpec,
+  type Platform,
+  type TaskPriority,
+} from '@sower/core';
 import {
   apiCalls,
   applicationTasks,
@@ -15,7 +20,11 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { registerAnswerLibraryRoutes } from './answer-library.js';
 import { markApprovalCardSubmitted, registerDiscordRoutes } from './discord.js';
-import { runDiscordIngestPoll } from './discord-ingest.js';
+import {
+  ingestMessageLinks,
+  runDiscordIngestPoll,
+  type UrlOutcome,
+} from './discord-ingest.js';
 import { ingestJob } from './ingest.js';
 import { runIngestionPoll } from './ingest-poll.js';
 import { refreshIngestReply } from './ingest-reply.js';
@@ -41,6 +50,90 @@ const ingestBodySchema = z.object({
 const processBodySchema = z.object({
   taskId: z.string().uuid(),
 });
+
+/** Notes cap — mirrors the dashboard's 20k text-answer cap; above it → 400. */
+const NOTES_MAX_CHARS = 20_000;
+
+// @sower/core TaskPriority: 1=high, 0=normal, -1=low.
+const prioritySchema = z.union([z.literal(-1), z.literal(0), z.literal(1)]);
+
+// PATCH-style: only provided fields are written. notes: null clears the note;
+// at least one field must be present (an empty body is a 400, not a no-op).
+const taskMetaBodySchema = z
+  .object({
+    notes: z.string().max(NOTES_MAX_CHARS).nullable().optional(),
+    priority: prioritySchema.optional(),
+  })
+  .refine((body) => body.notes !== undefined || body.priority !== undefined, {
+    message: 'provide at least one of notes, priority',
+  });
+
+// The dashboard quick-add paste box (free text; urls are extracted from it).
+const pasteBodySchema = z.object({
+  text: z.string().min(1).max(10_000),
+});
+
+// Manual entry without a URL: company is the one required handle.
+const manualIngestBodySchema = z.object({
+  company: z.string().trim().min(1).max(200),
+  title: z.string().trim().min(1).max(300).optional(),
+  notes: z.string().max(NOTES_MAX_CHARS).optional(),
+  priority: prioritySchema.optional(),
+});
+
+/**
+ * Per-URL outcome simplified for the dashboard paste box: the classifier's
+ * discriminated union collapsed to one flat shape the UI can render as rows.
+ */
+interface PasteOutcome {
+  url: string;
+  kind: UrlOutcome['kind'];
+  taskId?: string;
+  platform?: string;
+  error?: string;
+}
+
+function simplifyOutcome(outcome: UrlOutcome): PasteOutcome {
+  switch (outcome.kind) {
+    case 'ingested':
+      return {
+        url: outcome.url,
+        kind: 'ingested',
+        taskId: outcome.taskId,
+        platform: outcome.platform,
+      };
+    case 'duplicate':
+      return {
+        url: outcome.url,
+        kind: 'duplicate',
+        taskId: outcome.taskId ?? undefined,
+      };
+    case 'unsupported':
+      return { url: outcome.url, kind: 'unsupported', taskId: outcome.taskId };
+    case 'directory':
+      return { url: outcome.url, kind: 'directory' };
+    case 'error':
+      return { url: outcome.url, kind: 'error', error: outcome.error };
+  }
+}
+
+/**
+ * Flatten the outcome tree one level: each directory contributes its own row
+ * followed by its children's rows (children never nest further — directory
+ * expansion stops at depth 1, see classifyAndIngest).
+ */
+function flattenOutcomes(outcomes: UrlOutcome[]): PasteOutcome[] {
+  const flat: PasteOutcome[] = [];
+  for (const outcome of outcomes) {
+    flat.push(simplifyOutcome(outcome));
+    if (outcome.kind === 'directory') {
+      for (const child of outcome.children) {
+        flat.push(simplifyOutcome(child));
+      }
+    }
+  }
+  return flat;
+}
 
 const taskParamsSchema = z.object({
   id: z.string().uuid(),
@@ -354,6 +447,44 @@ export function buildServer(deps: Deps): FastifyInstance {
     return reply.code(200).send({ ok: true });
   });
 
+  // Restore a discarded task (the Archive's Restore / an undo after a
+  // mis-click). Lands in NEEDS_INPUT — a human decides what happens next.
+  // Idempotent-friendly: restoring a task that is not DISCARDED is a 409
+  // unless it's NEEDS_INPUT (the state RESTORE produces), which is a 200
+  // no-op so a double-clicked undo never errors.
+  app.post('/tasks/:id/restore', async (request, reply) => {
+    const parsed = taskParamsSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid task id', issues: parsed.error.issues });
+    }
+    const taskId = parsed.data.id;
+    const rows = await deps.db
+      .select({ state: applicationTasks.state })
+      .from(applicationTasks)
+      .where(eq(applicationTasks.id, taskId))
+      .limit(1);
+    const row = rows[0];
+    if (!row) {
+      return reply.code(404).send({ error: 'task not found' });
+    }
+    if (row.state === 'NEEDS_INPUT') {
+      return reply.code(200).send({ ok: true });
+    }
+    if (row.state !== 'DISCARDED') {
+      return reply
+        .code(409)
+        .send({ error: `cannot restore a task in state '${row.state}'` });
+    }
+    await transitionTask(deps.db, taskId, row.state, 'RESTORE', {
+      reason: 'manual',
+    });
+    // Best-effort: the reply line for this task leaves "discarded".
+    await refreshIngestReply(deps, taskId);
+    return reply.code(200).send({ ok: true });
+  });
+
   // Bulk discard (the Queue page's checkbox form). Per-task tolerant: a
   // missing or undiscardable task lands in `skipped` with a reason and never
   // fails the batch. refreshIngestReply is cheap and idempotent, so it simply
@@ -403,6 +534,49 @@ export function buildServer(deps: Deps): FastifyInstance {
       }
     }
     return reply.code(200).send({ ok: true, discarded, skipped });
+  });
+
+  // User-facing task metadata (notes + priority), PATCH-style over POST: only
+  // the provided fields are written (notes: null clears the note). No events
+  // row — note edits are chatty user annotations, not pipeline state.
+  app.post('/tasks/:id/meta', async (request, reply) => {
+    const params = taskParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid task id', issues: params.error.issues });
+    }
+    const body = taskMetaBodySchema.safeParse(request.body);
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid body', issues: body.error.issues });
+    }
+    const taskId = params.data.id;
+    const rows = await deps.db
+      .select({ id: applicationTasks.id })
+      .from(applicationTasks)
+      .where(eq(applicationTasks.id, taskId))
+      .limit(1);
+    if (!rows[0]) {
+      return reply.code(404).send({ error: 'task not found' });
+    }
+    const set: {
+      updatedAt: Date;
+      notes?: string | null;
+      priority?: TaskPriority;
+    } = { updatedAt: new Date() };
+    if (body.data.notes !== undefined) {
+      set.notes = body.data.notes;
+    }
+    if (body.data.priority !== undefined) {
+      set.priority = body.data.priority;
+    }
+    await deps.db
+      .update(applicationTasks)
+      .set(set)
+      .where(eq(applicationTasks.id, taskId));
+    return reply.code(200).send({ ok: true });
   });
 
   // Manually start the browser agent (Tier-2 form-discovery investigation) on
@@ -800,6 +974,77 @@ export function buildServer(deps: Deps): FastifyInstance {
       taskId: result.taskId,
       state: result.state,
     });
+  });
+
+  // Dashboard quick-add paste box: run the same ingress-agnostic classifier
+  // the Discord #ingest poll uses (shim-unwrap, pre-resolve detect, dedupe,
+  // directory expansion, unsupported parking + investigation, never-drop) over
+  // a pasted text blob, with jobs.source stamped 'manual'. Text with no URLs
+  // is a 200 with zeros — the UI messages it, it is not an error.
+  app.post('/ingest/paste', async (request, reply) => {
+    const parsed = pasteBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid body', issues: parsed.error.issues });
+    }
+    const summary = await ingestMessageLinks(deps, parsed.data.text, 'manual');
+    return reply.code(200).send({
+      ok: true,
+      urls: summary.urls,
+      ingested: summary.ingested,
+      duplicates: summary.duplicates,
+      unsupported: summary.unsupported,
+      directories: summary.directories,
+      errors: summary.errors,
+      outcomes: flattenOutcomes(summary.outcomes),
+    });
+  });
+
+  // Manual entry with NO url (a recruiter conversation, a job seen on paper):
+  // record it under a manual://<uuid> placeholder URL — canonicalizeUrl keeps
+  // non-http schemes intact and detectPlatform reports unknown, so ingestJob
+  // records + parks the task NEEDS_INPUT, which is right: it needs the user.
+  // resolve:false — there is nothing to GET. Notes/priority land on the
+  // freshly created task in the same request.
+  app.post('/ingest/manual', async (request, reply) => {
+    const parsed = manualIngestBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid body', issues: parsed.error.issues });
+    }
+    const result = await ingestJob(deps, {
+      url: `manual://${randomUUID()}`,
+      source: 'manual',
+      resolve: false,
+      company: parsed.data.company,
+      title: parsed.data.title,
+    });
+    if (result.duplicate) {
+      // Unreachable in practice (the uuid is random); surface, never lie.
+      return reply
+        .code(500)
+        .send({ error: 'manual job unexpectedly deduplicated' });
+    }
+    const { notes, priority } = parsed.data;
+    if (notes !== undefined || priority !== undefined) {
+      const set: { updatedAt: Date; notes?: string; priority?: TaskPriority } =
+        { updatedAt: new Date() };
+      if (notes !== undefined) {
+        set.notes = notes;
+      }
+      if (priority !== undefined) {
+        set.priority = priority;
+      }
+      await deps.db
+        .update(applicationTasks)
+        .set(set)
+        .where(eq(applicationTasks.id, result.taskId));
+    }
+    return reply
+      .code(201)
+      .send({ ok: true, taskId: result.taskId, jobId: result.jobId });
   });
 
   app.post('/tasks/process', async (request, reply) => {

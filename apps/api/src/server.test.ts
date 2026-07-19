@@ -1359,6 +1359,101 @@ describe('buildServer', () => {
     });
   });
 
+  describe('POST /tasks/:id/restore', () => {
+    const TASK_ID = '7d8e9f10-1112-4314-a516-b71819c2d2e2';
+
+    function inject(app: ReturnType<typeof buildServer>, id: string = TASK_ID) {
+      return app.inject({
+        method: 'POST',
+        url: `/tasks/${id}/restore`,
+        headers: { 'x-api-key': 'test-key' },
+      });
+    }
+
+    it('restores a DISCARDED task to NEEDS_INPUT with a RESTORE event + refresh', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[{ state: 'DISCARDED' }]],
+        insertResults: [[]], // RESTORE event
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true });
+
+      const taskUpdate = writes.find(
+        (w) => w.method === 'update' && w.table === applicationTasks,
+      );
+      expect(taskUpdate?.arg).toMatchObject({ state: 'NEEDS_INPUT' });
+
+      const restoreEvent = writes
+        .filter((w) => w.method === 'insert' && w.table === events)
+        .map((w) => w.arg as Record<string, unknown>)
+        .find((arg) => arg.type === 'RESTORE');
+      expect(restoreEvent).toMatchObject({
+        taskId: TASK_ID,
+        fromState: 'DISCARDED',
+        toState: 'NEEDS_INPUT',
+        data: { reason: 'manual' },
+      });
+      expect(refreshState.calls).toEqual([TASK_ID]);
+    });
+
+    it('double-clicked undo is safe: NEEDS_INPUT is a 200 no-op', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[{ state: 'NEEDS_INPUT' }]],
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app);
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true });
+      expect(writes).toEqual([]);
+    });
+
+    it('responds 409 for a task that is neither DISCARDED nor NEEDS_INPUT', async () => {
+      for (const state of ['QUEUED', 'SUBMITTED']) {
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({ selectResults: [[{ state }]], writes });
+        const { deps } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app);
+
+        expect(res.statusCode).toBe(409);
+        expect(res.json()).toEqual({
+          error: `cannot restore a task in state '${state}'`,
+        });
+        expect(writes).toEqual([]);
+      }
+    });
+
+    it('responds 404 for a missing task, 400 for an invalid id, 401 without a key', async () => {
+      const { deps } = createDeps(createFakeDb({ selectResults: [[]] }));
+      const app = buildServer(deps);
+
+      const missing = await inject(app);
+      expect(missing.statusCode).toBe(404);
+
+      const invalid = await inject(app, 'not-a-uuid');
+      expect(invalid.statusCode).toBe(400);
+
+      const unauthed = await app.inject({
+        method: 'POST',
+        url: `/tasks/${TASK_ID}/restore`,
+      });
+      expect(unauthed.statusCode).toBe(401);
+    });
+  });
+
   describe('POST /tasks/discard (bulk)', () => {
     const ID_A = '7d8e9f10-1112-4314-a516-b71819c2d2e2';
     const ID_B = 'a1b2c3d4-e5f6-4788-99aa-bbccddeeff00';
@@ -1587,6 +1682,304 @@ describe('buildServer', () => {
       });
       expect(res.statusCode).toBe(401);
       expect(investigateState.calls).toEqual([]);
+    });
+  });
+
+  describe('POST /tasks/:id/meta', () => {
+    const TASK_ID = '7d8e9f10-1112-4314-a516-b71819c2d2e2';
+
+    function inject(
+      app: ReturnType<typeof buildServer>,
+      payload: unknown,
+      id: string = TASK_ID,
+    ) {
+      return app.inject({
+        method: 'POST',
+        url: `/tasks/${id}/meta`,
+        headers: { 'x-api-key': 'test-key' },
+        payload: payload as Record<string, unknown>,
+      });
+    }
+
+    /** Fake db whose first select finds the task; writes are recorded. */
+    function metaDb(writes: DbWrite[]) {
+      return createFakeDb({ selectResults: [[{ id: TASK_ID }]], writes });
+    }
+
+    it('updates notes only (priority untouched)', async () => {
+      const writes: DbWrite[] = [];
+      const { deps } = createDeps(metaDb(writes));
+      const app = buildServer(deps);
+
+      const res = await inject(app, { notes: 'ping recruiter on Friday' });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true });
+      const update = writes.find(
+        (w) => w.method === 'update' && w.table === applicationTasks,
+      );
+      const set = update?.arg as Record<string, unknown>;
+      expect(set.notes).toBe('ping recruiter on Friday');
+      expect(set.updatedAt).toBeInstanceOf(Date);
+      // PATCH semantics: an omitted field is never written.
+      expect('priority' in set).toBe(false);
+      expect('state' in set).toBe(false);
+    });
+
+    it('updates priority only (notes untouched)', async () => {
+      const writes: DbWrite[] = [];
+      const { deps } = createDeps(metaDb(writes));
+      const app = buildServer(deps);
+
+      const res = await inject(app, { priority: 1 });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true });
+      const set = writes.find((w) => w.method === 'update')?.arg as Record<
+        string,
+        unknown
+      >;
+      expect(set.priority).toBe(1);
+      expect('notes' in set).toBe(false);
+    });
+
+    it('updates both fields in one write', async () => {
+      const writes: DbWrite[] = [];
+      const { deps } = createDeps(metaDb(writes));
+      const app = buildServer(deps);
+
+      const res = await inject(app, { notes: 'top choice', priority: -1 });
+
+      expect(res.statusCode).toBe(200);
+      const updates = writes.filter((w) => w.method === 'update');
+      expect(updates).toHaveLength(1);
+      expect(updates[0]?.arg).toMatchObject({
+        notes: 'top choice',
+        priority: -1,
+      });
+    });
+
+    it('notes: null clears the note', async () => {
+      const writes: DbWrite[] = [];
+      const { deps } = createDeps(metaDb(writes));
+      const app = buildServer(deps);
+
+      const res = await inject(app, { notes: null });
+
+      expect(res.statusCode).toBe(200);
+      const set = writes.find((w) => w.method === 'update')?.arg as Record<
+        string,
+        unknown
+      >;
+      expect(set.notes).toBeNull();
+    });
+
+    it('responds 400 for an invalid priority (nothing written)', async () => {
+      for (const priority of [2, -2, 0.5, 'high']) {
+        const writes: DbWrite[] = [];
+        const { deps } = createDeps(metaDb(writes));
+        const app = buildServer(deps);
+
+        const res = await inject(app, { priority });
+
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toMatchObject({ error: 'invalid body' });
+        expect(writes).toEqual([]);
+      }
+    });
+
+    it('responds 400 for an empty body (at least one field required)', async () => {
+      const writes: DbWrite[] = [];
+      const { deps } = createDeps(metaDb(writes));
+      const app = buildServer(deps);
+
+      const res = await inject(app, {});
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ error: 'invalid body' });
+      expect(writes).toEqual([]);
+    });
+
+    it('responds 400 for notes above the 20k cap', async () => {
+      const writes: DbWrite[] = [];
+      const { deps } = createDeps(metaDb(writes));
+      const app = buildServer(deps);
+
+      const res = await inject(app, { notes: 'x'.repeat(20_001) });
+
+      expect(res.statusCode).toBe(400);
+      expect(writes).toEqual([]);
+    });
+
+    it('responds 404 for a missing task and 400 for an invalid id', async () => {
+      const { deps } = createDeps(createFakeDb({ selectResults: [[]] }));
+      const app = buildServer(deps);
+
+      const missing = await inject(app, { priority: 0 });
+      expect(missing.statusCode).toBe(404);
+      expect(missing.json()).toEqual({ error: 'task not found' });
+
+      const invalid = await inject(app, { priority: 0 }, 'not-a-uuid');
+      expect(invalid.statusCode).toBe(400);
+      expect(invalid.json()).toMatchObject({ error: 'invalid task id' });
+    });
+
+    it('responds 401 without an api key (guarded like every route)', async () => {
+      const { deps } = createDeps(createFakeDb());
+      const app = buildServer(deps);
+      const res = await app.inject({
+        method: 'POST',
+        url: `/tasks/${TASK_ID}/meta`,
+        payload: { priority: 1 },
+      });
+      expect(res.statusCode).toBe(401);
+    });
+  });
+
+  describe('POST /ingest/manual (no-url manual entry)', () => {
+    function inject(app: ReturnType<typeof buildServer>, payload: unknown) {
+      return app.inject({
+        method: 'POST',
+        url: '/ingest/manual',
+        headers: { 'x-api-key': 'test-key' },
+        payload: payload as Record<string, unknown>,
+      });
+    }
+
+    it('records the job under manual://<uuid>, parks it NEEDS_INPUT, and applies notes+priority', async () => {
+      // The manual:// placeholder detects as unknown platform (real behavior;
+      // the byUrl map cannot know the random uuid so the default ref applies).
+      platformState.ref = {
+        platform: 'unknown',
+        tenant: null,
+        externalId: null,
+      };
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[]], // canonical-url dup check: fresh
+        insertResults: [
+          [{ id: 'job-m' }],
+          [{ id: 'task-m' }],
+          [], // PARSE_OK event
+          [], // PARK event
+        ],
+        writes,
+      });
+      const { deps, enqueueProcess } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, {
+        company: 'Acme Robotics',
+        title: 'Controls Intern',
+        notes: 'met at the career fair',
+        priority: 1,
+      });
+
+      expect(res.statusCode).toBe(201);
+      expect(res.json()).toEqual({
+        ok: true,
+        taskId: 'task-m',
+        jobId: 'job-m',
+      });
+
+      // The job row: manual:// placeholder URL, source manual, user identity.
+      const jobInsert = writes.find(
+        (w) => w.method === 'insert' && w.table === jobs,
+      );
+      expect(jobInsert?.arg).toMatchObject({
+        source: 'manual',
+        company: 'Acme Robotics',
+        title: 'Controls Intern',
+        platform: 'unknown',
+      });
+      const jobArg = jobInsert?.arg as { url: string; canonicalUrl: string };
+      expect(jobArg.url).toMatch(/^manual:\/\/[0-9a-f-]{36}$/);
+      expect(jobArg.canonicalUrl).toBe(jobArg.url);
+
+      // resolve:false — the placeholder is never GETed.
+      expect(platformState.resolveCalls).toEqual([]);
+
+      // Unknown platform parks (PARK -> NEEDS_INPUT); nothing is enqueued.
+      const parkEvent = writes
+        .filter((w) => w.method === 'insert' && w.table === events)
+        .map((w) => w.arg as Record<string, unknown>)
+        .find((arg) => arg.type === 'PARK');
+      expect(parkEvent).toMatchObject({
+        taskId: 'task-m',
+        toState: 'NEEDS_INPUT',
+      });
+      expect(enqueueProcess).not.toHaveBeenCalled();
+
+      // Notes + priority landed on the freshly parked task.
+      const metaUpdate = writes
+        .filter((w) => w.method === 'update' && w.table === applicationTasks)
+        .map((w) => w.arg as Record<string, unknown>)
+        .find((arg) => 'notes' in arg || 'priority' in arg);
+      expect(metaUpdate).toMatchObject({
+        notes: 'met at the career fair',
+        priority: 1,
+      });
+    });
+
+    it('writes no meta update when notes/priority are omitted', async () => {
+      platformState.ref = {
+        platform: 'unknown',
+        tenant: null,
+        externalId: null,
+      };
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[]],
+        insertResults: [[{ id: 'job-m' }], [{ id: 'task-m' }], [], []],
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, { company: 'Acme Robotics' });
+
+      expect(res.statusCode).toBe(201);
+      expect(res.json()).toEqual({
+        ok: true,
+        taskId: 'task-m',
+        jobId: 'job-m',
+      });
+      const metaUpdates = writes
+        .filter((w) => w.method === 'update' && w.table === applicationTasks)
+        .map((w) => w.arg as Record<string, unknown>)
+        .filter((arg) => 'notes' in arg || 'priority' in arg);
+      expect(metaUpdates).toEqual([]);
+    });
+
+    it('responds 400 for an invalid body (nothing ingested)', async () => {
+      for (const payload of [
+        {},
+        { company: '' },
+        { company: '   ' },
+        { company: 'Acme', priority: 2 },
+        { company: 'Acme', notes: 'x'.repeat(20_001) },
+      ]) {
+        const writes: DbWrite[] = [];
+        const { deps } = createDeps(createFakeDb({ writes }));
+        const app = buildServer(deps);
+
+        const res = await inject(app, payload);
+
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toMatchObject({ error: 'invalid body' });
+        expect(writes).toEqual([]);
+      }
+    });
+
+    it('responds 401 without an api key (guarded like every route)', async () => {
+      const { deps } = createDeps(createFakeDb());
+      const app = buildServer(deps);
+      const res = await app.inject({
+        method: 'POST',
+        url: '/ingest/manual',
+        payload: { company: 'Acme' },
+      });
+      expect(res.statusCode).toBe(401);
     });
   });
 });

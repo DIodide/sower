@@ -39,6 +39,7 @@ const ALL_EVENTS: TaskEvent[] = [
   'FAIL',
   'RETRY',
   'DISCARD',
+  'RESTORE',
 ];
 
 /** Every state a task may be DISCARDed from (all non-terminal states except
@@ -83,6 +84,7 @@ const VALID_TRANSITIONS: Array<[TaskState, TaskEvent, TaskState]> = [
     'DISCARD',
     'DISCARDED',
   ]),
+  ['DISCARDED', 'RESTORE', 'NEEDS_INPUT'],
 ];
 
 function isValid(state: TaskState, event: TaskEvent): boolean {
@@ -177,9 +179,16 @@ describe('transition', () => {
     }
   });
 
-  it('DISCARDED is terminal: no event leaves it', () => {
+  it('DISCARDED allows only RESTORE (back to NEEDS_INPUT)', () => {
     for (const event of ALL_EVENTS) {
-      expect(canTransition('DISCARDED', event)).toBe(false);
+      expect(canTransition('DISCARDED', event)).toBe(event === 'RESTORE');
+    }
+    expect(transition('DISCARDED', 'RESTORE')).toBe('NEEDS_INPUT');
+  });
+
+  it('RESTORE is valid from DISCARDED only', () => {
+    for (const state of ALL_STATES) {
+      expect(canTransition(state, 'RESTORE')).toBe(state === 'DISCARDED');
     }
   });
 });
@@ -201,10 +210,11 @@ describe('ALLOWED table', () => {
     }
   });
 
-  it('terminal states DUPLICATE, CONFIRMED, and DISCARDED have no outbound transitions', () => {
+  it('terminal states DUPLICATE and CONFIRMED have no outbound transitions', () => {
     expect(Object.keys(ALLOWED.DUPLICATE)).toHaveLength(0);
     expect(Object.keys(ALLOWED.CONFIRMED)).toHaveLength(0);
-    expect(Object.keys(ALLOWED.DISCARDED)).toHaveLength(0);
+    // DISCARDED is escapable — but only via RESTORE.
+    expect(Object.keys(ALLOWED.DISCARDED)).toEqual(['RESTORE']);
   });
 
   it('every state except INGESTED is reachable from some transition', () => {

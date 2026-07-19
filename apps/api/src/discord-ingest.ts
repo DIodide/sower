@@ -36,6 +36,7 @@ import type { Deps } from './types.js';
 
 const MAX_URLS_PER_MESSAGE = 25;
 const MAX_DIRECTORY_LINKS = 50;
+/** Default jobs.source when no ingress overrides it (the Discord poll). */
 const SOURCE = 'discord';
 
 export type UrlOutcome =
@@ -100,8 +101,9 @@ async function ingestSupported(
   deps: Deps,
   url: string,
   platform: string,
+  source: string,
 ): Promise<UrlOutcome> {
-  const result = await ingestJob(deps, { url, source: SOURCE });
+  const result = await ingestJob(deps, { url, source });
   return result.duplicate
     ? {
         url,
@@ -128,6 +130,7 @@ async function classifyAndIngest(
   deps: Deps,
   url: string,
   depth: number,
+  source: string,
 ): Promise<UrlOutcome> {
   try {
     const unwrapped = unwrapRedirectShim(url);
@@ -140,7 +143,7 @@ async function classifyAndIngest(
     // and still resolve below.
     const preRef = detectPlatform(canonicalizeUrl(unwrapped));
     if (isSupportedJobRef(preRef, unwrapped)) {
-      return await ingestSupported(deps, unwrapped, preRef.platform);
+      return await ingestSupported(deps, unwrapped, preRef.platform, source);
     }
 
     const resolved = await resolveUrl(unwrapped);
@@ -148,7 +151,7 @@ async function classifyAndIngest(
 
     // Supported platform with a resolvable tenant → normal ingest (enqueues).
     if (isSupportedJobRef(ref, resolved)) {
-      return await ingestSupported(deps, resolved, ref.platform);
+      return await ingestSupported(deps, resolved, ref.platform, source);
     }
 
     // Still unknown at the top level → fetch the page ONCE and inspect it:
@@ -167,13 +170,15 @@ async function classifyAndIngest(
           .find((hit) => hit !== null);
         if (sniffed) {
           const canonical = `https://job-boards.greenhouse.io/${sniffed.tenant}/jobs/${sniffed.jobId}`;
-          return await ingestSupported(deps, canonical, 'greenhouse');
+          return await ingestSupported(deps, canonical, 'greenhouse', source);
         }
         const links = extractJobLinks(page.html, page.url);
         if (links.length > 0) {
           const children: UrlOutcome[] = [];
           for (const link of links.slice(0, MAX_DIRECTORY_LINKS)) {
-            children.push(await classifyAndIngest(deps, link, depth + 1));
+            children.push(
+              await classifyAndIngest(deps, link, depth + 1, source),
+            );
           }
           return { url: resolved, kind: 'directory', children };
         }
@@ -182,7 +187,7 @@ async function classifyAndIngest(
 
     // A single unsupported job (or an unparseable page): record + park it so
     // it's captured and visible, never lost. ingestJob parks unknown platforms.
-    const result = await ingestJob(deps, { url: resolved, source: SOURCE });
+    const result = await ingestJob(deps, { url: resolved, source });
     if (result.duplicate) {
       return {
         url: resolved,
@@ -287,17 +292,23 @@ function isSelfReferentialUrl(
   return false;
 }
 
-/** Extract every URL from a message and classify+ingest each. */
+/**
+ * Extract every URL from a text blob and classify+ingest each. Ingress-
+ * agnostic: `source` stamps jobs.source for provenance ('discord' for the
+ * channel poll, 'manual' for the dashboard paste box) and changes nothing
+ * else about classification, dedupe, or parking.
+ */
 export async function ingestMessageLinks(
   deps: Deps,
   text: string,
+  source: string = SOURCE,
 ): Promise<MessageIngestSummary> {
   const urls = extractUrlsFromText(text)
     .filter((url) => !isSelfReferentialUrl(url, deps.config))
     .slice(0, MAX_URLS_PER_MESSAGE);
   const outcomes: UrlOutcome[] = [];
   for (const url of urls) {
-    outcomes.push(await classifyAndIngest(deps, url, 0));
+    outcomes.push(await classifyAndIngest(deps, url, 0, source));
   }
   return summarize(urls.length, outcomes);
 }

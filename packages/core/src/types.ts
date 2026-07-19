@@ -15,6 +15,20 @@ export type TaskState =
   | 'DUPLICATE'
   | 'DISCARDED';
 
+/**
+ * User-facing task priority, stored as an int on application_tasks so
+ * `ORDER BY priority DESC` sorts High → Normal → Low. Shared here so the
+ * dashboard UI and the api agree on the exact values.
+ */
+export type TaskPriority = -1 | 0 | 1;
+
+/** Display labels for each priority (dashboard UI + api agree via this map). */
+export const TASK_PRIORITY_LABELS: Record<TaskPriority, string> = {
+  1: 'High',
+  0: 'Normal',
+  [-1]: 'Low',
+};
+
 export type TaskEvent =
   | 'PARSE_OK'
   | 'PARSE_DUPLICATE'
@@ -30,7 +44,8 @@ export type TaskEvent =
   | 'CONFIRM'
   | 'FAIL'
   | 'RETRY'
-  | 'DISCARD';
+  | 'DISCARD'
+  | 'RESTORE';
 
 export interface QuestionOption {
   label: string;

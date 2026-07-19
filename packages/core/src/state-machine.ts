@@ -87,7 +87,12 @@ export const ALLOWED: Record<
     DISCARD: 'DISCARDED',
   },
   DUPLICATE: {},
-  DISCARDED: {},
+  // A discarded task can be brought back (the Archive section's Restore /
+  // an undo after a mis-click). It lands in NEEDS_INPUT — a human decides
+  // what happens next — rather than trying to reconstruct its prior state.
+  DISCARDED: {
+    RESTORE: 'NEEDS_INPUT',
+  },
 };
 
 /**

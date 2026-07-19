@@ -2,6 +2,7 @@ import type {
   JobSpec,
   Question,
   ResolutionResult,
+  TaskPriority,
   TaskState,
 } from '@sower/core';
 import {
@@ -108,6 +109,13 @@ export const applicationTasks = pgTable('application_tasks', {
    */
   ingestChannelId: text('ingest_channel_id'),
   ingestMessageId: text('ingest_message_id'),
+  /** Freeform user notes (dashboard-only; never sent to any platform). */
+  notes: text('notes'),
+  /**
+   * User-facing priority: 1=high, 0=normal, -1=low (@sower/core TaskPriority).
+   * An int (not an enum) so `ORDER BY priority DESC` sorts High → Low.
+   */
+  priority: integer('priority').$type<TaskPriority>().notNull().default(0),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });

@@ -101,6 +101,15 @@ describe('canonicalizeUrl', () => {
     expect(canonicalizeUrl(once)).toBe(once);
   });
 
+  it('accepts non-http schemes (manual:// placeholder URLs round-trip)', () => {
+    // POST /ingest/manual records URL-less jobs under manual://<uuid>; the
+    // uuid parses as the host, so it survives canonicalization (lowercased).
+    expect(
+      canonicalizeUrl('manual://3f2b8c9e-1a2b-4c3d-8e9f-0a1b2c3d4e5f'),
+    ).toBe('manual://3f2b8c9e-1a2b-4c3d-8e9f-0a1b2c3d4e5f');
+    expect(canonicalizeUrl('manual://ABC-DEF')).toBe('manual://abc-def');
+  });
+
   it('throws on invalid URLs', () => {
     expect(() => canonicalizeUrl('not a url')).toThrow(TypeError);
     expect(() => canonicalizeUrl('')).toThrow(TypeError);

@@ -12,7 +12,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { normalizeLabel } from '@sower/answers';
-import type { Question } from '@sower/core';
+import type { Question, TaskPriority } from '@sower/core';
 import { answers, applicationTasks, documents, jobs } from '@sower/db';
 import { createStorage } from '@sower/storage';
 import { eq } from 'drizzle-orm';
@@ -28,6 +28,19 @@ export interface ActionResult {
 
 const uuidSchema = z.string().uuid();
 const textAnswerSchema = z.string().trim().min(1).max(20_000);
+
+// PATCH-style task meta (notes/priority) — mirrors the api's /tasks/:id/meta
+// contract: only provided fields are written, notes: null clears the note,
+// and at least one field must be present.
+const taskPrioritySchema = z.union([z.literal(-1), z.literal(0), z.literal(1)]);
+const taskMetaSchema = z
+  .object({
+    notes: z.string().max(20_000).nullable().optional(),
+    priority: taskPrioritySchema.optional(),
+  })
+  .refine((meta) => meta.notes !== undefined || meta.priority !== undefined, {
+    message: 'provide at least one of notes, priority',
+  });
 
 const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
 
@@ -315,6 +328,32 @@ export async function saveAnswers(
   return { ok, message: message || 'saved.' };
 }
 
+/**
+ * Update a task's user-facing metadata (notes and/or priority) via the api
+ * service. PATCH semantics: only the provided fields change (notes: null
+ * clears the note). Revalidates the task page plus the home/queue lists,
+ * whose ordering priority affects.
+ */
+export async function updateTaskMeta(
+  taskId: string,
+  meta: { notes?: string | null; priority?: TaskPriority },
+): Promise<ActionResult> {
+  const idParse = uuidSchema.safeParse(taskId);
+  if (!idParse.success) return { ok: false, message: 'invalid task id.' };
+  const metaParse = taskMetaSchema.safeParse(meta);
+  if (!metaParse.success) {
+    return {
+      ok: false,
+      message: 'nothing to update — provide notes or a priority.',
+    };
+  }
+  const result = await callApi(idParse.data, 'meta', metaParse.data);
+  revalidatePath(`/tasks/${idParse.data}`);
+  revalidatePath('/queue');
+  revalidatePath('/');
+  return result;
+}
+
 /** Requeue a NEEDS_INPUT / FAILED task via the api service. */
 export async function requeueTask(taskId: string): Promise<ActionResult> {
   const idParse = uuidSchema.safeParse(taskId);
@@ -450,7 +489,8 @@ async function callApi(
     | 'start'
     | 'verify-form'
     | 'discard'
-    | 'investigate',
+    | 'investigate'
+    | 'meta',
   jsonBody?: Record<string, unknown>,
 ): Promise<ActionResult> {
   const base = process.env.API_BASE_URL;
@@ -535,6 +575,10 @@ async function callApi(
       ok: true,
       message: 'task discarded — removed from the queue.',
     };
+  }
+
+  if (action === 'meta') {
+    return { ok: true, message: 'saved.' };
   }
 
   if (action === 'investigate') {

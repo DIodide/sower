@@ -38,6 +38,8 @@ const platformState = vi.hoisted(() => ({
 const ingestState = vi.hoisted(() => ({
   known: new Set<string>(),
   calls: [] as string[],
+  /** jobs.source each ingestJob call carried (source-threading assertions). */
+  sources: [] as string[],
   duplicateMeta: {
     taskId: 'task-dup' as string | null,
     originalSource: 'discord',
@@ -71,12 +73,20 @@ vi.mock('@sower/platforms', () => ({
 }));
 
 vi.mock('./ingest.js', () => ({
-  ingestJob: vi.fn(async (_deps: unknown, input: { url: string }) => {
-    ingestState.calls.push(input.url);
-    return ingestState.known.has(input.url)
-      ? { duplicate: true, jobId: 'dup', ...ingestState.duplicateMeta }
-      : { duplicate: false, jobId: 'job-1', taskId: 'task-1', state: 'QUEUED' };
-  }),
+  ingestJob: vi.fn(
+    async (_deps: unknown, input: { url: string; source?: string }) => {
+      ingestState.calls.push(input.url);
+      ingestState.sources.push(input.source ?? '');
+      return ingestState.known.has(input.url)
+        ? { duplicate: true, jobId: 'dup', ...ingestState.duplicateMeta }
+        : {
+            duplicate: false,
+            jobId: 'job-1',
+            taskId: 'task-1',
+            state: 'QUEUED',
+          };
+    },
+  ),
 }));
 
 // Tier-2 form-discovery trigger: recorded so tests can assert exactly which
@@ -125,6 +135,7 @@ beforeEach(() => {
   pageState.byUrl = {};
   ingestState.known = new Set();
   ingestState.calls = [];
+  ingestState.sources = [];
   ingestState.duplicateMeta = {
     taskId: 'task-dup',
     originalSource: 'discord',
@@ -149,6 +160,47 @@ describe('ingestMessageLinks', () => {
       platform: 'greenhouse',
     });
     expect(ingestState.calls).toEqual(['https://gh/1']);
+  });
+
+  it("stamps jobs.source 'discord' by default (existing call sites unchanged)", async () => {
+    platformState.byUrl['https://gh/1'] = {
+      platform: 'greenhouse',
+      tenant: 'acme',
+      externalId: '1',
+    };
+    // One supported + one unsupported (record+park) — both carry 'discord'.
+    await ingestMessageLinks({} as Deps, 'https://gh/1 https://weirdats/x');
+    expect(ingestState.sources).toEqual(['discord', 'discord']);
+  });
+
+  it('threads a source override to every ingestJob call, directory children included', async () => {
+    platformState.byUrl['https://gh/1'] = {
+      platform: 'greenhouse',
+      tenant: 'acme',
+      externalId: '1',
+    };
+    platformState.byUrl['https://dir/list'] = {
+      platform: 'unknown',
+      tenant: null,
+      externalId: null,
+    };
+    platformState.byUrl['https://gh/2'] = {
+      platform: 'greenhouse',
+      tenant: 'a',
+      externalId: '2',
+    };
+    // Directory expands to a supported child + an unknown child (parked).
+    dirState.byUrl['https://dir/list'] = [
+      'https://gh/2',
+      'https://weird/child',
+    ];
+    const s = await ingestMessageLinks(
+      {} as Deps,
+      'https://gh/1 https://dir/list',
+      'manual',
+    );
+    expect(s).toMatchObject({ ingested: 2, unsupported: 1, directories: 1 });
+    expect(ingestState.sources).toEqual(['manual', 'manual', 'manual']);
   });
 
   it('records an unsupported direct link (parked, never dropped) and triggers form discovery', async () => {

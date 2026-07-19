@@ -57,17 +57,25 @@ describe('schema', () => {
       'job_id',
       'job_spec',
       'last_error',
+      'notes',
       'otp_channel_id',
       'otp_message_id',
       'otp_requested_at',
       'otp_submitted_at',
       'pending_otp',
+      'priority',
       'resolution',
       'state',
       'updated_at',
     ]);
     expect(applicationTasks.state.notNull).toBe(true);
     expect(applicationTasks.attempt.notNull).toBe(true);
+    // Freeform user notes: nullable (absent until the user writes one).
+    expect(applicationTasks.notes.notNull).toBe(false);
+    // Priority is an int (1/0/-1) so ORDER BY priority DESC works; NOT NULL
+    // with a 0 (normal) default so every pre-existing row sorts as normal.
+    expect(applicationTasks.priority.notNull).toBe(true);
+    expect(applicationTasks.priority.default).toBe(0);
     // Both nullable: Discord may be disabled or the card post may fail.
     expect(applicationTasks.approvalChannelId.notNull).toBe(false);
     expect(applicationTasks.approvalMessageId.notNull).toBe(false);
