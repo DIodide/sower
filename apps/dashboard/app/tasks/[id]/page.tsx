@@ -31,9 +31,12 @@ import {
   formatDeadline,
   formatLocal,
   isDeadlineSoon,
+  PRIORITY_LOCKED,
   relativeTime,
+  SECTIONS,
   type Tone,
 } from '../../../lib/format';
+import { InlineNote } from '../../../lib/inline-note';
 import { PriorityControl } from '../../../lib/priority-control';
 import {
   Empty,
@@ -73,14 +76,18 @@ const DUE_EDITABLE_STATES = new Set<string>([
   'AWAITING_OTP',
 ]);
 
-/** Pipeline positions for the stepper (FAILED/DUPLICATE render no stepper). */
+/** Pipeline positions for the stepper (FAILED/DUPLICATE render no stepper),
+ *  labeled with the same section vocabulary the rows and messages use.
+ *  FILLING is only ever reached AFTER an approval (REVIEW → APPROVED) or an
+ *  OTP resume, so it shares Review's visual step — the stepper never walks
+ *  backward the moment the user approves. */
 const STEPS: { label: string; states: TaskState[] }[] = [
-  { label: 'Ingested', states: ['INGESTED', 'PARSED'] },
+  { label: 'Added', states: ['INGESTED', 'PARSED'] },
   { label: 'Queued', states: ['QUEUED'] },
-  { label: 'Processing', states: ['PREPARING', 'FILLING'] },
-  { label: 'Your input', states: ['NEEDS_INPUT', 'AWAITING_OTP'] },
-  { label: 'Review', states: ['REVIEW'] },
-  { label: 'Submitted', states: ['SUBMITTED', 'CONFIRMED'] },
+  { label: 'Processing', states: ['PREPARING'] },
+  { label: SECTIONS.waiting, states: ['NEEDS_INPUT', 'AWAITING_OTP'] },
+  { label: 'Your review', states: ['REVIEW', 'FILLING'] },
+  { label: SECTIONS.sent, states: ['SUBMITTED', 'CONFIRMED'] },
 ];
 
 function MetaItem({ label, children }: { label: string; children: ReactNode }) {
@@ -285,6 +292,8 @@ function NextStep({
   tenant,
   discard,
   canUnmark,
+  unsupported,
+  investigationRunning,
 }: {
   task: { id: string; state: string; lastError: string | null };
   requiredMissing: number;
@@ -300,6 +309,12 @@ function NextStep({
   discard?: { auto: boolean; note: string | null } | null;
   /** SUBMITTED via an out-of-band "Mark applied" — offer the undo. */
   canUnmark?: boolean;
+  /** NEEDS_INPUT on an unknown platform with NO spec: no adapter can read
+   *  the form, and re-running would change nothing — the honest asks are
+   *  the browser agent or a discard. */
+  unsupported?: boolean;
+  /** The latest investigation run is still going. */
+  investigationRunning?: boolean;
 }) {
   switch (task.state) {
     case 'NEEDS_INPUT': {
@@ -351,6 +366,35 @@ function NextStep({
                 ) : null}
               </p>
               <TaskActions taskId={task.id} mode="start" />
+            </div>
+          </div>
+        );
+      }
+      // Unsupported site with no discovered form: "answer questions" and
+      // "re-run once your profile covers it" would both be lies — there is
+      // no form to fill. The honest asks: run the browser agent, or discard.
+      if (unsupported) {
+        if (investigationRunning) {
+          return (
+            <div className="banner banner--progress">
+              <p>
+                <strong>Browser agent running.</strong> It is discovering the
+                application form on this unsupported site now — results land on
+                this task.
+              </p>
+            </div>
+          );
+        }
+        return (
+          <div className="banner banner--attention">
+            <div style={{ flex: '1 1 20rem' }}>
+              <p style={{ marginBottom: '0.625rem' }}>
+                <strong>Unsupported site.</strong> sower has no adapter for this
+                platform, so it cannot read or fill the application form itself.
+                Run the browser agent to discover the application form, or
+                discard the task.
+              </p>
+              <TaskActions taskId={task.id} mode="investigate" />
             </div>
           </div>
         );
@@ -474,12 +518,15 @@ function NextStep({
       }
       return (
         <div className="banner banner--neutral">
-          <p>
-            <strong>Discarded</strong>
-            {discard?.note ? <> — {discard.note}</> : null}. This task was
-            removed from the queue — nothing will run for it anymore. The record
-            and history are kept below.
-          </p>
+          <div style={{ flex: '1 1 20rem' }}>
+            <p style={{ marginBottom: '0.625rem' }}>
+              <strong>Discarded</strong>
+              {discard?.note ? <> — {discard.note}</> : null}. Moved to the
+              Archive; the record and history are kept below. Restore it to pick
+              this application back up.
+            </p>
+            <TaskActions taskId={task.id} mode="restore" />
+          </div>
         </div>
       );
     default:
@@ -600,6 +647,11 @@ export default async function TaskPage({
   // NEEDS_INPUT is a "capture a session" state, not an "answer questions" one.
   const needsSession =
     job?.platform === 'workday' && spec?.formAccess === 'account-required';
+  // Unknown platform and no spec (none discovered yet either): no adapter
+  // can read the form, so NEEDS_INPUT here means "browser agent or discard",
+  // never "answer questions" / "re-run".
+  const unsupported =
+    task.state === 'NEEDS_INPUT' && job?.platform === 'unknown' && !spec;
   const sessionRow =
     needsSession && job?.tenant
       ? (
@@ -692,7 +744,7 @@ export default async function TaskPage({
         </Link>
       </p>
 
-      {/* ---- header ---- */}
+      {/* ---- header: title, the user's note, pipeline position ---- */}
       <header className="card">
         <div className="row" style={{ alignItems: 'baseline' }}>
           <h1 className="page-title" style={{ margin: 0 }}>
@@ -711,13 +763,21 @@ export default async function TaskPage({
           <PriorityControl
             taskId={task.id}
             priority={task.priority}
-            disabled={['SUBMITTED', 'CONFIRMED', 'DISCARDED'].includes(
-              task.state,
-            )}
+            disabled={PRIORITY_LOCKED.has(task.state)}
           />
           {task.attempt > 0 ? (
             <span className="q-meta">attempt {task.attempt}</span>
           ) : null}
+        </div>
+
+        {/* The user's own note — the same inline editor the rows use.
+            Read-only display once the task has left the queue. */}
+        <div style={{ marginTop: '0.375rem', maxWidth: '48rem' }}>
+          <InlineNote
+            taskId={task.id}
+            note={task.notes}
+            readOnly={PRIORITY_LOCKED.has(task.state)}
+          />
         </div>
 
         {stepIndex >= 0 ? (
@@ -735,8 +795,26 @@ export default async function TaskPage({
             ))}
           </ol>
         ) : null}
+      </header>
 
-        <hr className="divider-soft" />
+      {/* ---- what's next — directly under the title, before the metadata:
+           the ask is the first thing after the name. ---- */}
+      <NextStep
+        task={task}
+        requiredMissing={requiredMissing}
+        optionalMissing={optionalMissing}
+        savedCount={savedCount}
+        needsSession={needsSession}
+        session={sessionRow}
+        tenant={job?.tenant}
+        discard={discard}
+        canUnmark={canUnmark}
+        unsupported={unsupported}
+        investigationRunning={investigation?.status === 'running'}
+      />
+
+      {/* ---- job & task metadata ---- */}
+      <section className="card">
         <div
           style={{
             display: 'grid',
@@ -868,7 +946,8 @@ export default async function TaskPage({
         </div>
 
         {/* ---- action row: mark applied + discard (hidden once sent or
-             already discarded; DUPLICATE keeps only discard) ---- */}
+             already discarded; DUPLICATE keeps only discard). Both note
+             inputs reveal after the first click (two-step confirm). ---- */}
         {!['SUBMITTED', 'CONFIRMED', 'DISCARDED'].includes(task.state) ? (
           <>
             <hr className="divider-soft" />
@@ -880,20 +959,7 @@ export default async function TaskPage({
             </div>
           </>
         ) : null}
-      </header>
-
-      {/* ---- what's next ---- */}
-      <NextStep
-        task={task}
-        requiredMissing={requiredMissing}
-        optionalMissing={optionalMissing}
-        savedCount={savedCount}
-        needsSession={needsSession}
-        session={sessionRow}
-        tenant={job?.tenant}
-        discard={discard}
-        canUnmark={canUnmark}
-      />
+      </section>
 
       {/* ---- job description — up top, right under the ask: it's what the
            user reads while answering. Collapsible; open by default for

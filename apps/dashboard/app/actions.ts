@@ -29,12 +29,23 @@ const BATCH_SIZE = 100;
 
 export async function discardTaskIds(
   ids: string[],
+  note?: string,
 ): Promise<BulkDiscardResult> {
   const parsed = taskIdsSchema.safeParse(ids);
   if (!parsed.success) {
     return {
       ok: false,
       message: 'nothing (valid) selected.',
+      discardedIds: [],
+    };
+  }
+  // The optional shared "why" from the select bar, stored on each task's
+  // DISCARD event exactly like the single-discard note. Blank = note-less.
+  const trimmedNote = typeof note === 'string' ? note.trim() : '';
+  if (trimmedNote.length > 2000) {
+    return {
+      ok: false,
+      message: 'discard note is too long (max 2,000 characters).',
       discardedIds: [],
     };
   }
@@ -66,7 +77,10 @@ export async function discardTaskIds(
           'x-api-key': apiKey,
           'content-type': 'application/json',
         },
-        body: JSON.stringify({ taskIds }),
+        body: JSON.stringify({
+          taskIds,
+          ...(trimmedNote !== '' ? { note: trimmedNote } : {}),
+        }),
         cache: 'no-store',
         signal: AbortSignal.timeout(30_000),
       });
@@ -98,4 +112,45 @@ export async function discardTaskIds(
     message: parts.join(' · '),
     discardedIds,
   };
+}
+
+/**
+ * Clear the "Waiting on you" section's manual drag order via the api service
+ * (one conditional UPDATE nulls every waiting-section rank): the section
+ * returns to the pure priority/recency sort for every row.
+ */
+export async function clearManualOrder(): Promise<ActionResult> {
+  const base = process.env.API_BASE_URL;
+  const apiKey = process.env.INGEST_API_KEY;
+  if (!base || !apiKey) {
+    return {
+      ok: false,
+      message:
+        'api service is not configured (API_BASE_URL / INGEST_API_KEY missing).',
+    };
+  }
+  try {
+    const response = await fetch(
+      `${base.replace(/\/$/, '')}/tasks/clear-order`,
+      {
+        method: 'POST',
+        headers: { 'x-api-key': apiKey },
+        cache: 'no-store',
+        signal: AbortSignal.timeout(30_000),
+      },
+    );
+    if (!response.ok) {
+      return {
+        ok: false,
+        message: `clear failed (${response.status}) — see api logs.`,
+      };
+    }
+  } catch (err) {
+    return {
+      ok: false,
+      message: `could not reach the api service: ${err instanceof Error ? err.message : 'unknown error'}`,
+    };
+  }
+  revalidatePath('/');
+  return { ok: true, message: 'manual order cleared.' };
 }

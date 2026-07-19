@@ -29,9 +29,13 @@ function autogrow(el: HTMLTextAreaElement): void {
 export function InlineNote({
   taskId,
   note,
+  readOnly = false,
 }: {
   taskId: string;
   note: string | null;
+  /** Sent/archived tasks: the note still shows, but is no longer editable
+   *  (nothing renders at all when there is no note). */
+  readOnly?: boolean;
 }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(note ?? '');
@@ -139,6 +143,12 @@ export function InlineNote({
     sessionStartRef.current = value;
     setEditing(true);
   };
+
+  // Read-only display (after all hooks): the note text as-is, or nothing.
+  if (readOnly) {
+    if (value.trim() === '') return null;
+    return <span className="note-static">{value}</span>;
+  }
 
   const dirty = value.trim() !== savedValue.trim();
 

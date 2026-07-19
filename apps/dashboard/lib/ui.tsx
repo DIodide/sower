@@ -4,12 +4,13 @@
 import type { ReactNode } from 'react';
 import { formatLocal, relativeTime, stateMeta, truncate } from './format';
 
-/** Task-state pill: human label + semantic tone, raw enum in the tooltip. */
+/** Task-state pill: the same plain-words phrase the list rows use (ONE
+ *  status language), semantic tone, raw enum in the tooltip. */
 export function StateBadge({ state }: { state: string }) {
   const meta = stateMeta(state);
   return (
     <span className={`badge badge--${meta.tone}`} title={state}>
-      {meta.label}
+      {meta.need}
     </span>
   );
 }
@@ -17,17 +18,15 @@ export function StateBadge({ state }: { state: string }) {
 /**
  * A readable timestamp. Default (tables/lists): single-line relative time
  * ("3h ago") with the exact local time in the tooltip. `inline` renders both
- * on one line ("3m ago · Jul 13, 3:47 PM EDT") and `stacked` puts the exact
- * time on a second line — both for detail pages. Renders "—" for null.
+ * on one line ("3m ago · Jul 13, 3:47 PM EDT") for detail pages. Renders
+ * "—" for null.
  */
 export function Timestamp({
   value,
   inline = false,
-  stacked = false,
 }: {
   value: Date | string | null | undefined;
   inline?: boolean;
-  stacked?: boolean;
 }) {
   if (!value) return <span className="faint">—</span>;
   const abs = formatLocal(value);
@@ -36,19 +35,6 @@ export function Timestamp({
     return (
       <span className="ts" title={abs} style={{ whiteSpace: 'nowrap' }}>
         {rel} <span className="faint">· {abs}</span>
-      </span>
-    );
-  }
-  if (stacked) {
-    return (
-      <span className="ts" title={abs} style={{ whiteSpace: 'nowrap' }}>
-        <span className="ts-rel">{rel}</span>
-        <span
-          className="ts-abs faint"
-          style={{ display: 'block', fontSize: '0.6875rem' }}
-        >
-          {abs}
-        </span>
       </span>
     );
   }

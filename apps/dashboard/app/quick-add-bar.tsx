@@ -93,7 +93,6 @@ export function QuickAddBar() {
             role="status"
             className={result.ok ? 'status-ok' : 'status-err'}
           >
-            {result.ok ? '✅ ' : ''}
             {result.message}
           </span>
         ) : null}

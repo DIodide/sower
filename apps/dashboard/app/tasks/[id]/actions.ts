@@ -20,6 +20,7 @@ import { eq } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { getDb } from '../../../lib/db';
+import { SECTIONS } from '../../../lib/format';
 import { documentKind } from './question-kind';
 
 export interface ActionResult {
@@ -721,7 +722,7 @@ async function callApi(
   if (action === 'approve') {
     // The api returns an honest per-mode summary (dry-run vs a real Workday
     // draft that stopped before submit). Prefer it; fall back for older apis.
-    const back = ` task is back in ${body.state ?? 'REVIEW'}.`;
+    const back = ` The task stays in "${SECTIONS.waiting}" — ready for your review.`;
     if (body.note) {
       return { ok: true, message: `${body.note}${back}` };
     }
@@ -752,28 +753,28 @@ async function callApi(
   if (action === 'discard') {
     return {
       ok: true,
-      message: 'task discarded — removed from the queue.',
+      message: `task discarded — moved to the ${SECTIONS.archive} (record and history kept).`,
     };
   }
 
   if (action === 'restore') {
     return {
       ok: true,
-      message: 'task restored — back in the queue as needs-input.',
+      message: `task restored — back in "${SECTIONS.waiting}".`,
     };
   }
 
   if (action === 'mark-applied') {
     return {
       ok: true,
-      message: 'marked applied — recorded as submitted out of band.',
+      message: `marked applied — moved to ${SECTIONS.sent}.`,
     };
   }
 
   if (action === 'unmark-applied') {
     return {
       ok: true,
-      message: 'un-marked — back in "Waiting on you" as needs-input.',
+      message: `un-marked — back in "${SECTIONS.waiting}".`,
     };
   }
 
@@ -808,7 +809,7 @@ async function callApi(
     }
     return {
       ok: true,
-      message: `code accepted; task resumed (state: ${body.state ?? 'FILLING'}).`,
+      message: `code accepted — moved to "${SECTIONS.processing}" while sower finishes the application.`,
     };
   }
 
@@ -821,6 +822,6 @@ async function callApi(
   }
   return {
     ok: true,
-    message: `task requeued (state: ${body.state ?? 'QUEUED'}).`,
+    message: `task requeued — moved to "${SECTIONS.processing}" for another attempt.`,
   };
 }

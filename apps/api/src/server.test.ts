@@ -6,9 +6,11 @@ import {
   jobDescriptions,
   jobs,
 } from '@sower/db';
+import { SQL } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
 import { ingestJob } from './ingest.js';
+import { rankedCaseSql } from './rank.js';
 import { buildServer } from './server.js';
 import type { Deps } from './types.js';
 
@@ -2527,6 +2529,56 @@ describe('buildServer', () => {
       expect(refreshState.calls).toEqual([ID_A]);
     });
 
+    it('stores the optional bulk note on every DISCARD event (H5)', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[{ state: 'QUEUED' }], [{ state: 'NEEDS_INPUT' }]],
+        insertResults: [[], []],
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, {
+        taskIds: [ID_A, ID_B],
+        note: 'no sponsorship',
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ ok: true, discarded: 2 });
+      const discardEvents = writes
+        .filter((w) => w.method === 'insert' && w.table === events)
+        .map((w) => w.arg as Record<string, unknown>)
+        .filter((arg) => arg.type === 'DISCARD');
+      expect(discardEvents).toHaveLength(2);
+      for (const event of discardEvents) {
+        expect(event.data).toMatchObject({
+          reason: 'manual',
+          note: 'no sponsorship',
+        });
+      }
+    });
+
+    it('a blank bulk note is omitted from the event data entirely', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[{ state: 'QUEUED' }]],
+        insertResults: [[]],
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, { taskIds: [ID_A], note: '   ' });
+
+      expect(res.statusCode).toBe(200);
+      const discardEvent = writes
+        .filter((w) => w.method === 'insert' && w.table === events)
+        .map((w) => w.arg as Record<string, unknown>)
+        .find((arg) => arg.type === 'DISCARD');
+      expect(discardEvent?.data).toEqual({ reason: 'manual' });
+    });
+
     it('reports an already-discarded task as skipped (nothing rewritten)', async () => {
       const writes: DbWrite[] = [];
       const db = createFakeDb({
@@ -2720,10 +2772,26 @@ describe('buildServer', () => {
 
     /** Fake db whose first select finds the task; writes are recorded.
      *  `sortRank` mimics the task's current manual "Waiting on you" rank
-     *  (null = unranked, the common case). */
-    function metaDb(writes: DbWrite[], sortRank: number | null = null) {
+     *  (null = unranked, the common case); `section` is the second select a
+     *  ranked priority-change performs (the section rows, rank order);
+     *  `state`/`priority` complete the task row. */
+    function metaDb(
+      writes: DbWrite[],
+      sortRank: number | null = null,
+      options: {
+        state?: string;
+        priority?: number;
+        section?: { id: string; sortRank: number | null; priority: number }[];
+      } = {},
+    ) {
+      const row = {
+        id: TASK_ID,
+        state: options.state ?? 'NEEDS_INPUT',
+        sortRank,
+        priority: options.priority ?? 0,
+      };
       return createFakeDb({
-        selectResults: [[{ id: TASK_ID, sortRank }]],
+        selectResults: options.section ? [[row], options.section] : [[row]],
         writes,
       });
     }
@@ -2813,9 +2881,152 @@ describe('buildServer', () => {
       expect(set.priority).toBe(2);
     });
 
-    it('setting a priority clears a manual sort rank in the same write', async () => {
+    // B2 (option A): priority and manual rank COMPOSE — a ranked row
+    // re-slots WITHIN the ranked block instead of losing its rank.
+    const RANKED_A = 'a1b2c3d4-e5f6-4788-99aa-bbccddeeff00';
+    const RANKED_B = '00112233-4455-4677-8899-aabbccddeeff';
+
+    it('THE DEMOTION CASE: raising a ranked row re-slots it ABOVE the rows it now outranks (never to the bottom)', async () => {
       const writes: DbWrite[] = [];
-      const { deps } = createDeps(metaDb(writes, 2048));
+      // The moved row is ranked LAST (3072) behind two normal-priority rows.
+      const { deps } = createDeps(
+        metaDb(writes, 3072, {
+          section: [
+            { id: RANKED_A, sortRank: 1024, priority: 0 },
+            { id: RANKED_B, sortRank: 2048, priority: 0 },
+            { id: TASK_ID, sortRank: 3072, priority: 0 },
+          ],
+        }),
+      );
+      const app = buildServer(deps);
+
+      const res = await inject(app, { priority: 2 });
+
+      expect(res.statusCode).toBe(200);
+      const updates = writes.filter((w) => w.method === 'update');
+      expect(updates).toHaveLength(1);
+      // Rank 0 = one RANK_GAP above the section's top row: the raise moved
+      // the row UP. The write is the IS-NULL-guarded conditional (see
+      // rank.test.ts), never a plain clear.
+      expect(updates[0]?.arg).toEqual({
+        priority: 2,
+        sortRank: rankedCaseSql(0),
+      });
+    });
+
+    it('lowering a ranked row re-slots it DOWN below the rows that now outrank it', async () => {
+      const writes: DbWrite[] = [];
+      // The moved row is ranked FIRST (512) at priority Highest.
+      const { deps } = createDeps(
+        metaDb(writes, 512, {
+          priority: 2,
+          section: [
+            { id: TASK_ID, sortRank: 512, priority: 2 },
+            { id: RANKED_A, sortRank: 2048, priority: 1 },
+            { id: RANKED_B, sortRank: 3072, priority: 0 },
+          ],
+        }),
+      );
+      const app = buildServer(deps);
+
+      const res = await inject(app, { priority: 0 });
+
+      expect(res.statusCode).toBe(200);
+      const updates = writes.filter((w) => w.method === 'update');
+      expect(updates).toHaveLength(1);
+      // Midpoint of A(2048) and B(3072): below the High row, above the
+      // equal-priority Normal row (relative order kept among equals).
+      expect(updates[0]?.arg).toEqual({
+        priority: 0,
+        sortRank: rankedCaseSql(2560),
+      });
+    });
+
+    it('the re-slot write is SQL-conditional, so a rank cleared concurrently stays cleared (the debounce race converges)', async () => {
+      const writes: DbWrite[] = [];
+      const { deps } = createDeps(
+        metaDb(writes, 3072, {
+          section: [
+            { id: RANKED_A, sortRank: 1024, priority: 0 },
+            { id: TASK_ID, sortRank: 3072, priority: 0 },
+          ],
+        }),
+      );
+      const app = buildServer(deps);
+
+      const res = await inject(app, { priority: 2 });
+
+      expect(res.statusCode).toBe(200);
+      const set = writes.find((w) => w.method === 'update')?.arg as Record<
+        string,
+        unknown
+      >;
+      // Not a number, not null: the drizzle SQL CASE guard — the ranked/
+      // unranked decision executes inside the UPDATE, so a concurrent
+      // "clear manual order" (or racing debounced write) that nulled the
+      // rank between our read and this write wins. rank.test.ts pins the
+      // exact 'case when … is null then null else …' text.
+      expect(set.sortRank).toBeInstanceOf(SQL);
+      expect(set.sortRank).toEqual(rankedCaseSql(0));
+    });
+
+    it('a priority change that needs no move keeps the rank untouched (no sortRank write)', async () => {
+      const writes: DbWrite[] = [];
+      // A Highest row already sits directly above; a raise to High stops.
+      const { deps } = createDeps(
+        metaDb(writes, 2048, {
+          section: [
+            { id: RANKED_A, sortRank: 1024, priority: 2 },
+            { id: TASK_ID, sortRank: 2048, priority: 0 },
+          ],
+        }),
+      );
+      const app = buildServer(deps);
+
+      const res = await inject(app, { priority: 1 });
+
+      expect(res.statusCode).toBe(200);
+      const set = writes.find((w) => w.method === 'update')?.arg as Record<
+        string,
+        unknown
+      >;
+      expect(set.priority).toBe(1);
+      expect('sortRank' in set).toBe(false);
+    });
+
+    it('resequences too-close ranked neighbors before re-slotting between them', async () => {
+      const writes: DbWrite[] = [];
+      const { deps } = createDeps(
+        metaDb(writes, 2000, {
+          section: [
+            { id: RANKED_A, sortRank: 1000, priority: 2 },
+            { id: RANKED_B, sortRank: 1000 + 1e-9, priority: 0 },
+            { id: TASK_ID, sortRank: 2000, priority: 0 },
+          ],
+        }),
+      );
+      const app = buildServer(deps);
+
+      // Raise to High: past B (Normal), stops below A (Highest) — but the
+      // A/B gap is too tight for a midpoint.
+      const res = await inject(app, { priority: 1 });
+
+      expect(res.statusCode).toBe(200);
+      const updates = writes
+        .filter((w) => w.method === 'update' && w.table === applicationTasks)
+        .map((w) => w.arg);
+      // Ranked rows resequenced to 1024/2048 (the moved row skipped), then
+      // the conditional midpoint write.
+      expect(updates).toEqual([
+        { sortRank: 1024 },
+        { sortRank: 2048 },
+        { priority: 1, sortRank: rankedCaseSql(1536) },
+      ]);
+    });
+
+    it('a ranked row OUTSIDE "Waiting on you" has its legacy rank cleared plainly', async () => {
+      const writes: DbWrite[] = [];
+      const { deps } = createDeps(metaDb(writes, 2048, { state: 'FAILED' }));
       const app = buildServer(deps);
 
       const res = await inject(app, { priority: 1 });
@@ -3167,6 +3378,38 @@ describe('buildServer', () => {
         payload: { beforeTaskId: ID_A },
       });
       expect(unauthed.statusCode).toBe(401);
+    });
+  });
+
+  describe('POST /tasks/clear-order', () => {
+    it('nulls the waiting-section ranks in one conditional update (H6)', async () => {
+      const writes: DbWrite[] = [];
+      const { deps } = createDeps(createFakeDb({ writes }));
+      const app = buildServer(deps);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/tasks/clear-order',
+        headers: { 'x-api-key': 'test-key' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true });
+      const updates = writes.filter(
+        (w) => w.method === 'update' && w.table === applicationTasks,
+      );
+      expect(updates).toHaveLength(1);
+      expect(updates[0]?.arg).toEqual({ sortRank: null });
+    });
+
+    it('responds 401 without an api key (guarded like every route)', async () => {
+      const { deps } = createDeps(createFakeDb());
+      const app = buildServer(deps);
+      const res = await app.inject({
+        method: 'POST',
+        url: '/tasks/clear-order',
+      });
+      expect(res.statusCode).toBe(401);
     });
   });
 

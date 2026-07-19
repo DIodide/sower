@@ -12,7 +12,7 @@
 // layer) or a small inline message. Setting or clearing the user date NEVER
 // touches jobs.deadline — the posting's value simply resurfaces on clear.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { updateTaskMeta } from '../app/tasks/[id]/actions';
 import { deadlineChipLabel, formatDeadline, isDeadlineSoon } from './format';
 
@@ -78,6 +78,30 @@ export function DueDateControl({
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The not-yet-written value, flushed (not dropped) on unmount.
   const pendingRef = useRef<string | null | undefined>(undefined);
+  // The chip/cell button, refocused when Escape closes the popover.
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  // The floating popover, for the viewport clamp below.
+  const popRef = useRef<HTMLSpanElement | null>(null);
+  // Was the popover open when the chip's mousedown fired? Clicking the chip
+  // while open blurs the input FIRST (which already closes the popover), so
+  // a plain onClick toggle would reopen it — this snapshot records what the
+  // click actually meant.
+  const mouseDownWhileOpenRef = useRef(false);
+
+  // Keep the popover on-screen: shift it left when it would overflow the
+  // right viewport edge (it opens left-aligned under the chip, which can sit
+  // near the edge), never past the left one.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const el = popRef.current;
+    if (!el) return;
+    el.style.left = '0px';
+    const rect = el.getBoundingClientRect();
+    const margin = 8;
+    let shift = Math.min(0, window.innerWidth - margin - rect.right);
+    shift = Math.max(shift, margin - rect.left);
+    if (shift !== 0) el.style.left = `${shift}px`;
+  }, [open]);
 
   useEffect(
     () => () => {
@@ -191,12 +215,25 @@ export function DueDateControl({
       className={variant === 'cell' ? 'due-wrap due-wrap--cell' : 'due-wrap'}
     >
       <button
+        ref={buttonRef}
         type="button"
         className={variant === 'cell' ? 'due-cell-btn' : chipClasses}
         aria-expanded={open}
         aria-label={title}
         title={title}
-        onClick={() => setOpen((wasOpen) => !wasOpen)}
+        onMouseDown={() => {
+          mouseDownWhileOpenRef.current = open;
+        }}
+        onClick={() => {
+          // A click that STARTED while the popover was open always closes it
+          // (the input's blur already set open=false; toggling would reopen).
+          if (mouseDownWhileOpenRef.current) {
+            mouseDownWhileOpenRef.current = false;
+            setOpen(false);
+          } else {
+            setOpen((wasOpen) => !wasOpen);
+          }
+        }}
       >
         {variant === 'cell' ? (
           current ? (
@@ -220,13 +257,23 @@ export function DueDateControl({
         )}
       </button>
       {open ? (
-        // biome-ignore lint/a11y/noStaticElementInteractions: onBlur here is focus-loss plumbing (close the popover when focus leaves it), not interactivity — the input and Clear button inside are the interactive elements
+        // biome-ignore lint/a11y/noStaticElementInteractions: onBlur/onKeyDown here are focus-loss and Escape plumbing for the popover as a whole, not interactivity — the input and Clear button inside are the interactive elements
         <span
+          ref={popRef}
           className="due-pop"
           onBlur={(event) => {
             // Close when focus leaves the popover entirely.
             if (!event.currentTarget.contains(event.relatedTarget as Node)) {
               setOpen(false);
+            }
+          }}
+          onKeyDown={(event) => {
+            // Escape closes from ANY element inside (input, Clear, …) and
+            // returns focus to the chip so it isn't dropped on <body>.
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              setOpen(false);
+              buttonRef.current?.focus();
             }
           }}
         >
@@ -241,7 +288,7 @@ export function DueDateControl({
               schedule(event.target.value === '' ? null : event.target.value)
             }
             onKeyDown={(event) => {
-              if (event.key === 'Escape' || event.key === 'Enter') {
+              if (event.key === 'Enter') {
                 event.preventDefault();
                 setOpen(false);
               }

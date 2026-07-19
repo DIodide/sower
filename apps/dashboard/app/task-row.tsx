@@ -3,26 +3,27 @@
 // One Applications-workspace row: priority stepper (▼/▲, see
 // lib/priority-control), label link, plain-words status (tone dot + phrase),
 // due-date ⏰ chip (click-to-edit on actionable rows), inline note, relative
-// time, and actions. Recovery actions (Retry/Investigate/Restore) are always
-// visible; the destructive Discard (with an undo toast), the quiet Mark
-// applied / Un-mark applied, and the bulk-select checkbox are hover/focus-
-// revealed. "Waiting on you" rows additionally carry a drag grip (⋮⋮) wired
-// by the section's OrderedList. Rendered as cells of the page's CSS grid
-// list — never a <table>.
+// time, and actions. Recovery actions (Retry/Investigate/Restore) and the
+// Un-mark applied undo are always visible; the destructive Discard (with an
+// undo toast) and the bulk-select checkbox are hover/focus-revealed. "Mark
+// applied" lives on the detail page only — rows keep grip/checkbox/clock/
+// note/Discard. "Waiting on you" rows additionally carry a drag grip (⋮⋮)
+// wired by the section's OrderedList; a hand-ranked row's grip stays faintly
+// visible as the cue that a manual order exists. Rendered as cells of the
+// page's CSS grid list — never a <table>.
 
 import type { TaskPriority } from '@sower/core';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useRef, useState } from 'react';
 import { DueDateControl, type DueDateDisplay } from '../lib/due-date-control';
-import type { Tone } from '../lib/format';
+import { PRIORITY_LOCKED, SECTIONS, type Tone } from '../lib/format';
 import { InlineNote } from '../lib/inline-note';
 import { PriorityControl } from '../lib/priority-control';
 import {
   type ActionResult,
   discardTask,
   investigateTask,
-  markApplied,
   requeueTask,
   restoreTask,
   unmarkApplied,
@@ -62,9 +63,12 @@ export interface TaskRowData {
    *  phrase (DISCARDED rows only). */
   statusNote: string | null;
   /** JobSpec.employmentType ("Intern", "Full time") — a faint "· type"
-   *  suffix on the status cell; null when unknown or already said by
-   *  statusNote. */
+   *  suffix on the label line (metadata with metadata); null when unknown
+   *  or already said by statusNote. */
   employmentType: string | null;
+  /** This row holds a manual "Waiting on you" drag rank — its grip stays
+   *  faintly visible as the cue that a hand-made order exists. */
+  ranked: boolean;
   /** Unsupported row with no agent currently running — offer Investigate. */
   canInvestigate: boolean;
   /** SUBMITTED via an out-of-band "Mark applied" (not a real sower submit) —
@@ -92,24 +96,6 @@ const UNDISCARDABLE = new Set([
   'DISCARDED',
   'DUPLICATE',
 ]);
-
-/** Rows offering the quiet "Mark applied" action (completed out of band):
- *  the waiting/processing states only — Sent rows are already applied, and
- *  Archive rows (FAILED/DUPLICATE/DISCARDED) have their own recovery
- *  actions. */
-const MARKABLE = new Set([
-  'INGESTED',
-  'PARSED',
-  'QUEUED',
-  'PREPARING',
-  'NEEDS_INPUT',
-  'REVIEW',
-  'AWAITING_OTP',
-  'FILLING',
-]);
-
-/** States where a priority no longer means anything — the control goes inert. */
-const PRIORITY_LOCKED = new Set(['SUBMITTED', 'CONFIRMED', 'DISCARDED']);
 
 export function TaskRow({
   row,
@@ -142,7 +128,7 @@ export function TaskRow({
       }),
     );
     discardRef.current = promise;
-    ws.toast('Discarded — Undo returns it to "Waiting on you"', {
+    ws.toast(`Discarded — Undo returns it to "${SECTIONS.waiting}"`, {
       focusUndo: viaKeyboard,
       onUndo: async () => {
         // Only restore what was actually discarded: await the discard and
@@ -223,11 +209,13 @@ export function TaskRow({
   if (hidden) return null;
 
   // Full status wording for the truncation tooltip (the cell may ellipsize).
+  // Only what THIS cell shows: the ⏰ chip and the type suffix carry their
+  // own tooltips, so repeating them here read twice.
   const statusTitle =
-    row.phrase +
-    (row.statusNote ? ` — ${row.statusNote}` : '') +
-    (row.employmentType ? ` · ${row.employmentType}` : '') +
-    (row.deadline ? ` · deadline ${row.deadline.label}` : '');
+    row.phrase + (row.statusNote ? ` — ${row.statusNote}` : '');
+  const labelTitle = row.employmentType
+    ? `${row.label} · ${row.employmentType}`
+    : row.label;
 
   const rowClass = [
     'grid-row',
@@ -253,7 +241,7 @@ export function TaskRow({
       }
     >
       {reorder ? (
-        <span className="tr-grip">
+        <span className={row.ranked ? 'tr-grip tr-grip--ranked' : 'tr-grip'}>
           <button
             type="button"
             className="tr-grip-btn"
@@ -296,9 +284,16 @@ export function TaskRow({
       </span>
       <span className="tr-label">
         <span className={`dot dot--${row.tone} tr-dot-narrow`} aria-hidden />
-        <Link href={`/tasks/${row.id}`} title={row.label}>
+        <Link href={`/tasks/${row.id}`} title={labelTitle}>
           {row.label}
         </Link>
+        {/* Faint "· Intern" — job metadata rides the job's label line. */}
+        {row.employmentType ? (
+          <span className="faint tr-type" title={row.employmentType}>
+            {' '}
+            · {row.employmentType}
+          </span>
+        ) : null}
       </span>
       <span className="tr-status">
         <span className={`dot dot--${row.tone}`} aria-hidden />
@@ -306,9 +301,6 @@ export function TaskRow({
           {row.phrase}
           {row.statusNote ? (
             <span className="faint"> — {row.statusNote}</span>
-          ) : null}
-          {row.employmentType ? (
-            <span className="faint"> · {row.employmentType}</span>
           ) : null}
         </span>
         {/* ⏰ chip — sibling of the phrase so its popover never clips on the
@@ -341,7 +333,7 @@ export function TaskRow({
                 'Retry failed — could not reach the server.',
               )
             }
-            title="Requeue this task for another attempt"
+            title={`Requeue this task for another attempt — moves to "${SECTIONS.processing}"`}
           >
             {busy ? 'Working…' : 'Retry'}
           </button>
@@ -370,11 +362,11 @@ export function TaskRow({
             onClick={() =>
               runMove(
                 restoreTask,
-                'Restored — back in "Waiting on you"',
+                `Restored — back in "${SECTIONS.waiting}"`,
                 'Restore failed — still in the Archive.',
               )
             }
-            title="Put this task back in the queue (as needs-input)"
+            title={`Put this task back in "${SECTIONS.waiting}"`}
           >
             Restore
           </button>
@@ -382,35 +374,18 @@ export function TaskRow({
         {row.canUnmark ? (
           <button
             type="button"
-            className="btn btn--quiet btn--sm tr-reveal"
+            className="btn btn--quiet btn--sm"
             disabled={busy}
             onClick={() =>
               runMove(
                 unmarkApplied,
-                'Back in "Waiting on you"',
+                `Back in "${SECTIONS.waiting}"`,
                 'Un-mark failed — could not reach the server.',
               )
             }
-            title={`"Mark applied" was a mistake — moves this back to "Waiting on you" (needs-input)`}
+            title={`"Mark applied" was a mistake — moves this back in "${SECTIONS.waiting}"`}
           >
             Un-mark applied
-          </button>
-        ) : null}
-        {MARKABLE.has(row.state) ? (
-          <button
-            type="button"
-            className="btn btn--quiet btn--sm tr-reveal"
-            disabled={busy}
-            onClick={() =>
-              runMove(
-                markApplied,
-                'Marked applied — moved to Sent',
-                'Mark applied failed — could not reach the server.',
-              )
-            }
-            title="You applied to this one yourself, outside sower — records it as submitted and moves it to Sent"
-          >
-            Mark applied
           </button>
         ) : null}
         {selectable ? (
@@ -418,7 +393,7 @@ export function TaskRow({
             type="button"
             className="btn btn--danger btn--sm tr-reveal"
             onClick={(e) => discard(e.detail === 0)}
-            title="Remove this task from the queue (the record is kept)"
+            title="Moves this task to the Archive (the record and history are kept; Restore brings it back)"
           >
             Discard
           </button>

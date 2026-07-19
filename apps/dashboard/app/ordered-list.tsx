@@ -7,17 +7,37 @@
 // row's new NEIGHBORS), and a failure reverts to the last server-confirmed
 // order with a toast. Every keyboard move is announced through an SR live
 // region ("Moved above <label>"). Server refreshes reset the order to the
-// server truth via the derive-state-from-changed-props pattern.
+// server truth via the derive-state-from-changed-props pattern — EXCEPT
+// while a move is still unflushed or in flight (H3): resetting then would
+// yank the row back mid-drag and make the eventual write's neighbors lie;
+// the flush's own refresh re-delivers fresh rows once the write lands.
+//
+// When any row is hand-ranked, a one-line hint under the section heading
+// explains the hybrid order and offers "clear manual order" (H6) — one api
+// call nulls the section's ranks and the pure priority/recency sort returns.
 
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
-import { moveToIndex, neighborIds } from '../lib/reorder';
+import {
+  moveToIndex,
+  neighborIds,
+  type ReorderNeighbors,
+} from '../lib/reorder';
+import { clearManualOrder } from './actions';
 import { TaskRow, type TaskRowData } from './task-row';
 import { reorderTask } from './tasks/[id]/actions';
 import { useWorkspace } from './workspace';
 
 /** Rapid arrow presses coalesce into ONE write of the final neighbors. */
 const REORDER_DEBOUNCE_MS = 400;
+
+/** One not-yet-written move: the row and the neighbors it ended between,
+ *  snapshotted when the move was made (H3) — a server refresh landing before
+ *  the debounce fires must not change what gets written. */
+interface PendingMove {
+  taskId: string;
+  neighbors: ReorderNeighbors;
+}
 
 export function OrderedList({ rows }: { rows: TaskRowData[] }) {
   const ws = useWorkspace();
@@ -30,6 +50,8 @@ export function OrderedList({ rows }: { rows: TaskRowData[] }) {
   const [insertAt, setInsertAt] = useState<number | null>(null);
   // SR-only live announcement for keyboard moves.
   const [announce, setAnnounce] = useState('');
+  // "clear manual order" in flight.
+  const [clearing, setClearing] = useState(false);
   // Last server-confirmed order — the only revert target.
   const baseRef = useRef<readonly TaskRowData[]>(rows);
   // Mirror of `order` for closures that outlive a render (timers, unmount).
@@ -37,20 +59,33 @@ export function OrderedList({ rows }: { rows: TaskRowData[] }) {
   // Monotonic write counter: only the latest write's result applies.
   const seqRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // The row whose (not-yet-written) new position is pending.
-  const pendingRef = useRef<string | null>(null);
+  // The move whose write is debounce-pending (snapshot, see PendingMove).
+  const pendingRef = useRef<PendingMove | null>(null);
+  // Reorder writes currently on the wire.
+  const inflightRef = useRef(0);
   if (rows !== prevRows) {
     setPrevRows(rows);
-    setOrder(rows);
-    baseRef.current = rows;
-    orderRef.current = rows;
+    // H3: while a move is unflushed or a write is in flight, the fresh
+    // server rows predate it — applying them would revert the move on
+    // screen. The flush's router.refresh() converges once the write lands.
+    if (
+      timerRef.current === null &&
+      pendingRef.current === null &&
+      inflightRef.current === 0
+    ) {
+      setOrder(rows);
+      baseRef.current = rows;
+      orderRef.current = rows;
+    }
   }
 
-  const flush = (taskId: string) => {
+  const flush = (move: PendingMove) => {
     const snapshot = orderRef.current;
     const seq = ++seqRef.current;
-    reorderTask(taskId, neighborIds(snapshot, taskId))
+    inflightRef.current += 1;
+    reorderTask(move.taskId, move.neighbors)
       .then((result) => {
+        inflightRef.current -= 1;
         if (seq !== seqRef.current) return; // a newer write owns the list
         if (result.ok) {
           baseRef.current = snapshot;
@@ -63,6 +98,7 @@ export function OrderedList({ rows }: { rows: TaskRowData[] }) {
         router.refresh();
       })
       .catch(() => {
+        inflightRef.current -= 1;
         if (seq !== seqRef.current) return;
         setOrder(baseRef.current);
         orderRef.current = baseRef.current;
@@ -76,24 +112,25 @@ export function OrderedList({ rows }: { rows: TaskRowData[] }) {
   const scheduleWrite = (taskId: string) => {
     // A different row's pending move flushes NOW — each write's neighbors
     // describe one row's final position, never a mixture.
-    if (
-      timerRef.current &&
-      pendingRef.current &&
-      pendingRef.current !== taskId
-    ) {
+    const pending = pendingRef.current;
+    if (timerRef.current && pending && pending.taskId !== taskId) {
       clearTimeout(timerRef.current);
       timerRef.current = null;
-      const previous = pendingRef.current;
       pendingRef.current = null;
-      flush(previous);
+      flush(pending);
     }
-    pendingRef.current = taskId;
+    // Snapshot the neighbors NOW (H3): the write must describe the position
+    // the user chose, whatever props arrive before the debounce fires.
+    pendingRef.current = {
+      taskId,
+      neighbors: neighborIds(orderRef.current, taskId),
+    };
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => {
       timerRef.current = null;
-      const pending = pendingRef.current;
+      const move = pendingRef.current;
       pendingRef.current = null;
-      if (pending) flush(pending);
+      if (move) flush(move);
     }, REORDER_DEBOUNCE_MS);
   };
 
@@ -102,14 +139,11 @@ export function OrderedList({ rows }: { rows: TaskRowData[] }) {
       if (timerRef.current) {
         clearTimeout(timerRef.current);
         timerRef.current = null;
-        const pending = pendingRef.current;
+        const move = pendingRef.current;
         pendingRef.current = null;
-        if (pending) {
+        if (move) {
           // Unmounting mid-debounce must not lose the chosen order.
-          void reorderTask(
-            pending,
-            neighborIds(orderRef.current, pending),
-          ).catch(() => {});
+          void reorderTask(move.taskId, move.neighbors).catch(() => {});
         }
       }
     },
@@ -201,28 +235,76 @@ export function OrderedList({ rows }: { rows: TaskRowData[] }) {
     return null;
   };
 
+  // H6: return the whole section to the pure priority/recency sort. A
+  // pending drag write is deliberately DROPPED — the user just asked for no
+  // manual order at all — and the server's conditional writes keep any
+  // still-in-flight one from resurrecting a cleared rank.
+  const clearOrder = () => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    pendingRef.current = null;
+    setClearing(true);
+    clearManualOrder()
+      .then((result) => {
+        if (result.ok) {
+          ws.toast('Manual order cleared — sorted by priority again');
+        } else {
+          ws.toast(`Order not cleared — ${result.message}`, { kind: 'error' });
+        }
+        router.refresh();
+      })
+      .catch(() => {
+        ws.toast('Order not cleared — could not reach the server.', {
+          kind: 'error',
+        });
+      })
+      .finally(() => {
+        setClearing(false);
+      });
+  };
+
+  const hasManualOrder = order.some((row) => row.ranked);
+
   return (
-    <div className="row-list">
-      {order.map((row, i) => (
-        <TaskRow
-          key={row.id}
-          row={row}
-          reorder={{
-            index: i,
-            count: order.length,
-            dragging: row.id === dragId,
-            dropEdge: dropEdgeFor(i),
-            onDragStart,
-            onDragEnd,
-            onDragOver,
-            onDrop,
-            onMove: moveBy,
-          }}
-        />
-      ))}
-      <span aria-live="polite" className="sr-only">
-        {announce}
-      </span>
+    <div>
+      {hasManualOrder ? (
+        <p className="hint order-hint">
+          Your order — drag to change ·{' '}
+          <button
+            type="button"
+            className="order-clear"
+            disabled={clearing}
+            onClick={clearOrder}
+            title="Remove the hand-made order — every row sorts by priority and recency again"
+          >
+            {clearing ? 'clearing…' : 'clear manual order'}
+          </button>
+        </p>
+      ) : null}
+      <div className="row-list">
+        {order.map((row, i) => (
+          <TaskRow
+            key={row.id}
+            row={row}
+            reorder={{
+              index: i,
+              count: order.length,
+              dragging: row.id === dragId,
+              dropEdge: dropEdgeFor(i),
+              onDragStart,
+              onDragEnd,
+              onDragOver,
+              onDrop,
+              onMove: moveBy,
+            }}
+          />
+        ))}
+        <span aria-live="polite" className="sr-only">
+          {announce}
+        </span>
+      </div>
     </div>
   );
 }

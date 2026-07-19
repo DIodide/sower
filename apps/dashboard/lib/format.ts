@@ -1,13 +1,5 @@
 import type { TaskState } from '@sower/core';
 
-/** Absolute UTC timestamp, minute precision: `2026-07-11 14:03 UTC`. */
-export function formatDate(value: Date | string | null | undefined): string {
-  if (!value) return '—';
-  const d = typeof value === 'string' ? new Date(value) : value;
-  if (Number.isNaN(d.getTime())) return '—';
-  return `${d.toISOString().replace('T', ' ').slice(0, 16)} UTC`;
-}
-
 /** The timezone the dashboard renders local times in. */
 const DISPLAY_TZ = 'America/New_York';
 
@@ -258,6 +250,30 @@ export const BUCKETS: Record<
 export function isBucket(value: string): value is Bucket {
   return value in BUCKETS;
 }
+
+/**
+ * The workspace's section names — the ONE vocabulary every surface uses for
+ * destinations: section headings, action messages ('back in "Waiting on
+ * you"', 'moved to Sent'), and button titles. Never a raw state enum.
+ */
+export const SECTIONS = {
+  waiting: 'Waiting on you',
+  processing: 'New & processing',
+  sent: 'Sent',
+  archive: 'Archive',
+} as const;
+
+/**
+ * States where a priority (and the user note) no longer mean anything —
+ * the task has left the queue. Shared by the list rows and the task detail
+ * header so the two can never disagree.
+ */
+export const PRIORITY_LOCKED = new Set<string>([
+  'SUBMITTED',
+  'CONFIRMED',
+  'DISCARDED',
+  'DUPLICATE',
+]);
 
 /** Scheme + www. stripped, capped — the label of last resort. */
 export function shortenUrl(url: string, max = 60): string {

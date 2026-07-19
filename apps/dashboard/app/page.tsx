@@ -30,6 +30,7 @@ import {
   isDeadlineSoon,
   relativeTime,
   rowLabel,
+  SECTIONS,
   STATE_META,
   stateMeta,
   type Tone,
@@ -222,6 +223,7 @@ export default async function Page({
     state: applicationTasks.state,
     priority: applicationTasks.priority,
     notes: applicationTasks.notes,
+    sortRank: applicationTasks.sortRank,
     updatedAt: applicationTasks.updatedAt,
     jobSpec: applicationTasks.jobSpec,
     dueDate: applicationTasks.dueDate,
@@ -453,6 +455,9 @@ export default async function Page({
         !statusNote?.toLowerCase().includes(employmentType.toLowerCase())
           ? employmentType
           : null,
+      // Hand-ranked "Waiting on you" rows keep a faintly-visible grip and
+      // light the section's "Your order" hint.
+      ranked: row.sortRank !== null,
       canInvestigate,
       canUnmark:
         row.state === 'SUBMITTED' &&
@@ -622,14 +627,14 @@ export default async function Page({
         </div>
       ) : (
         <Workspace>
-          <Section title="Waiting on you" rows={waiting} reorderable />
+          <Section title={SECTIONS.waiting} rows={waiting} reorderable />
           <Section
-            title="New & processing"
+            title={SECTIONS.processing}
             rows={processing}
             count={processingTotal}
           />
           <section>
-            <SectionHeading count={sentTotal}>Sent</SectionHeading>
+            <SectionHeading count={sentTotal}>{SECTIONS.sent}</SectionHeading>
             {sent.length === 0 ? (
               <Empty>none</Empty>
             ) : sent.length <= SENT_VISIBLE ? (
@@ -640,7 +645,14 @@ export default async function Page({
                   <TaskRow key={row.id} row={row} />
                 ))}
                 <details className="show-more">
-                  <summary>show {sent.length - SENT_VISIBLE} more</summary>
+                  {/* Stays collapsible: the summary never hides — its label
+                      swaps to "show less" while open (CSS-driven). */}
+                  <summary>
+                    <span className="show-more-closed">
+                      show {sent.length - SENT_VISIBLE} more
+                    </span>
+                    <span className="show-more-open">show less</span>
+                  </summary>
                   {sent.slice(SENT_VISIBLE).map((row) => (
                     <TaskRow key={row.id} row={row} />
                   ))}
@@ -654,7 +666,7 @@ export default async function Page({
             open={archiveOpen || undefined}
           >
             <summary>
-              Archive{' '}
+              {SECTIONS.archive}{' '}
               <span className="hint">
                 {archiveTotal} task{archiveTotal === 1 ? '' : 's'} — failed,
                 duplicates, discarded

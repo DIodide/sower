@@ -17,7 +17,16 @@ import {
   type Job,
   jobs,
 } from '@sower/db';
-import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  type SQL,
+  sql,
+} from 'drizzle-orm';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { registerAnswerLibraryRoutes } from './answer-library.js';
@@ -38,6 +47,13 @@ import {
   processTask,
   recordJobDescription,
 } from './process.js';
+import {
+  midpointRank,
+  RANK_GAP,
+  rankedCaseSql,
+  ranksCollide,
+  reslotIndex,
+} from './rank.js';
 import {
   claimSessionRequest,
   completeSessionCapture,
@@ -121,14 +137,6 @@ const WAITING_STATES: readonly TaskState[] = [
   'AWAITING_OTP',
 ];
 
-/** Base spacing between assigned sort ranks: leaves ~10 halvings of headroom
- *  between any two neighbors before a resequence is needed. */
-const RANK_GAP = 1024;
-
-/** A midpoint closer than this to either neighbor is a collision — the
- *  section's ranks are resequenced to RANK_GAP-spaced integers first. */
-const RANK_EPSILON = 1e-6;
-
 // The dashboard quick-add paste box (free text; urls are extracted from it).
 // 50k comfortably fits a whole job-links email; the dashboard action mirrors
 // this cap so the user sees a friendly message instead of a 400.
@@ -206,9 +214,12 @@ const otpBodySchema = z.object({
   code: z.string().min(4).max(20),
 });
 
-// Bulk discard body (the dashboard Queue page's "Discard selected").
+// Bulk discard body (the dashboard workspace's "Discard selected"). The
+// optional note ("why") is shared by the batch and stored on EACH task's
+// DISCARD event — the same shape the single-discard note uses.
 const bulkDiscardBodySchema = z.object({
   taskIds: z.array(z.string().uuid()).min(1).max(100),
+  note: z.string().trim().max(2000).optional(),
 });
 
 // Optional note body shared by single discard and mark-applied: a human note
@@ -651,6 +662,7 @@ export function buildServer(deps: Deps): FastifyInstance {
         .send({ error: 'invalid body', issues: parsed.error.issues });
     }
     let discarded = 0;
+    const bulkNote = parsed.data.note;
     const skipped: { id: string; reason: string }[] = [];
     for (const taskId of parsed.data.taskIds) {
       const rows = await deps.db
@@ -677,6 +689,8 @@ export function buildServer(deps: Deps): FastifyInstance {
       try {
         await transitionTask(deps.db, taskId, row.state, 'DISCARD', {
           reason: 'manual',
+          // Omit the key entirely when absent/blank — event data stays minimal.
+          ...(bulkNote ? { note: bulkNote } : {}),
         });
         discarded += 1;
         await refreshIngestReply(deps, taskId);
@@ -713,7 +727,9 @@ export function buildServer(deps: Deps): FastifyInstance {
     const rows = await deps.db
       .select({
         id: applicationTasks.id,
+        state: applicationTasks.state,
         sortRank: applicationTasks.sortRank,
+        priority: applicationTasks.priority,
       })
       .from(applicationTasks)
       .where(eq(applicationTasks.id, taskId))
@@ -725,7 +741,7 @@ export function buildServer(deps: Deps): FastifyInstance {
     const set: {
       notes?: string | null;
       priority?: TaskPriority;
-      sortRank?: null;
+      sortRank?: number | null | SQL;
       dueDate?: Date | null;
     } = {};
     if (body.data.notes !== undefined) {
@@ -733,11 +749,69 @@ export function buildServer(deps: Deps): FastifyInstance {
     }
     if (body.data.priority !== undefined) {
       set.priority = body.data.priority;
-      // The user's rule: choosing a priority declares "sort me by priority
-      // again" — a manual drag rank on this task is cleared in the SAME
-      // write, so the row immediately rejoins the priority-ordered block.
+      // Priority and manual rank COMPOSE (B2, option A): a hand-ranked row
+      // keeps a rank and RE-SLOTS within the ranked block — it bubbles up
+      // for a raise / down for a lower and stops at the first ranked row it
+      // doesn't outrank (equal priorities keep their relative order).
+      // Clearing the rank here was the demotion bug: with NULLS-LAST
+      // ordering a just-raised row fell BELOW every ranked row. An unranked
+      // row needs no rank handling at all — the priority sort moves it.
       if (row.sortRank !== null && row.sortRank !== undefined) {
-        set.sortRank = null;
+        if (!WAITING_STATES.includes(row.state)) {
+          // A rank outside the section is legacy noise; clear it plainly.
+          set.sortRank = null;
+        } else {
+          // The section's OTHER ranked rows, top-down (the unranked block
+          // is irrelevant — it always sorts after every ranked row).
+          const section = await deps.db
+            .select({
+              id: applicationTasks.id,
+              sortRank: applicationTasks.sortRank,
+              priority: applicationTasks.priority,
+            })
+            .from(applicationTasks)
+            .where(inArray(applicationTasks.state, [...WAITING_STATES]))
+            .orderBy(sql`${applicationTasks.sortRank} asc nulls last`);
+          const others = section.filter(
+            (
+              r,
+            ): r is { id: string; sortRank: number; priority: TaskPriority } =>
+              r.id !== taskId && r.sortRank !== null,
+          );
+          const slot = reslotIndex(
+            others,
+            row.sortRank,
+            row.priority,
+            body.data.priority,
+          );
+          if (slot !== null) {
+            let above = others[slot - 1]?.sortRank;
+            let below = others[slot]?.sortRank;
+            if (ranksCollide(above, below)) {
+              // Too tight for a distinct midpoint: resequence the RANKED
+              // rows to RANK_GAP-spaced integers first (the unranked block
+              // keeps its pure priority/recency order), skipping the moved
+              // row — it gets the conditional write below.
+              for (const [i, other] of others.entries()) {
+                const next = (i + 1) * RANK_GAP;
+                if (next !== other.sortRank) {
+                  await deps.db
+                    .update(applicationTasks)
+                    .set({ sortRank: next })
+                    .where(eq(applicationTasks.id, other.id));
+                }
+              }
+              above = slot > 0 ? slot * RANK_GAP : undefined;
+              below = slot < others.length ? (slot + 1) * RANK_GAP : undefined;
+            }
+            // The rank update is conditional in the UPDATE itself (no
+            // read-then-write race): if a concurrent write cleared this
+            // row's rank between our read and this statement, it STAYS
+            // cleared — the debounced reorder/priority race converges
+            // instead of a stale read resurrecting a rank.
+            set.sortRank = rankedCaseSql(midpointRank(above, below));
+          }
+        }
       }
     }
     if (body.data.dueDate !== undefined) {
@@ -844,9 +918,7 @@ export function buildServer(deps: Deps): FastifyInstance {
     const needsResequence =
       (before !== undefined && before.sortRank === null) ||
       (after !== undefined && after.sortRank === null) ||
-      (before?.sortRank != null &&
-        after?.sortRank != null &&
-        Math.abs(before.sortRank - after.sortRank) < 2 * RANK_EPSILON);
+      ranksCollide(before?.sortRank ?? undefined, after?.sortRank ?? undefined);
     const rankOf = new Map<string, number>();
     if (needsResequence) {
       others.forEach((r, i) => {
@@ -868,12 +940,7 @@ export function buildServer(deps: Deps): FastifyInstance {
     }
     const beforeRank = before ? rankOf.get(before.id) : undefined;
     const afterRank = after ? rankOf.get(after.id) : undefined;
-    const sortRank =
-      beforeRank !== undefined && afterRank !== undefined
-        ? (beforeRank + afterRank) / 2
-        : beforeRank !== undefined
-          ? beforeRank + RANK_GAP
-          : (afterRank as number) - RANK_GAP;
+    const sortRank = midpointRank(beforeRank, afterRank);
     // Like notes/priority, a reorder is an annotation: updatedAt is left
     // alone so the unranked block's recency order never shifts under it.
     await deps.db
@@ -881,6 +948,25 @@ export function buildServer(deps: Deps): FastifyInstance {
       .set({ sortRank })
       .where(eq(applicationTasks.id, taskId));
     return reply.code(200).send({ ok: true, sortRank });
+  });
+
+  // Clear the "Waiting on you" section's manual order (the section header's
+  // "clear manual order" action): one conditional UPDATE nulls every
+  // waiting-section rank, returning the whole section to the pure
+  // priority/recency sort. SQL-atomic — there is no read-then-write to race
+  // with a concurrent drag; a reorder write landing after this simply
+  // re-ranks its one row.
+  app.post('/tasks/clear-order', async (_request, reply) => {
+    await deps.db
+      .update(applicationTasks)
+      .set({ sortRank: null })
+      .where(
+        and(
+          inArray(applicationTasks.state, [...WAITING_STATES]),
+          isNotNull(applicationTasks.sortRank),
+        ),
+      );
+    return reply.code(200).send({ ok: true });
   });
 
   // Un-mark applied: undo of a mistaken out-of-band "Mark applied". Allowed

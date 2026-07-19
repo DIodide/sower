@@ -457,13 +457,6 @@ a.brand:hover {
   margin: 0 0 0.5rem;
 }
 
-.chip-row-label {
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--ink-faint);
-  min-width: 4.75rem;
-}
-
 .chip {
   display: inline-flex;
   align-items: center;
@@ -635,12 +628,6 @@ tbody tr:hover {
 .cell-main {
   font-weight: 500;
   font-size: 0.875rem;
-}
-
-.cell-sub {
-  color: var(--ink-muted);
-  font-size: 0.8125rem;
-  margin-top: 0.0625rem;
 }
 
 /* ------------------------------------------------------------------- forms */
@@ -844,6 +831,21 @@ input[type="file"]::file-selector-button {
 .steps li.current::before {
   background: var(--accent);
   border-color: var(--accent-deep);
+}
+
+/* narrow: the stepper compresses (labels wrap inside their cells) instead of
+   scrolling sideways */
+@media (max-width: 500px) {
+  .steps {
+    overflow-x: visible;
+  }
+
+  .steps li {
+    min-width: 0;
+    padding-top: 1rem;
+    font-size: 0.625rem;
+    overflow-wrap: anywhere;
+  }
 }
 
 /* ---------------------------------------------------------------- timeline */
@@ -1315,9 +1317,43 @@ details.filter-pop > summary::-webkit-details-marker {
   transition: opacity 100ms ease;
 }
 
+/* a hand-ranked row's grip stays faintly visible — the standing cue that a
+   manual order exists (full strength on hover, like every grip) */
+.tr-grip--ranked {
+  opacity: 0.4;
+}
+
 .grid-row:hover .tr-grip,
 .grid-row:focus-within .tr-grip {
   opacity: 1;
+}
+
+/* the "Your order — drag to change · clear manual order" hint under the
+   "Waiting on you" heading, shown only while any row is hand-ranked */
+.order-hint {
+  margin: -0.25rem 0 0.375rem;
+  font-size: 0.75rem;
+}
+
+.order-clear {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent-deep);
+  cursor: pointer;
+}
+
+.order-clear:hover {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.order-clear:disabled {
+  color: var(--ink-faint);
+  cursor: default;
+  text-decoration: none;
 }
 
 .tr-grip-btn {
@@ -1374,6 +1410,14 @@ details.filter-pop > summary::-webkit-details-marker {
 .tr-label a {
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* faint "· Intern" employment-type suffix riding the label line */
+.tr-label .tr-type {
+  flex: none;
+  font-size: 0.75rem;
+  font-weight: 400;
   white-space: nowrap;
 }
 
@@ -1651,16 +1695,29 @@ button.due-cell-btn:hover {
   white-space: nowrap;
 }
 
+/* the ghost "Add note…" hides until hover only INSIDE list rows; on the
+   task detail header (no .grid-row ancestor) it is always visible */
 .note-ghost {
-  opacity: 0;
   font-style: italic;
   transition: opacity 100ms ease;
 }
 
+.grid-row .note-ghost {
+  opacity: 0;
+}
+
 .grid-row:hover .note-ghost,
 .grid-row:focus-within .note-ghost,
-.note-ghost:focus-visible {
+.grid-row .note-ghost:focus-visible {
   opacity: 1;
+}
+
+/* read-only note display (sent/archived tasks on the detail header) */
+.note-static {
+  font-size: 0.8125rem;
+  color: var(--ink-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .note-edit {
@@ -1703,7 +1760,8 @@ button.due-cell-btn:hover {
   font-size: 0.6875rem;
 }
 
-/* "show all N" expander inside the Sent list */
+/* "show N more" expander inside the Sent list — stays collapsible: the
+   summary never hides, its label swaps to "show less" while open */
 details.show-more > summary {
   list-style: none;
   cursor: pointer;
@@ -1722,8 +1780,16 @@ details.show-more > summary:hover {
   color: var(--accent-deep);
 }
 
-details.show-more[open] > summary {
+details.show-more > summary .show-more-open {
   display: none;
+}
+
+details.show-more[open] > summary .show-more-closed {
+  display: none;
+}
+
+details.show-more[open] > summary .show-more-open {
+  display: inline;
 }
 
 /* sticky select bar + undo toast, docked bottom-center above everything */
@@ -1810,7 +1876,7 @@ details.show-more[open] > summary {
     opacity: 1;
   }
 
-  .note-ghost,
+  .grid-row .note-ghost,
   .due-ghost {
     opacity: 1;
   }

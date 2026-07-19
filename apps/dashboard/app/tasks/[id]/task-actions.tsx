@@ -1,11 +1,13 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useActionState } from 'react';
+import { useActionState, useState } from 'react';
+import { SECTIONS } from '../../../lib/format';
 import type { ActionResult } from './actions';
 import {
   approveTask,
   discardTask,
+  investigateTask,
   markApplied,
   requeueTask,
   restoreTask,
@@ -19,6 +21,7 @@ type Mode =
   | 'approve'
   | 'start'
   | 'verify'
+  | 'investigate'
   | 'discard'
   | 'restore'
   | 'mark-applied'
@@ -29,13 +32,12 @@ const LABELS: Record<Mode, { idle: string; className: string; title: string }> =
     approve: {
       idle: 'Approve & dry-run submit',
       className: 'btn btn--success',
-      title:
-        'Constructs and records the submission payload — nothing is sent to the platform',
+      title: `Constructs and records the submission payload — nothing is sent to the platform, and the task stays in "${SECTIONS.waiting}"`,
     },
     requeue: {
       idle: 'Requeue task',
       className: 'btn btn--primary',
-      title: 'Puts the task back on the queue for another processing attempt',
+      title: `Runs another processing attempt — the task moves to "${SECTIONS.processing}"`,
     },
     start: {
       idle: 'Start session capture',
@@ -49,40 +51,55 @@ const LABELS: Record<Mode, { idle: string; className: string; title: string }> =
       title:
         'Confirms that you, a human, checked the machine-extracted questions against the real application form — marks the form verified and updates the Discord ingest reply',
     },
+    investigate: {
+      idle: 'Run the browser agent',
+      className: 'btn btn--primary',
+      title:
+        "Starts the form-discovery browser agent on this job's page — discovered questions land on this task for you to verify",
+    },
     discard: {
       idle: 'Discard task',
       className: 'btn btn--danger',
-      title:
-        'Removes this task from the queue — nothing will run for it anymore (the record and history are kept)',
+      title: `Moves this task to the ${SECTIONS.archive} — the record and history are kept, and Restore brings it back`,
     },
     restore: {
       idle: 'Restore to queue',
       className: 'btn',
-      title:
-        'Puts this task back in the queue (as needs-input) — the auto-discard rule never re-discards a restored task',
+      title: `Puts this task back in "${SECTIONS.waiting}" — the auto-discard rule never re-discards a restored task`,
     },
     'mark-applied': {
       idle: 'Mark applied',
       className: 'btn btn--success',
-      title:
-        'Records that you completed this application yourself, outside sower — the task moves to Sent and nothing will run for it anymore',
+      title: `Records that you completed this application yourself, outside sower — the task moves to ${SECTIONS.sent}`,
     },
     'unmark-applied': {
       idle: 'Un-mark applied',
       className: 'btn',
-      title:
-        '"Mark applied" was a mistake — moves this task back to "Waiting on you" (needs-input); only out-of-band marks can be undone, never a real sower submission',
+      title: `"Mark applied" was a mistake — moves this task back in "${SECTIONS.waiting}"; only out-of-band marks can be undone, never a real sower submission`,
     },
   };
 
-/** Modes carrying an optional free-text note on the same row as the button. */
-const NOTE_PLACEHOLDERS: Partial<Record<Mode, string>> = {
-  discard: 'why? (optional — saved with the discard)',
-  'mark-applied': 'where/how? (optional)',
+/** Modes carrying an optional free-text note. Two-step confirm: the first
+ *  click only reveals the note input (and a confirm label); the second click
+ *  performs the action. */
+const NOTE_MODES: Partial<
+  Record<Mode, { placeholder: string; confirm: string }>
+> = {
+  discard: {
+    placeholder: 'why? (optional — saved with the discard)',
+    confirm: 'Confirm discard',
+  },
+  'mark-applied': {
+    placeholder: 'where/how? (optional)',
+    confirm: 'Confirm — mark applied',
+  },
 };
 
 export function TaskActions({ taskId, mode }: { taskId: string; mode: Mode }) {
   const router = useRouter();
+  // Two-step confirm for the note-carrying modes: armed = the input is
+  // revealed and the next click really performs the action.
+  const [armed, setArmed] = useState(false);
   const [result, formAction, pending] = useActionState<
     ActionResult | null,
     FormData
@@ -91,6 +108,7 @@ export function TaskActions({ taskId, mode }: { taskId: string; mode: Mode }) {
       if (mode === 'approve') return approveTask(taskId);
       if (mode === 'start') return startSessionCapture(taskId);
       if (mode === 'verify') return verifyDiscoveredForm(taskId);
+      if (mode === 'investigate') return investigateTask(taskId);
       if (mode === 'restore') return restoreTask(taskId);
       if (mode === 'unmark-applied') return unmarkApplied(taskId);
       if (mode === 'discard' || mode === 'mark-applied') {
@@ -112,24 +130,33 @@ export function TaskActions({ taskId, mode }: { taskId: string; mode: Mode }) {
   }, null);
 
   const label = LABELS[mode];
-  const notePlaceholder = NOTE_PLACEHOLDERS[mode];
+  const noteMode = NOTE_MODES[mode];
+  const twoStep = noteMode !== undefined && !armed;
   return (
     <form action={formAction}>
       <div className="row">
         <button
-          type="submit"
+          // Step one only arms the confirm — nothing submits yet.
+          type={twoStep ? 'button' : 'submit'}
           disabled={pending}
           className={label.className}
           title={label.title}
+          onClick={twoStep ? () => setArmed(true) : undefined}
         >
-          {pending ? 'Working…' : label.idle}
+          {pending
+            ? 'Working…'
+            : armed && noteMode
+              ? noteMode.confirm
+              : label.idle}
         </button>
-        {notePlaceholder ? (
+        {noteMode && armed ? (
           <input
+            // biome-ignore lint/a11y/noAutofocus: the input appears because the user just clicked the button beside it — focus continues their action
+            autoFocus
             type="text"
             name="note"
             className="field discard-note"
-            placeholder={notePlaceholder}
+            placeholder={noteMode.placeholder}
             aria-label={
               mode === 'discard'
                 ? 'Discard note (optional)'

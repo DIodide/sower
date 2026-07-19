@@ -67,6 +67,9 @@ export function Workspace({ children }: { children: ReactNode }) {
   const [selected, setSelectedSet] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  // Optional shared "why" typed on the select bar — stored on every ticked
+  // task's DISCARD event, exactly like the single-discard note.
+  const [bulkNote, setBulkNote] = useState('');
   const [toast, setToastState] = useState<ToastState | null>(null);
   const [pending, startTransition] = useTransition();
   // Mirror of the live toast for the (ref-only) queueing machinery.
@@ -168,10 +171,11 @@ export function Workspace({ children }: { children: ReactNode }) {
   const discardSelected = () => {
     const ids = [...selected];
     if (ids.length === 0) return;
+    const note = bulkNote.trim();
     startTransition(async () => {
       let result: Awaited<ReturnType<typeof discardTaskIds>>;
       try {
-        result = await discardTaskIds(ids);
+        result = await discardTaskIds(ids, note === '' ? undefined : note);
       } catch {
         showToast('Discard failed — could not reach the server.', {
           kind: 'error',
@@ -179,6 +183,7 @@ export function Workspace({ children }: { children: ReactNode }) {
         return;
       }
       setSelectedSet(new Set());
+      setBulkNote('');
       const restorable = result.discardedIds;
       if (restorable.length > 0) {
         showToast(`${result.message} — Undo returns them to "Waiting on you"`, {
@@ -254,6 +259,17 @@ export function Workspace({ children }: { children: ReactNode }) {
         </div>
         {selected.size > 0 ? (
           <div className="select-bar" role="toolbar" aria-label="selection">
+            <input
+              type="text"
+              className="field discard-note"
+              placeholder="why? (optional — saved with each discard)"
+              aria-label="Discard note (optional, applies to every ticked task)"
+              title="Saved with every ticked task's discard so future-you knows why"
+              value={bulkNote}
+              maxLength={2000}
+              disabled={pending}
+              onChange={(e) => setBulkNote(e.target.value)}
+            />
             <button
               type="button"
               className="btn btn--danger btn--sm"
