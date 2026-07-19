@@ -80,6 +80,12 @@ export const KIND_META: Record<
     fallbackExcerpt: 'repo sync',
     runningLabel: 'Syncing from the repo',
   },
+  fork: {
+    label: 'fork',
+    tone: 'accent',
+    fallbackExcerpt: 'forked resume',
+    runningLabel: 'Forking the resume',
+  },
   agent: {
     label: 'agent',
     tone: 'accent',
