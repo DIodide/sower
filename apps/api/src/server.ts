@@ -30,7 +30,11 @@ import { runIngestionPoll } from './ingest-poll.js';
 import { refreshIngestReply } from './ingest-reply.js';
 import { triggerInvestigation } from './investigate-trigger.js';
 import { requestOtp, submitOtp } from './otp-actions.js';
-import { processTask } from './process.js';
+import {
+  backfillJobFields,
+  processTask,
+  recordJobDescription,
+} from './process.js';
 import {
   claimSessionRequest,
   completeSessionCapture,
@@ -242,6 +246,12 @@ const discoveredFormSchema = z.object({
   applyUrl: z.string().optional(),
   company: z.string().optional(),
   title: z.string().optional(),
+  // Programmatically scraped JD markdown (~20k cap in @sower/investigate;
+  // 25k here leaves headroom so a boundary payload is never rejected).
+  descriptionMarkdown: z.string().max(25_000).optional(),
+  // Not extracted by @sower/investigate yet — accepted now so the endpoint
+  // needs no change when the agent starts reporting it.
+  employmentType: z.string().max(200).optional(),
   questions: z.array(discoveredQuestionSchema),
   confidence: z.enum(['high', 'medium', 'low']),
   notes: z.string(),
@@ -285,7 +295,7 @@ function buildDiscoveredJobSpec(
   job: Job,
   result: z.infer<typeof discoveredFormSchema>,
 ): JobSpec {
-  return {
+  const spec: JobSpec = {
     platform: asPlatform(job.platform),
     tenant: job.tenant ?? '',
     externalId: job.externalId ?? '',
@@ -295,6 +305,10 @@ function buildDiscoveredJobSpec(
     questions: result.questions,
     discoveredByAgent: true,
   };
+  if (result.employmentType) {
+    spec.employmentType = result.employmentType;
+  }
+  return spec;
 }
 
 /** Constant-time string comparison (length-guarded). */
@@ -826,6 +840,20 @@ export function buildServer(deps: Deps): FastifyInstance {
               confidence: result.confidence,
             },
           });
+          // An unsupported-link ingest records no title/company, so the
+          // dashboard showed "— untitled role" — fill the blanks from the
+          // agent's finding (never overwriting ingest-recorded values), and
+          // store the scraped JD markdown as a versioned job_descriptions
+          // row exactly like processTask does for adapter descriptions.
+          await backfillJobFields(deps.db, job, {
+            company: result.company,
+            title: result.title,
+          });
+          await recordJobDescription(
+            deps.db,
+            job.id,
+            result.descriptionMarkdown,
+          );
         } else {
           // Transcript persistence must never be lost to a missing task row.
           status = 'error';
@@ -1101,6 +1129,16 @@ export function buildServer(deps: Deps): FastifyInstance {
       return reply
         .code(500)
         .send({ error: outcome.error, attempt: outcome.attempt });
+    }
+    if (outcome.kind === 'auto_discarded') {
+      // A full-time posting the rule discarded is a FINAL outcome: 200 so
+      // Cloud Tasks never re-delivers (a retry would just re-parse a job we
+      // deliberately removed from the queue).
+      return reply.code(200).send({
+        autoDiscarded: true,
+        state: outcome.state,
+        employmentType: outcome.employmentType,
+      });
     }
     return reply.code(200).send({
       state: outcome.state,

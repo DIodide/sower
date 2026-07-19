@@ -29,9 +29,21 @@ interface AshbyJobPosting {
   location?: string | null;
   department?: string | null;
   team?: string | null;
+  /** Camel-cased type: 'FullTime' | 'PartTime' | 'Intern' | 'Contract' | … */
   employmentType?: string | null;
   isListed?: boolean;
   isRemote?: boolean;
+  /** 'Remote' | 'Hybrid' | 'Onsite' as published on the job board. */
+  workplaceType?: string | null;
+  /** Present with ?includeCompensation=true; summaries may be null. */
+  compensation?: {
+    compensationTierSummary?: string | null;
+    scrapeableCompensationSalarySummary?: string | null;
+    compensationTiers?: Array<{
+      title?: string | null;
+      tierSummary?: string | null;
+    }> | null;
+  } | null;
   jobUrl?: string | null;
   applyUrl?: string | null;
   /** Rendered HTML description from the posting API. */
@@ -65,6 +77,49 @@ const ASHBY_FIELD_TYPE_MAP: Record<string, Question['type']> = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The posting API's camel-cased employmentType rendered the way the hosted
+ * job board displays it ("FullTime" → "Full time"). Unknown values pass
+ * through untouched — never invented, only re-spaced.
+ */
+const ASHBY_EMPLOYMENT_TYPE_LABELS: Record<string, string> = {
+  FullTime: 'Full time',
+  PartTime: 'Part time',
+  Intern: 'Intern',
+  Contract: 'Contract',
+  Temporary: 'Temporary',
+};
+
+/**
+ * Compensation as ONE display string, exactly as the source published it:
+ * the board-level summary when present, else the per-tier summaries
+ * ("Tier: $A – $B") joined with ' · ', else the scrapeable salary summary.
+ */
+function ashbyCompensationDisplay(
+  compensation: AshbyJobPosting['compensation'],
+): string | undefined {
+  if (!compensation) {
+    return undefined;
+  }
+  if (compensation.compensationTierSummary) {
+    return compensation.compensationTierSummary;
+  }
+  const tiers = (compensation.compensationTiers ?? [])
+    .map((tier) => {
+      if (!tier.tierSummary) {
+        return null;
+      }
+      return tier.title
+        ? `${tier.title}: ${tier.tierSummary}`
+        : tier.tierSummary;
+    })
+    .filter((tier): tier is string => tier !== null);
+  if (tiers.length > 0) {
+    return tiers.join(' · ');
+  }
+  return compensation.scrapeableCompensationSalarySummary ?? undefined;
 }
 
 function asString(value: unknown): string | null {
@@ -309,6 +364,25 @@ export class AshbyAdapter implements PlatformAdapter {
     const location = posting.location;
     if (location) {
       spec.location = location;
+    }
+    if (posting.employmentType) {
+      spec.employmentType =
+        ASHBY_EMPLOYMENT_TYPE_LABELS[posting.employmentType] ??
+        posting.employmentType;
+    }
+    // workplaceType is authoritative; isRemote covers older payloads.
+    const locationType =
+      posting.workplaceType || (posting.isRemote === true ? 'Remote' : null);
+    if (locationType) {
+      spec.locationType = locationType;
+    }
+    const department = posting.department || posting.team;
+    if (department) {
+      spec.department = department;
+    }
+    const compensation = ashbyCompensationDisplay(posting.compensation);
+    if (compensation) {
+      spec.compensation = compensation;
     }
     if (posting.descriptionHtml) {
       spec.descriptionHtml = posting.descriptionHtml;

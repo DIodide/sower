@@ -69,6 +69,9 @@ interface GreenhouseJobPayload {
   title: string;
   company_name?: string | null;
   location?: { name?: string | null } | null;
+  /** Board-configured departments/offices; employment type is NOT exposed. */
+  departments?: Array<{ name?: string | null }> | null;
+  offices?: Array<{ name?: string | null }> | null;
   absolute_url: string;
   /** HTML-entity-encoded HTML description (present only with ?content=true). */
   content?: string | null;
@@ -216,10 +219,22 @@ export class GreenhouseAdapter implements PlatformAdapter {
     if (company) {
       spec.company = company;
     }
-    const location = payload.location?.name;
+    // `location.name` is the posting's display location; the offices list is
+    // the board taxonomy and only fills in when no display location exists.
+    const officeNames = (payload.offices ?? [])
+      .map((office) => office.name)
+      .filter((name): name is string => Boolean(name));
+    const location = payload.location?.name || officeNames.join(' · ');
     if (location) {
       spec.location = location;
     }
+    const departmentNames = (payload.departments ?? [])
+      .map((department) => department.name)
+      .filter((name): name is string => Boolean(name));
+    if (departmentNames.length > 0) {
+      spec.department = departmentNames.join(' · ');
+    }
+    // The boards API exposes no employment type — employmentType stays unset.
     // Greenhouse `content` is HTML-entity-encoded HTML (needs ?content=true).
     if (payload.content) {
       spec.descriptionHtml = payload.content;

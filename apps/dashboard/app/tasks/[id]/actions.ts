@@ -11,6 +11,7 @@
 // before finalize — it never submits (finalize is separately gated).
 
 import { randomUUID } from 'node:crypto';
+import type { BankValue } from '@sower/answers';
 import { normalizeLabel } from '@sower/answers';
 import type { Question, TaskPriority } from '@sower/core';
 import { answers, applicationTasks, documents, jobs } from '@sower/db';
@@ -54,8 +55,11 @@ function sanitizeFilename(name: string): string {
   return cleaned;
 }
 
-function optionValueSet(question: Question): Set<string> {
-  return new Set((question.options ?? []).map((o) => String(o.value)));
+/** option value id -> human label, for validating and labeling select saves. */
+function optionLabelByValue(question: Question): Map<string, string> {
+  return new Map(
+    (question.options ?? []).map((o) => [String(o.value), o.label]),
+  );
 }
 
 /**
@@ -67,7 +71,7 @@ function optionValueSet(question: Question): Set<string> {
 async function upsertAnswer(
   db: ReturnType<typeof getDb>,
   question: Question,
-  value: string | string[],
+  value: BankValue,
   company: string,
 ): Promise<void> {
   const normalized = normalizeLabel(question.label);
@@ -240,15 +244,23 @@ export async function saveAnswers(
           .getAll(`q:${question.id}`)
           .filter((v): v is string => typeof v === 'string' && v !== '');
         if (raw.length === 0) continue;
-        const allowed = optionValueSet(question);
-        const invalid = raw.filter((v) => !allowed.has(v));
+        const labels = optionLabelByValue(question);
+        const invalid = raw.filter((v) => !labels.has(v));
         if (invalid.length > 0) {
           errors.push(
             `"${question.label}": value not among the question's options`,
           );
           continue;
         }
-        await upsertAnswer(db, question, raw, '');
+        // Store {value,label} pairs: the label is what the answers page shows
+        // and what lets the pick resolve on another company's form, where
+        // option value ids differ (see @sower/answers matchStoredOption).
+        await upsertAnswer(
+          db,
+          question,
+          raw.map((v) => ({ value: v, label: labels.get(v) ?? v })),
+          '',
+        );
         savedCount += 1;
         continue;
       }
@@ -257,13 +269,16 @@ export async function saveAnswers(
       if (typeof raw !== 'string' || raw === '') continue;
 
       if (question.type === 'select') {
-        if (!optionValueSet(question).has(raw)) {
+        const label = optionLabelByValue(question).get(raw);
+        if (label === undefined) {
           errors.push(
             `"${question.label}": value not among the question's options`,
           );
           continue;
         }
-        await upsertAnswer(db, question, raw, '');
+        // {value,label}: human-readable in the library, resolvable by value
+        // on this form and by label on any other tenant's variant of it.
+        await upsertAnswer(db, question, { value: raw, label }, '');
         savedCount += 1;
         continue;
       }
@@ -318,10 +333,20 @@ export async function saveAnswers(
       return { ok, message };
     }
     const requeue = await callApi(idParse.data, 'requeue');
-    message = `${message ? `${message}; ` : ''}${requeue.message}`;
     ok = requeue.ok;
+    // 'requeue skipped' is ok:true but the task will NOT re-run — surface the
+    // api's own explanation instead of promising a run that won't happen.
+    const rerunning =
+      requeue.ok && !requeue.message.startsWith('requeue skipped');
+    message = rerunning
+      ? `${message} — re-running the application with your answers…`
+      : `${message ? `${message}; ` : ''}${requeue.message}`;
   } else if (errors.length > 0) {
     message = `${message ? `${message}; ` : ''}errors: ${errors.join('; ')}`;
+  } else {
+    // Plain save: the page re-renders with the saved answers shown under
+    // "Saved for the next run", so say exactly where they went.
+    message = `${message} to your answer library — shown below; applies on the next run.`;
   }
 
   revalidatePath(`/tasks/${idParse.data}`);

@@ -77,6 +77,11 @@ describe('LeverAdapter.discover', () => {
       title: 'AbelsonTaylor Writer',
       company: 'leverdemo',
       location: 'Arlington, TX',
+      // categories.commitment IS the employment type; categories.department
+      // is the department; workplaceType is the arrangement — all verbatim.
+      employmentType: 'Regular Full Time (Salary)',
+      department: 'Customer Success',
+      locationType: 'hybrid',
       applyUrl:
         'https://jobs.lever.co/leverdemo/33538a2f-d27d-4a96-8f05-fa4b0e4d940e/apply',
       questions: [],
@@ -84,6 +89,31 @@ describe('LeverAdapter.discover', () => {
       descriptionHtml: fixture.description as string,
       description: fixture.descriptionPlain as string,
     });
+  });
+
+  it('falls back to categories.team for department and omits absent metadata', async () => {
+    const categories = fixture.categories as Record<string, unknown>;
+    const trimmed = {
+      ...fixture,
+      categories: {
+        ...categories,
+        commitment: undefined,
+        department: undefined,
+        team: 'Professional Services',
+      },
+      workplaceType: undefined,
+    };
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => trimmed,
+      text: async () => '',
+    });
+
+    const spec = await adapter.discover(ref, url);
+    expect(spec.department).toBe('Professional Services');
+    expect(spec.employmentType).toBeUndefined();
+    expect(spec.locationType).toBeUndefined();
   });
 
   it('NEVER maps description `lists` to questions (truthfulness: no fabrication)', async () => {

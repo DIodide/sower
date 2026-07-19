@@ -1,5 +1,5 @@
 import type { AccountManager } from '@sower/accounts';
-import type { AnswerBank, Profile } from '@sower/answers';
+import type { AnswerBank, BankValue, Profile } from '@sower/answers';
 import { resolveAnswers } from '@sower/answers';
 import type { Question, ResolvedAnswer } from '@sower/core';
 import type { ApplicationTask, Database } from '@sower/db';
@@ -171,7 +171,7 @@ async function buildResolver(
     resolveAnswers(questions, deps.profile, {
       bank: bankRows.map((row) => ({
         normalizedLabel: row.normalizedLabel,
-        value: row.value as string | string[],
+        value: row.value as BankValue,
         company: row.company,
       })),
       documents: documentRows,

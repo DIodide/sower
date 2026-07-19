@@ -1,6 +1,14 @@
+import type { BankEntry, BankValue } from '@sower/answers';
+import {
+  isBankOptionValue,
+  matchStoredOption,
+  normalizeCompanyKey,
+  selectBankValue,
+} from '@sower/answers';
 import type { Question, ResolvedAnswer, TaskState } from '@sower/core';
 import type { Document } from '@sower/db';
 import {
+  answers,
   apiCalls,
   applicationTasks,
   documents,
@@ -110,12 +118,74 @@ function httpStatusTone(status: number | null): Tone {
   return 'attention';
 }
 
+/**
+ * The 'saved' view for a question the stored resolution still lists as
+ * missing but whose answer already exists in the answers bank (typically
+ * saved moments ago from this very page — async reprocessing has not
+ * refreshed the resolution yet). Display and prefill use the SAME matching
+ * the resolver will use on the next run (matchStoredOption), so what this
+ * shows is exactly what will be filled in. Returns null when the bank value
+ * cannot apply here (stale doc pick, array into a text field) — the
+ * question then stays truly missing.
+ */
+function buildSavedView(
+  base: Omit<QuestionView, 'status'>,
+  question: Question,
+  saved: BankValue,
+  docByPath: Map<string, Document>,
+): QuestionView | null {
+  if (question.type === 'file') {
+    // Doc picks store the chosen document's storagePath (a string).
+    if (typeof saved !== 'string') return null;
+    const doc = docByPath.get(saved);
+    if (!doc) return null;
+    return {
+      ...base,
+      status: 'saved',
+      savedValues: [`${doc.filename} (${doc.kind})`],
+      savedDocId: doc.id,
+    };
+  }
+
+  if (question.type === 'select' || question.type === 'multiselect') {
+    const items = Array.isArray(saved) ? saved : [saved];
+    if (items.length === 0) return null;
+    const display: string[] = [];
+    const input: string[] = [];
+    for (const item of items) {
+      if (typeof item === 'object' && !isBankOptionValue(item)) return null;
+      const option = matchStoredOption(item, question.options ?? []);
+      // Prefill only options that exist on THIS form; the display still
+      // shows the saved label even when the option ids differ (old-shape
+      // cross-tenant rows).
+      if (option !== undefined) input.push(String(option.value));
+      display.push(
+        option?.label ?? (isBankOptionValue(item) ? item.label : String(item)),
+      );
+    }
+    return {
+      ...base,
+      status: 'saved',
+      savedValues: display,
+      savedInput: input,
+    };
+  }
+
+  // text / textarea — mirrors the resolver: arrays never fill a text field;
+  // a {value,label} select answer contributes its human label.
+  if (Array.isArray(saved)) return null;
+  const text = isBankOptionValue(saved) ? saved.label : String(saved);
+  return { ...base, status: 'saved', savedValues: [text], savedInput: [text] };
+}
+
 function buildQuestionViews(
   questions: Question[],
   resolved: ResolvedAnswer[],
   missing: Question[],
   hasResolution: boolean,
   docByPath: Map<string, Document>,
+  bank: BankEntry[],
+  companyKey: string,
 ): QuestionView[] {
   const resolvedById = new Map(resolved.map((r) => [r.questionId, r]));
   const missingIds = new Set(missing.map((q) => q.id));
@@ -167,13 +237,18 @@ function buildQuestionViews(
       };
     }
 
-    if (!hasResolution) return { ...base, status: 'unknown' as const };
-    return {
-      ...base,
-      status: missingIds.has(question.id)
-        ? ('missing' as const)
-        : ('unknown' as const),
-    };
+    if (!hasResolution || !missingIds.has(question.id)) {
+      return { ...base, status: 'unknown' as const };
+    }
+    // The stored resolution says 'missing', but the answers bank may already
+    // hold a matching answer — surface it as 'saved' so a save visibly
+    // sticks immediately instead of the inputs re-rendering empty.
+    const banked = selectBankValue(question, bank, companyKey);
+    if (banked !== undefined) {
+      const savedView = buildSavedView(base, question, banked, docByPath);
+      if (savedView !== null) return savedView;
+    }
+    return { ...base, status: 'missing' as const };
   });
 }
 
@@ -182,6 +257,7 @@ function NextStep({
   task,
   requiredMissing,
   optionalMissing,
+  savedCount,
   needsSession,
   session,
   tenant,
@@ -190,6 +266,8 @@ function NextStep({
   task: { id: string; state: string; lastError: string | null };
   requiredMissing: number;
   optionalMissing: number;
+  /** Bank answers saved but not applied yet (they fill in on the next run). */
+  savedCount: number;
   /** Workday task parked account-required (a session must be captured first). */
   needsSession?: boolean;
   session?: WorkdaySessionRow;
@@ -255,9 +333,14 @@ function NextStep({
         requiredMissing > 0
           ? `${requiredMissing} required question${requiredMissing === 1 ? '' : 's'} need${requiredMissing === 1 ? 's' : ''} your answer` +
             (optionalMissing > 0 ? ` (plus ${optionalMissing} optional)` : '')
-          : optionalMissing > 0
-            ? `${optionalMissing} optional question${optionalMissing === 1 ? '' : 's'} remain — or just re-run it`
-            : 'Nothing could be auto-resolved yet — re-run once your profile or answer library covers it';
+          : savedCount > 0
+            ? `${savedCount} saved answer${savedCount === 1 ? ' is' : 's are'} ready — re-run the application to apply ${savedCount === 1 ? 'it' : 'them'}` +
+              (optionalMissing > 0
+                ? ` (${optionalMissing} optional question${optionalMissing === 1 ? '' : 's'} remain)`
+                : '')
+            : optionalMissing > 0
+              ? `${optionalMissing} optional question${optionalMissing === 1 ? '' : 's'} remain — or just re-run it`
+              : 'Nothing could be auto-resolved yet — re-run once your profile or answer library covers it';
       return (
         <div className="banner banner--attention">
           <p>
@@ -386,6 +469,7 @@ export default async function TaskPage({
     documentRows,
     descriptionRows,
     investigationRows,
+    bankAnswerRows,
   ] = await Promise.all([
     db.select().from(jobs).where(eq(jobs.id, task.jobId)).limit(1),
     db
@@ -414,6 +498,16 @@ export default async function TaskPage({
       .where(eq(investigationRuns.taskId, id))
       .orderBy(desc(investigationRuns.startedAt))
       .limit(1),
+    // The whole answers bank (a small personal dataset — same read as the
+    // api's process.ts): lets the page show answers that are saved but not
+    // yet applied by a run, with company scoping handled per question.
+    db
+      .select({
+        normalizedLabel: answers.normalizedLabel,
+        value: answers.value,
+        company: answers.company,
+      })
+      .from(answers),
   ]);
   const job = jobRows[0];
   const latestDescription = descriptionRows[0];
@@ -452,6 +546,16 @@ export default async function TaskPage({
   const screenshotDocs = documentRows.filter(
     (d) => d.kind === 'screenshot' && d.jobId === task.jobId,
   );
+  // Same companyKey derivation and bank shape as the api's process.ts, so the
+  // page previews exactly what the resolver will do on the next run.
+  const companyKey = normalizeCompanyKey(
+    job?.company ?? spec?.company ?? undefined,
+  );
+  const bankEntries: BankEntry[] = bankAnswerRows.map((row) => ({
+    normalizedLabel: row.normalizedLabel,
+    value: row.value as BankValue,
+    company: row.company,
+  }));
   const views = spec
     ? buildQuestionViews(
         spec.questions,
@@ -459,6 +563,8 @@ export default async function TaskPage({
         resolution?.missing ?? [],
         resolution != null,
         docByPath,
+        bankEntries,
+        companyKey,
       )
     : [];
   const documentOptions: DocumentOption[] = documentRows.map((d) => ({
@@ -468,6 +574,7 @@ export default async function TaskPage({
     createdLabel: formatLocal(d.createdAt),
   }));
   const resolvedCount = views.filter((v) => v.status === 'resolved').length;
+  const savedCount = views.filter((v) => v.status === 'saved').length;
   const missingViews = views.filter((v) => v.status === 'missing');
   const requiredMissing = missingViews.filter((v) => v.required).length;
   const optionalMissing = missingViews.length - requiredMissing;
@@ -646,6 +753,7 @@ export default async function TaskPage({
         task={task}
         requiredMissing={requiredMissing}
         optionalMissing={optionalMissing}
+        savedCount={savedCount}
         needsSession={needsSession}
         session={sessionRow}
         tenant={job?.tenant}
@@ -748,6 +856,7 @@ export default async function TaskPage({
             </div>
             <span className="hint num">
               {resolvedCount} of {views.length} answered
+              {savedCount > 0 ? ` · ${savedCount} saved for the next run` : ''}
               {requiredMissing > 0
                 ? ` · ${requiredMissing} required remaining`
                 : ''}

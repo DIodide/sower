@@ -92,7 +92,25 @@ describe('GreenhouseAdapter.discover', () => {
     expect(spec.title).toBe('Account Executive, AI Sales (Grower)');
     expect(spec.company).toBe('Stripe');
     expect(spec.location).toBe('San Francisco, CA');
+    // departments[].name maps to department; the boards API exposes no
+    // employment type, so employmentType stays unset (never invented).
+    expect(spec.department).toBe('1650 AI GTM Strategy & Solutions');
+    expect(spec.employmentType).toBeUndefined();
     expect(spec.applyUrl).toBe('https://stripe.com/jobs/search?gh_jid=7954688');
+  });
+
+  it('falls back to offices[].name for location only when location.name is absent', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ...fixture,
+        location: null,
+        offices: [{ name: 'US' }, { name: 'Dublin' }, { name: null }],
+      }),
+    });
+    const spec = await adapter.discover(ref, url);
+    expect(spec.location).toBe('US · Dublin');
   });
 
   it('extracts descriptionHtml (raw content) and plain-text description', async () => {

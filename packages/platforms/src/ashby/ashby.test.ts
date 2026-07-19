@@ -81,6 +81,12 @@ describe('AshbyAdapter.discover', () => {
       title: 'Senior / Staff Fullstack Engineer',
       company: 'linear',
       location: 'Europe',
+      // Posting-API metadata: employmentType 'FullTime' is rendered the way
+      // the hosted board displays it; workplaceType/department map directly.
+      // The fixture's compensation summaries are null, so no compensation.
+      employmentType: 'Full time',
+      locationType: 'Remote',
+      department: 'Product',
       applyUrl:
         'https://jobs.ashbyhq.com/linear/d3bc1ced-3ce4-4086-a050-555055dbb1ff/application',
       questions: [],
@@ -88,6 +94,62 @@ describe('AshbyAdapter.discover', () => {
       descriptionHtml: job0.descriptionHtml,
       description: job0.descriptionPlain,
     });
+  });
+
+  it('maps Intern employment type, team fallback, and compensation tiers', async () => {
+    const posting = {
+      ...fixture.jobs[0],
+      employmentType: 'Intern',
+      department: null,
+      team: 'Engineering',
+      workplaceType: null,
+      isRemote: true,
+      compensation: {
+        compensationTierSummary: null,
+        scrapeableCompensationSalarySummary: '$50 - $65 per hour',
+        compensationTiers: [
+          { title: 'Zone A', tierSummary: '$60 – $65 / hr' },
+          { title: 'Zone B', tierSummary: '$50 – $55 / hr' },
+        ],
+      },
+    };
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ jobs: [posting], apiVersion: 1 }),
+    });
+
+    const spec = await adapter.discover(ref, url);
+    expect(spec.employmentType).toBe('Intern');
+    // No department → team; no workplaceType → isRemote fallback.
+    expect(spec.department).toBe('Engineering');
+    expect(spec.locationType).toBe('Remote');
+    // Tiers joined with ' · ' (the board-level summary is null here).
+    expect(spec.compensation).toBe(
+      'Zone A: $60 – $65 / hr · Zone B: $50 – $55 / hr',
+    );
+  });
+
+  it('prefers the board-level compensation summary and passes unknown employment types through', async () => {
+    const posting = {
+      ...fixture.jobs[0],
+      employmentType: 'SomeFutureType',
+      compensation: {
+        compensationTierSummary: '$114K – $172K • Offers Equity',
+        scrapeableCompensationSalarySummary: '$114K - $172K',
+        compensationTiers: [{ title: 'US', tierSummary: '$114K – $172K' }],
+      },
+    };
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ jobs: [posting], apiVersion: 1 }),
+    });
+
+    const spec = await adapter.discover(ref, url);
+    // Unknown types are never re-labeled — only what the source said.
+    expect(spec.employmentType).toBe('SomeFutureType');
+    expect(spec.compensation).toBe('$114K – $172K • Offers Equity');
   });
 
   it('finds a different posting on the same board by external id', async () => {

@@ -4,8 +4,8 @@
 // action), so it composes in either environment.
 //
 // Layout: questions waiting on the user come first (required before
-// optional), auto-filled answers are grouped behind them so the eye lands on
-// what still needs doing.
+// optional), then answers already SAVED to the bank but not yet applied by a
+// run, then auto-filled answers — so the eye lands on what still needs doing.
 import type { Tone } from '../../../lib/format';
 import { Empty, ExpandableText } from '../../../lib/ui';
 import { Badge } from './ui';
@@ -24,14 +24,29 @@ export interface QuestionView {
   docKind: 'resume' | 'cover_letter' | 'other';
   /**
    * 'resolved': has an answer in the stored resolution.
-   * 'missing': listed in resolution.missing (renders an input when the panel
-   *            is interactive).
+   * 'saved': listed in resolution.missing, but the answer bank already holds
+   *          a matching answer (typically just saved by the user) — shown
+   *          with a "saved — applies on the next run" chip, and the input
+   *          still renders (prefilled) so the answer can be revised.
+   * 'missing': listed in resolution.missing with no bank answer (renders an
+   *            empty input when the panel is interactive).
    * 'unknown': no resolution stored yet (task not processed).
    */
-  status: 'resolved' | 'missing' | 'unknown';
+  status: 'resolved' | 'saved' | 'missing' | 'unknown';
   resolvedSource?: string;
   /** Display-ready values (option labels / document filenames). */
   resolvedValues?: string[];
+  /** status 'saved': display-ready bank values (labels / doc filenames). */
+  savedValues?: string[];
+  /**
+   * status 'saved': prefill values for the input controls — option value ids
+   * that matched THIS form for select/multiselect, raw text otherwise. May
+   * be empty when a saved select answer matches no option here (old-shape
+   * cross-tenant row); savedValues still shows what was saved.
+   */
+  savedInput?: string[];
+  /** status 'saved', file questions: id of the picked stored document. */
+  savedDocId?: string;
   /** Branch/conditional question — only applies based on a prior answer. */
   conditional?: boolean;
   /** Human hint under the label (e.g. which parent answer reveals this one). */
@@ -66,26 +81,50 @@ function SourceChip({ source }: { source: string }) {
   );
 }
 
+function ValueList({ values }: { values: string[] }) {
+  return (
+    <div className="q-value" style={{ minWidth: 0, flex: '1 1 16rem' }}>
+      {values.length === 0 ? (
+        <span className="faint">—</span>
+      ) : values.length === 1 && values[0] !== undefined ? (
+        <ExpandableText text={values[0]} max={200} />
+      ) : (
+        <ul style={{ margin: 0, paddingLeft: '1.25rem' }}>
+          {values.map((v) => (
+            <li key={v}>
+              <ExpandableText text={v} max={200} />
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function ResolvedValue({ view }: { view: QuestionView }) {
-  const values = view.resolvedValues ?? [];
   return (
     <div className="row" style={{ alignItems: 'baseline' }}>
-      <div className="q-value" style={{ minWidth: 0, flex: '1 1 16rem' }}>
-        {values.length === 0 ? (
-          <span className="faint">—</span>
-        ) : values.length === 1 && values[0] !== undefined ? (
-          <ExpandableText text={values[0]} max={200} />
-        ) : (
-          <ul style={{ margin: 0, paddingLeft: '1.25rem' }}>
-            {values.map((v) => (
-              <li key={v}>
-                <ExpandableText text={v} max={200} />
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+      <ValueList values={view.resolvedValues ?? []} />
       {view.resolvedSource ? <SourceChip source={view.resolvedSource} /> : null}
+    </div>
+  );
+}
+
+/**
+ * A bank answer that exists but has not been applied by a run yet: the value
+ * plus an attention-free "it stuck" chip. The interactive form additionally
+ * renders the (prefilled) input below so the answer can be revised.
+ */
+function SavedValue({ view }: { view: QuestionView }) {
+  return (
+    <div className="row" style={{ alignItems: 'baseline' }}>
+      <ValueList values={view.savedValues ?? []} />
+      <Badge
+        tone="progress"
+        title="saved to your answer library — it fills in when the application next runs"
+      >
+        saved — applies on the next run
+      </Badge>
     </div>
   );
 }
@@ -147,7 +186,7 @@ function MissingInput({
             <select
               id={`doc-${view.id}`}
               name={`doc:${view.id}`}
-              defaultValue=""
+              defaultValue={view.savedDocId ?? ''}
               className="field"
             >
               <option value="">— none —</option>
@@ -182,7 +221,7 @@ function MissingInput({
       <select
         id={inputId}
         name={`q:${view.id}`}
-        defaultValue=""
+        defaultValue={view.savedInput?.[0] ?? ''}
         aria-required={view.required}
         className="field"
         style={{ maxWidth: '34rem' }}
@@ -227,7 +266,12 @@ function MissingInput({
                 cursor: 'pointer',
               }}
             >
-              <input type="checkbox" name={`q:${view.id}`} value={o.value} />
+              <input
+                type="checkbox"
+                name={`q:${view.id}`}
+                value={o.value}
+                defaultChecked={(view.savedInput ?? []).includes(o.value)}
+              />
               {o.label}
             </label>
           ))
@@ -244,6 +288,7 @@ function MissingInput({
           name={`q:${view.id}`}
           rows={4}
           maxLength={20000}
+          defaultValue={view.savedInput?.[0]}
           aria-required={view.required}
           className="field"
           style={{ maxWidth: '34rem' }}
@@ -262,6 +307,7 @@ function MissingInput({
         name={`q:${view.id}`}
         type="text"
         maxLength={20000}
+        defaultValue={view.savedInput?.[0]}
         aria-required={view.required}
         className="field"
         style={{ maxWidth: '34rem' }}
@@ -305,7 +351,7 @@ function QuestionRow({
           title={`${view.id} · ${view.type}`}
           htmlFor={
             interactive &&
-            view.status === 'missing' &&
+            (view.status === 'missing' || view.status === 'saved') &&
             view.type !== 'file' &&
             view.type !== 'multiselect'
               ? `q-${view.id}`
@@ -337,6 +383,19 @@ function QuestionRow({
       ) : null}
       {view.status === 'resolved' ? (
         <ResolvedValue view={view} />
+      ) : view.status === 'saved' ? (
+        // The saved value first (it visibly stuck), then — while answering —
+        // the prefilled input so the user can still revise it.
+        <div style={{ display: 'grid', gap: '0.4rem' }}>
+          <SavedValue view={view} />
+          {interactive ? (
+            <MissingInput
+              view={view}
+              documents={documents}
+              scopeCompany={scopeCompany}
+            />
+          ) : null}
+        </div>
       ) : view.status === 'missing' ? (
         interactive ? (
           <MissingInput
@@ -376,10 +435,13 @@ export function QuestionsPanel({
     return <Empty>The job spec contains no questions.</Empty>;
   }
 
-  // Stable partition: required-missing first, then optional-missing.
+  // Stable partition: required-missing first, then optional-missing. Saved
+  // (bank answer awaiting the next run) sorts after truly-missing questions
+  // and before auto-filled ones.
   const missing = [...views.filter((v) => v.status === 'missing')].sort(
     (a, b) => Number(b.required) - Number(a.required),
   );
+  const saved = views.filter((v) => v.status === 'saved');
   const resolved = views.filter((v) => v.status === 'resolved');
   const unknown = views.filter((v) => v.status === 'unknown');
 
@@ -406,12 +468,34 @@ export function QuestionsPanel({
       </section>
     ) : null;
 
+  const savedSection =
+    saved.length > 0 ? (
+      <section aria-label="saved answers awaiting the next run">
+        <h3
+          className="section-title"
+          style={{ margin: '0.5rem 0 0.25rem', fontSize: '0.95rem' }}
+        >
+          Saved for the next run <span className="count">{saved.length}</span>
+          <span className="hint" style={{ fontWeight: 600 }}>
+            in your answer library — filled in when the application next runs
+          </span>
+        </h3>
+        {saved.map((view) => (
+          <QuestionRow key={view.id} view={view} {...rowProps} />
+        ))}
+      </section>
+    ) : null;
+
   const resolvedSection =
     resolved.length > 0 ? (
       interactive ? (
         // While answering, auto-filled answers stay collapsed so the eye
         // lands on what still needs doing.
-        <details style={{ marginTop: missing.length > 0 ? '1.25rem' : 0 }}>
+        <details
+          style={{
+            marginTop: missing.length > 0 || saved.length > 0 ? '1.25rem' : 0,
+          }}
+        >
           <summary
             className="section-title"
             style={{
@@ -447,17 +531,33 @@ export function QuestionsPanel({
 
   return (
     <div>
-      {/* Answering: gaps first. Reviewing: what you're approving first. */}
+      {/* Answering: gaps first, then saved-but-not-yet-applied answers.
+          Reviewing: what you're approving first. */}
       {interactive ? (
         <>
           {missingSection}
+          {savedSection ? (
+            <div style={{ marginTop: missing.length > 0 ? '1.25rem' : 0 }}>
+              {savedSection}
+            </div>
+          ) : null}
           {resolvedSection}
         </>
       ) : (
         <>
           {resolvedSection}
-          {missingSection ? (
+          {savedSection ? (
             <div style={{ marginTop: resolved.length > 0 ? '1.25rem' : 0 }}>
+              {savedSection}
+            </div>
+          ) : null}
+          {missingSection ? (
+            <div
+              style={{
+                marginTop:
+                  resolved.length > 0 || saved.length > 0 ? '1.25rem' : 0,
+              }}
+            >
               {missingSection}
             </div>
           ) : null}
@@ -466,7 +566,7 @@ export function QuestionsPanel({
 
       {unknown.length > 0 ? (
         <section aria-label="questions not yet resolved">
-          {missing.length > 0 || resolved.length > 0 ? (
+          {missing.length > 0 || saved.length > 0 || resolved.length > 0 ? (
             <h3
               className="section-title"
               style={{ margin: '1.25rem 0 0.25rem', fontSize: '0.95rem' }}

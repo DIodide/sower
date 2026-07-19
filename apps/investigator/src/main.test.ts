@@ -28,6 +28,10 @@ const state = vi.hoisted(() => ({
       applyUrl: 'https://weirdats.example/jobs/1/apply',
       company: 'Acme',
       title: 'SWE Intern',
+      // The scraped JD markdown must round-trip to the API untouched — the
+      // whole-body toEqual below proves postResult strips no fields.
+      descriptionMarkdown:
+        '## About the role\n\nHelp us build the weirdest ATS integrations.',
       questions: [
         { id: 'first_name', label: 'First name', type: 'text', required: true },
       ],

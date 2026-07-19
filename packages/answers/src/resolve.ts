@@ -33,10 +33,34 @@ export function normalizeCompanyKey(company: string | undefined): string {
   return (company ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * A saved select/multiselect answer in the new bank shape: the picked
+ * option's submitted value id plus its human-readable label. Value ids are
+ * platform-internal ('4128291002', 'yes_17') and rarely survive across
+ * tenants; labels are what the user actually chose and are stable, so
+ * carrying both lets the answer round-trip by value on the same form and
+ * still resolve by label anywhere else.
+ */
+export interface BankOptionValue {
+  value: string;
+  label: string;
+}
+
+/**
+ * Everything the answers bank's jsonb `value` may hold: legacy bare values
+ * (text answers, select option ids — possibly numbers/booleans after a jsonb
+ * round-trip), the new {value,label} select shape, and arrays of either for
+ * multiselects. The read path accepts all of them so old rows keep working.
+ */
+export type BankValue =
+  | RawScalar
+  | BankOptionValue
+  | Array<RawScalar | BankOptionValue>;
+
 /** A previously saved answer, keyed by its normalized question label. */
 export interface BankEntry {
   normalizedLabel: string;
-  value: string | string[];
+  value: BankValue;
   /**
    * Company key scoping this entry ('' or undefined = global). A scoped
    * entry resolves ONLY when the job's company matches; a global entry
@@ -314,14 +338,54 @@ function matchOption(
     if (byLabel.length === 1) return byLabel[0];
     if (byLabel.length > 1) return undefined; // ambiguous label
   }
-  // Fallback: exact option-VALUE match. The dashboard's NEEDS_INPUT form
-  // submits (and the answers bank stores) the option's value id, not its
-  // label, so a saved select answer must round-trip by value. Exact string
-  // equality only — never a synthesized or partial claim.
+  // Fallback: exact option-VALUE match. Legacy bank rows (and profile-derived
+  // candidates) may carry the option's value id rather than its label, so a
+  // saved select answer must round-trip by value. Exact string equality only —
+  // never a synthesized or partial claim.
   const rawTrimmed = raw.trim();
   if (rawTrimmed === '') return undefined;
   const byValue = options.filter((o) => String(o.value) === rawTrimmed);
   return byValue.length === 1 ? byValue[0] : undefined;
+}
+
+/** Runtime guard for the new {value,label} bank shape (jsonb is untyped). */
+export function isBankOptionValue(value: unknown): value is BankOptionValue {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.value === 'string' && typeof candidate.label === 'string'
+  );
+}
+
+/**
+ * Match one stored bank item against a question's options. Bare scalars keep
+ * the legacy matchOption semantics (label first, then value). The new
+ * {value,label} shape matches by exact option VALUE first — the same-form
+ * round-trip — then by normalized LABEL: labels are stable across tenants
+ * while option value ids usually are not, so a saved answer also resolves on
+ * another company's rendering of the same question. Zero or multiple matches
+ * at a stage resolve nothing from that stage. Exported for the dashboard,
+ * which previews saved-but-not-yet-applied answers with the exact matching
+ * the resolver will use.
+ */
+export function matchStoredOption(
+  stored: string | number | boolean | BankOptionValue,
+  options: QuestionOption[],
+): QuestionOption | undefined {
+  if (!isBankOptionValue(stored)) return matchOption(String(stored), options);
+  const value = stored.value.trim();
+  if (value !== '') {
+    const byValue = options.filter((o) => String(o.value) === value);
+    if (byValue.length === 1) return byValue[0];
+  }
+  const target = normalizeLabel(stored.label);
+  if (target !== '') {
+    const byLabel = options.filter((o) => normalizeLabel(o.label) === target);
+    if (byLabel.length === 1) return byLabel[0];
+  }
+  return undefined;
 }
 
 /**
@@ -336,10 +400,11 @@ function matchOption(
  * answers bank comes back as a number (`731269090`) or, for an Ashby Yes/No
  * (Boolean) field whose option value is `'true'`/`'false'`, as a boolean
  * `true`/`false`. Coercion lets `731269090`/`true` still match the option whose
- * value is `731269090`/`'true'`.
+ * value is `731269090`/`'true'`. New-shape {value,label} bank items match via
+ * matchStoredOption (value first, then label).
  */
 type RawScalar = string | number | boolean;
-type RawCandidate = RawScalar | RawScalar[] | null | undefined;
+type RawCandidate = BankValue | null | undefined;
 
 function isScalar(value: unknown): value is RawScalar {
   return (
@@ -357,8 +422,8 @@ function finalize(
   if (raw === null || raw === undefined) return null;
 
   if (question.type === 'select') {
-    if (!isScalar(raw)) return null;
-    const option = matchOption(String(raw), question.options ?? []);
+    if (!isScalar(raw) && !isBankOptionValue(raw)) return null;
+    const option = matchStoredOption(raw, question.options ?? []);
     if (option === undefined) return null;
     return { questionId: question.id, source, value: String(option.value) };
   }
@@ -368,15 +433,20 @@ function finalize(
     if (values.length === 0) return null;
     const matched: string[] = [];
     for (const value of values) {
-      if (!isScalar(value)) return null;
-      const option = matchOption(String(value), question.options ?? []);
+      if (!isScalar(value) && !isBankOptionValue(value)) return null;
+      const option = matchStoredOption(value, question.options ?? []);
       if (option === undefined) return null;
       matched.push(String(option.value));
     }
     return { questionId: question.id, source, value: matched };
   }
 
-  // text / textarea: a single scalar fills the field.
+  // text / textarea: a single scalar fills the field. A new-shape select
+  // answer contributes its human LABEL — the words the user actually chose —
+  // never the platform-internal option id.
+  if (isBankOptionValue(raw)) {
+    return { questionId: question.id, source, value: raw.label };
+  }
   if (!isScalar(raw)) return null;
   return { questionId: question.id, source, value: String(raw) };
 }
@@ -421,7 +491,7 @@ export function selectBankValue(
   question: Question,
   bank: BankEntry[],
   company?: string,
-): string | string[] | undefined {
+): BankValue | undefined {
   const label = normalizeLabel(question.label);
   const companyKey = normalizeCompanyKey(company);
   let global: BankEntry | undefined;

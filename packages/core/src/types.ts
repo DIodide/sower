@@ -78,6 +78,22 @@ export interface JobSpec {
   title: string;
   company?: string;
   location?: string;
+  /**
+   * Employment type as the ATS metadata API exposes it — e.g. "Full time",
+   * "Intern", "Regular Full Time (Salary)". Display string, never normalized:
+   * the auto-discard rule and the dashboard both read the source's own words.
+   */
+  employmentType?: string;
+  /** Workplace arrangement when exposed: Remote / Hybrid / On-site etc. */
+  locationType?: string;
+  /** Department (or team) the posting belongs to, when exposed. */
+  department?: string;
+  /**
+   * Compensation as a single display string (e.g. "$100K – $150K • Offers
+   * Equity"). Multiple tiers are joined with ' · '. Never parsed or computed —
+   * only what the source itself published.
+   */
+  compensation?: string;
   applyUrl: string;
   questions: Question[];
   /** Plain-text job description (tags/entities stripped). Back-compat optional. */

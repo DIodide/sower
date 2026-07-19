@@ -1,4 +1,11 @@
-import { applicationTasks, events, investigationRuns, jobs } from '@sower/db';
+import { createHash } from 'node:crypto';
+import {
+  applicationTasks,
+  events,
+  investigationRuns,
+  jobDescriptions,
+  jobs,
+} from '@sower/db';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
 import { ingestJob } from './ingest.js';
@@ -33,6 +40,12 @@ const sourcesState = vi.hoisted(() => ({
 
 /** Tasks refreshIngestReply was asked to re-render the #ingest reply for. */
 const refreshState = vi.hoisted(() => ({ calls: [] as string[] }));
+
+/** Overrides for the mocked greenhouse adapter's discovered spec. */
+const adapterResultState = vi.hoisted(() => ({
+  title: undefined as string | undefined,
+  employmentType: undefined as string | undefined,
+}));
 
 // The refresh primitive is proven in ingest-reply.test.ts; here we only
 // assert the endpoints invoke it (it never throws, so a fake fn suffices).
@@ -79,9 +92,12 @@ vi.mock('@sower/platforms', () => ({
             platform: 'greenhouse',
             tenant: 'acme',
             externalId: 'swe-1',
-            title: 'Software Engineer Intern',
+            title: adapterResultState.title ?? 'Software Engineer Intern',
             applyUrl: 'https://boards.greenhouse.io/acme/jobs/123',
             questions: [],
+            ...(adapterResultState.employmentType !== undefined
+              ? { employmentType: adapterResultState.employmentType }
+              : {}),
           }),
           submit: async () => {
             throw new Error('submit disabled');
@@ -155,12 +171,15 @@ function createFakeDb(
   options: {
     selectResults?: unknown[][];
     insertResults?: unknown[][];
+    /** Rows update(...).returning() resolves (e.g. processTask's claim). */
+    updateResults?: unknown[][];
     /** When provided, every insert/update write is recorded here. */
     writes?: DbWrite[];
   } = {},
 ): Deps['db'] {
   const selectResults = [...(options.selectResults ?? [])];
   const insertResults = [...(options.insertResults ?? [])];
+  const updateResults = [...(options.updateResults ?? [])];
   const db = {
     select: () => chain(selectResults.shift() ?? []),
     insert: (table: unknown) =>
@@ -168,7 +187,7 @@ function createFakeDb(
         options.writes?.push({ method: 'insert', table, arg }),
       ),
     update: (table: unknown) =>
-      chain([], (arg) =>
+      chain(updateResults.shift() ?? [], (arg) =>
         options.writes?.push({ method: 'update', table, arg }),
       ),
   };
@@ -216,6 +235,8 @@ beforeEach(() => {
   platformState.resolveCalls = [];
   sourcesState.listings = [];
   refreshState.calls = [];
+  adapterResultState.title = undefined;
+  adapterResultState.employmentType = undefined;
   investigateState.calls = [];
   investigateState.fired = true;
 });
@@ -483,6 +504,64 @@ describe('buildServer', () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ skipped: true, state: 'REVIEW' });
+  });
+
+  it('POST /tasks/process responds 200 for an auto-discarded full-time role (no Cloud Tasks retry)', async () => {
+    // A full-time posting whose titles nowhere say intern: the parse discards
+    // it. The 200 is the no-retry contract — Cloud Tasks must treat the
+    // auto-discard as final, exactly like notFound/skipped/gaveUp.
+    adapterResultState.title = 'Staff Software Engineer';
+    adapterResultState.employmentType = 'Full time';
+    const writes: DbWrite[] = [];
+    const db = createFakeDb({
+      selectResults: [
+        [
+          {
+            task: { id: 'task-1', state: 'QUEUED', attempt: 0, jobId: 'job-1' },
+            job: {
+              id: 'job-1',
+              platform: 'greenhouse',
+              tenant: 'acme',
+              externalId: 'swe-1',
+              url: 'https://boards.greenhouse.io/acme/jobs/123',
+              company: 'Acme',
+              title: null,
+            },
+          },
+        ],
+        [], // RESTORE-event guard: no restore in the history
+      ],
+      updateResults: [
+        // The atomic claim wins and returns the claimed row.
+        [{ id: 'task-1', state: 'PREPARING', attempt: 1, jobId: 'job-1' }],
+      ],
+      writes,
+    });
+    const { deps } = createDeps(db);
+    const app = buildServer(deps);
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/tasks/process',
+      headers: { 'x-api-key': 'test-key' },
+      payload: { taskId: '7d8e9f10-1112-4314-a516-b71819c2d2e2' },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      autoDiscarded: true,
+      state: 'DISCARDED',
+      employmentType: 'Full time',
+    });
+    // The DISCARD event carried the queryable reason/note data.
+    const discardEvent = writes
+      .filter((w) => w.method === 'insert' && w.table === events)
+      .map((w) => w.arg as Record<string, unknown>)
+      .find((arg) => arg.type === 'DISCARD');
+    expect(discardEvent).toMatchObject({
+      toState: 'DISCARDED',
+      data: { reason: 'auto', note: 'Employment type: Full time' },
+    });
   });
 
   it('POST /sources/simplify/poll normalizes both raw schemas and only ingests greenhouse listings with a known tenant', async () => {
@@ -925,7 +1004,24 @@ describe('buildServer', () => {
         // Form mode ingests nothing and enqueues nothing — the task stays
         // parked (NEEDS_INPUT) for human verification.
         expect(enqueueProcess).not.toHaveBeenCalled();
-        expect(writes.some((w) => w.table === jobs)).toBe(false);
+        expect(
+          writes.some((w) => w.method === 'insert' && w.table === jobs),
+        ).toBe(false);
+
+        // The jobs row's blank title is backfilled from the agent's finding;
+        // the ingest-recorded company ('WeirdCo') is never overwritten, so
+        // the update carries exactly the missing field.
+        const jobUpdate = writes.find(
+          (w) => w.method === 'update' && w.table === jobs,
+        );
+        expect(jobUpdate?.arg).toEqual({ title: 'Platform Intern' });
+
+        // No descriptionMarkdown on this result — no job_descriptions row.
+        expect(
+          writes.some(
+            (w) => w.method === 'insert' && w.table === jobDescriptions,
+          ),
+        ).toBe(false);
 
         // The discovered spec landed on THIS task, marked agent-discovered,
         // with identity from the job row and questions from the agent.
@@ -977,6 +1073,138 @@ describe('buildServer', () => {
 
         // The #ingest reply that announced the task is refreshed (edited).
         expect(refreshState.calls).toEqual([TASK_ID]);
+      });
+
+      it('persists descriptionMarkdown as the next job_descriptions version', async () => {
+        const markdown = '## About the role\n\nBuild weird ATS integrations.';
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({
+          selectResults: [
+            [{ id: 'run-1' }], // latest run
+            [{ job: jobRow }], // task+job join
+            // Latest stored description for the job: version 2, other content.
+            [{ version: 2, contentHash: 'someotherhash' }],
+          ],
+          insertResults: [[]], // FORM_DISCOVERED event
+          writes,
+        });
+        const { deps } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app, {
+          kind: 'form',
+          result: { ...discoveredForm, descriptionMarkdown: markdown },
+          transcript: formTranscript,
+        });
+
+        expect(res.statusCode).toBe(200);
+        const descriptionInsert = writes.find(
+          (w) => w.method === 'insert' && w.table === jobDescriptions,
+        );
+        // Same versioning contract as processTask's adapter descriptions:
+        // next version = max + 1, content is the markdown verbatim.
+        expect(descriptionInsert?.arg).toEqual({
+          jobId: 'job-u',
+          version: 3,
+          content: markdown,
+          contentHash: createHash('sha256').update(markdown).digest('hex'),
+        });
+      });
+
+      it('persists descriptionMarkdown as version 1 when the job has no stored description', async () => {
+        const markdown = 'Plain paragraph JD.';
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({
+          selectResults: [
+            [{ id: 'run-1' }],
+            [{ job: jobRow }],
+            [], // no job_descriptions rows yet
+          ],
+          insertResults: [[]],
+          writes,
+        });
+        const { deps } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app, {
+          kind: 'form',
+          result: { ...discoveredForm, descriptionMarkdown: markdown },
+          transcript: formTranscript,
+        });
+
+        expect(res.statusCode).toBe(200);
+        const descriptionInsert = writes.find(
+          (w) => w.method === 'insert' && w.table === jobDescriptions,
+        );
+        expect(descriptionInsert?.arg).toMatchObject({
+          jobId: 'job-u',
+          version: 1,
+          content: markdown,
+        });
+      });
+
+      it('rejects a descriptionMarkdown beyond the 25k cap', async () => {
+        const { deps } = createDeps(createFakeDb());
+        const app = buildServer(deps);
+        const res = await inject(app, {
+          kind: 'form',
+          result: {
+            ...discoveredForm,
+            descriptionMarkdown: 'x'.repeat(25_001),
+          },
+          transcript: [],
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json()).toMatchObject({ error: 'invalid body' });
+      });
+
+      it('backfills nothing when the jobs row already has title and company', async () => {
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({
+          selectResults: [
+            [{ id: 'run-1' }],
+            [{ job: { ...jobRow, title: 'Ingest Title' } }],
+          ],
+          insertResults: [[]],
+          writes,
+        });
+        const { deps } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app, {
+          kind: 'form',
+          result: discoveredForm,
+          transcript: formTranscript,
+        });
+
+        expect(res.statusCode).toBe(200);
+        // Both fields were ingest-recorded — no jobs write at all.
+        expect(writes.some((w) => w.table === jobs)).toBe(false);
+      });
+
+      it('accepts an employmentType and stores it on the discovered jobSpec', async () => {
+        const writes: DbWrite[] = [];
+        const db = createFakeDb({
+          selectResults: [[{ id: 'run-1' }], [{ job: jobRow }]],
+          insertResults: [[]],
+          writes,
+        });
+        const { deps } = createDeps(db);
+        const app = buildServer(deps);
+
+        const res = await inject(app, {
+          kind: 'form',
+          result: { ...discoveredForm, employmentType: 'Intern' },
+          transcript: formTranscript,
+        });
+
+        expect(res.statusCode).toBe(200);
+        const taskUpdate = writes.find(
+          (w) => w.method === 'update' && w.table === applicationTasks,
+        );
+        expect(taskUpdate?.arg).toMatchObject({
+          jobSpec: { employmentType: 'Intern', discoveredByAgent: true },
+        });
       });
 
       it('not found: records FORM_NOT_FOUND, writes no jobSpec, and marks the run not_found', async () => {

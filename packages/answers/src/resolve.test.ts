@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import type { AnswerBank } from './answer-bank.js';
 import type { Profile } from './profile.js';
 import {
+  isBankOptionValue,
+  matchStoredOption,
   normalizeCompanyKey,
   normalizeLabel,
   resolveAnswers,
@@ -801,6 +803,177 @@ describe('answers bank', () => {
     });
     expect(result.resolved).toEqual([]);
     expect(result.missing).toEqual([question]);
+  });
+});
+
+describe('answers bank {value,label} select shape', () => {
+  const sourceQuestion = q({
+    id: 'q_source',
+    label: 'How did you hear about us?',
+    type: 'select',
+    options: [
+      { label: 'Job board', value: 4128291002 },
+      { label: 'Referral', value: 4128291003 },
+    ],
+  });
+  const bankLabel = 'how did you hear about us';
+
+  it('old-shape rows (bare option value) still resolve by value', () => {
+    // jsonb does not preserve the JS type: the same legacy row may read back
+    // as a string or a number. Both must keep resolving.
+    for (const stored of ['4128291002', 4128291002]) {
+      const result = resolveAnswers([sourceQuestion], profile, {
+        bank: [{ normalizedLabel: bankLabel, value: stored }],
+      });
+      expect(result.resolved).toEqual([
+        { questionId: 'q_source', source: 'bank', value: '4128291002' },
+      ]);
+    }
+  });
+
+  it('new-shape rows resolve by value on the same form', () => {
+    const result = resolveAnswers([sourceQuestion], profile, {
+      bank: [
+        {
+          normalizedLabel: bankLabel,
+          value: { value: '4128291002', label: 'Job board' },
+        },
+      ],
+    });
+    expect(result.resolved).toEqual([
+      { questionId: 'q_source', source: 'bank', value: '4128291002' },
+    ]);
+  });
+
+  it('prefers the value match when value and label point at different options', () => {
+    const result = resolveAnswers([sourceQuestion], profile, {
+      bank: [
+        {
+          // value says Referral, label says Job board — the same-form value
+          // round-trip must win.
+          normalizedLabel: bankLabel,
+          value: { value: '4128291003', label: 'Job board' },
+        },
+      ],
+    });
+    expect(result.resolved).toEqual([
+      { questionId: 'q_source', source: 'bank', value: '4128291003' },
+    ]);
+  });
+
+  it("new-shape rows resolve by label on another tenant's form, where value ids differ", () => {
+    const otherTenant = q({
+      id: 'q_source2',
+      label: 'How did you hear about us?',
+      type: 'select',
+      options: [
+        // Different value ids, punctuation-variant label: the normalized
+        // LABEL is the stable cross-tenant key.
+        { label: 'Job Board!', value: 'src_77' },
+        { label: 'Referral', value: 'src_78' },
+      ],
+    });
+    const result = resolveAnswers([otherTenant], profile, {
+      bank: [
+        {
+          normalizedLabel: bankLabel,
+          value: { value: '4128291002', label: 'Job board' },
+        },
+      ],
+    });
+    expect(result.resolved).toEqual([
+      { questionId: 'q_source2', source: 'bank', value: 'src_77' },
+    ]);
+  });
+
+  it('a new-shape row matching neither value nor label resolves nothing', () => {
+    const result = resolveAnswers([sourceQuestion], profile, {
+      bank: [
+        {
+          normalizedLabel: bankLabel,
+          value: { value: 'src_99', label: 'Company website' },
+        },
+      ],
+    });
+    expect(result.resolved).toEqual([]);
+    expect(result.missing).toEqual([sourceQuestion]);
+  });
+
+  it('multiselect arrays of {value,label} resolve per item by value or label', () => {
+    const question = q({
+      id: 'q_langs',
+      label: 'Which languages do you use?',
+      type: 'multiselect',
+      options: [
+        { label: 'TypeScript', value: 'ts_1' },
+        { label: 'Python', value: 'py_1' },
+      ],
+    });
+    const result = resolveAnswers([question], profile, {
+      bank: [
+        {
+          normalizedLabel: 'which languages do you use',
+          value: [
+            { value: 'ts_1', label: 'TypeScript' }, // same-form value hit
+            { value: 'py_9', label: 'Python' }, // cross-tenant: label hit
+          ],
+        },
+      ],
+    });
+    expect(result.resolved).toEqual([
+      { questionId: 'q_langs', source: 'bank', value: ['ts_1', 'py_1'] },
+    ]);
+  });
+
+  it('fills a TEXT question with the human label, never the option id', () => {
+    const question = q({
+      id: 'q_source_text',
+      label: 'How did you hear about us?',
+    });
+    const result = resolveAnswers([question], profile, {
+      bank: [
+        {
+          normalizedLabel: bankLabel,
+          value: { value: '4128291002', label: 'Job board' },
+        },
+      ],
+    });
+    expect(result.resolved).toEqual([
+      { questionId: 'q_source_text', source: 'bank', value: 'Job board' },
+    ]);
+  });
+});
+
+describe('matchStoredOption / isBankOptionValue', () => {
+  const options = [
+    { label: 'Yes', value: 'yes_17' },
+    { label: 'No', value: 'no_18' },
+  ];
+
+  it('guards the {value,label} shape strictly', () => {
+    expect(isBankOptionValue({ value: 'yes_17', label: 'Yes' })).toBe(true);
+    expect(isBankOptionValue('yes_17')).toBe(false);
+    expect(isBankOptionValue({ value: 'yes_17' })).toBe(false);
+    expect(isBankOptionValue([{ value: 'yes_17', label: 'Yes' }])).toBe(false);
+    expect(isBankOptionValue(null)).toBe(false);
+  });
+
+  it('matches bare scalars label-first, then by value (legacy semantics)', () => {
+    expect(matchStoredOption('Yes', options)?.value).toBe('yes_17');
+    expect(matchStoredOption('no_18', options)?.value).toBe('no_18');
+    expect(matchStoredOption('Maybe', options)).toBeUndefined();
+  });
+
+  it('matches the new shape by value first, then by label', () => {
+    expect(
+      matchStoredOption({ value: 'yes_17', label: 'No' }, options)?.value,
+    ).toBe('yes_17');
+    expect(
+      matchStoredOption({ value: 'stale_99', label: 'No' }, options)?.value,
+    ).toBe('no_18');
+    expect(
+      matchStoredOption({ value: 'stale_99', label: 'Maybe' }, options),
+    ).toBeUndefined();
   });
 });
 

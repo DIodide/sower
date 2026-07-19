@@ -10,6 +10,7 @@
 // answer resolves only for its company; a global answer is the fallback when
 // no company-scoped answer exists for that (company, question).
 
+import { isBankOptionValue } from '@sower/answers';
 import { z } from 'zod';
 
 export interface LibraryEntry {
@@ -18,7 +19,12 @@ export interface LibraryEntry {
   company: string;
   questionLabel: string;
   normalizedLabel: string;
-  /** Display/edit string; array values are shown comma-joined. */
+  /**
+   * Display/edit string. Select answers stored as {value,label} show their
+   * human LABEL (not the platform's option id); arrays are comma-joined.
+   * Editing saves the edited text back as a plain string, which still
+   * resolves — the resolver matches option labels first.
+   */
   value: string;
   /** ISO timestamp of the last change, when the api provides one. */
   updatedAt: string | null;
@@ -52,7 +58,14 @@ const errorBodySchema = z.object({
 
 function displayValue(value: unknown): string {
   if (typeof value === 'string') return value;
-  if (Array.isArray(value)) return value.map((v) => String(v)).join(', ');
+  // New-shape select answers ({value,label}) read as their human label —
+  // never the platform-internal option id ('4128291002', 'yes_17').
+  if (isBankOptionValue(value)) return value.label;
+  if (Array.isArray(value)) {
+    return value
+      .map((v) => (isBankOptionValue(v) ? v.label : String(v)))
+      .join(', ');
+  }
   if (value === null || value === undefined) return '';
   return JSON.stringify(value);
 }

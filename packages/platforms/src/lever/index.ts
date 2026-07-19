@@ -254,6 +254,20 @@ export class LeverAdapter implements PlatformAdapter {
     if (location) {
       spec.location = location;
     }
+    // categories.commitment IS the employment type ("Internship"/"Full-time"/
+    // "Regular Full Time (Salary)"); team is the sub-department grouping.
+    const employmentType = payload.categories?.commitment;
+    if (employmentType) {
+      spec.employmentType = employmentType;
+    }
+    const department =
+      payload.categories?.department ?? payload.categories?.team;
+    if (department) {
+      spec.department = department;
+    }
+    if (payload.workplaceType) {
+      spec.locationType = payload.workplaceType;
+    }
     if (payload.description) {
       spec.descriptionHtml = payload.description;
     }

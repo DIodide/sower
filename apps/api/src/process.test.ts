@@ -14,6 +14,7 @@ const adapterState = vi.hoisted(() => ({
   company: undefined as string | undefined,
   title: undefined as string | undefined,
   description: undefined as string | undefined,
+  employmentType: undefined as string | undefined,
   formAccess: undefined as 'public' | 'account-required' | undefined,
 }));
 
@@ -63,6 +64,9 @@ vi.mock('@sower/platforms', () => ({
               : {}),
             ...(adapterState.description !== undefined
               ? { description: adapterState.description }
+              : {}),
+            ...(adapterState.employmentType !== undefined
+              ? { employmentType: adapterState.employmentType }
               : {}),
             ...(adapterState.formAccess !== undefined
               ? { formAccess: adapterState.formAccess }
@@ -193,6 +197,8 @@ function createFakeTaskDb(initial: {
   bank?: Array<{ normalizedLabel: string; value: unknown; company: string }>;
   /** Platform of the job row; defaults to greenhouse. */
   platform?: string;
+  /** Pre-existing event history (e.g. a RESTORE from a human un-discard). */
+  events?: FakeEventRow[];
 }) {
   const task: FakeTaskRow = {
     id: 'task-1',
@@ -216,7 +222,7 @@ function createFakeTaskDb(initial: {
     company: initial.company ?? null,
     title: initial.title ?? null,
   };
-  const eventRows: FakeEventRow[] = [];
+  const eventRows: FakeEventRow[] = [...(initial.events ?? [])];
   const descriptionRows: FakeDescriptionRow[] = initial.descriptions ?? [];
   const bankRows = initial.bank ?? [];
 
@@ -238,8 +244,18 @@ function createFakeTaskDb(initial: {
       const isDocumentsSelect = fields !== undefined && 'kind' in fields;
       const isDescriptionSelect =
         fields !== undefined && 'contentHash' in fields;
+      // The auto-discard RESTORE guard selects only the event id (filtered to
+      // type = 'RESTORE' in SQL; the fake applies the filter here).
+      const isRestoreEventSelect =
+        fields !== undefined &&
+        'id' in fields &&
+        Object.keys(fields).length === 1;
       let result: unknown[];
-      if (isDescriptionSelect) {
+      if (isRestoreEventSelect) {
+        result = eventRows
+          .filter((event) => event.type === 'RESTORE')
+          .map((_, index) => ({ id: `event-${index}` }));
+      } else if (isDescriptionSelect) {
         const latest = [...descriptionRows]
           .sort((a, b) => b.version - a.version)
           .slice(0, 1)
@@ -413,6 +429,7 @@ beforeEach(() => {
   adapterState.company = undefined;
   adapterState.title = undefined;
   adapterState.description = undefined;
+  adapterState.employmentType = undefined;
   adapterState.formAccess = undefined;
   answersState.result = { resolved: [], missing: [] };
   answersState.lastOpts = undefined;
@@ -1154,5 +1171,167 @@ describe('processTask Contract D (description versioning)', () => {
     await processTask(createDeps(db), 'task-1');
 
     expect(descriptionRows).toHaveLength(0);
+  });
+});
+
+describe('processTask full-time auto-discard', () => {
+  it('discards a full-time posting with reason auto and the employment type in the note', async () => {
+    const { db, task, eventRows } = createFakeTaskDb({ state: 'QUEUED' });
+    adapterState.title = 'Staff Software Engineer';
+    adapterState.employmentType = 'Full time';
+    adapterState.description = 'A full-time role.';
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome).toEqual({
+      kind: 'auto_discarded',
+      state: 'DISCARDED',
+      employmentType: 'Full time',
+    });
+    expect(task.state).toBe('DISCARDED');
+    expect(eventRows.map((e) => [e.type, e.fromState, e.toState])).toEqual([
+      ['PROCESS_START', 'QUEUED', 'PREPARING'],
+      ['DISCARD', 'PREPARING', 'DISCARDED'],
+    ]);
+    // The DISCARD event's data is what the dashboard labels "Auto discarded"
+    // from: data.reason === 'auto', with the human-readable why in the note.
+    expect(eventRows.at(-1)?.data).toEqual({
+      reason: 'auto',
+      note: 'Employment type: Full time',
+    });
+    // Processing stopped BEFORE resolution: no answers were resolved and no
+    // RESOLVED_* event exists — the task never reached REVIEW/NEEDS_INPUT.
+    expect(answersState.lastOpts).toBeUndefined();
+    // The #ingest reply line flips to "discarded".
+    expect(refreshIngestReply).toHaveBeenCalledTimes(1);
+    expect(refreshIngestReply).toHaveBeenCalledWith(
+      expect.anything(),
+      'task-1',
+    );
+  });
+
+  it.each([
+    'Full-Time',
+    'FULL TIME',
+    'FullTime',
+    'full-time',
+  ])('discards the %s casing/hyphen variant', async (employmentType) => {
+    const { db, task } = createFakeTaskDb({ state: 'QUEUED' });
+    adapterState.title = 'Backend Engineer';
+    adapterState.employmentType = employmentType;
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome).toEqual({
+      kind: 'auto_discarded',
+      state: 'DISCARDED',
+      employmentType,
+    });
+    expect(task.state).toBe('DISCARDED');
+  });
+
+  it('proceeds normally for an Intern employment type', async () => {
+    const { db, task } = createFakeTaskDb({ state: 'QUEUED' });
+    adapterState.title = 'Backend Engineer';
+    adapterState.employmentType = 'Intern';
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'REVIEW' });
+    expect(task.state).toBe('REVIEW');
+  });
+
+  it('proceeds when the spec title says intern despite a full-time label (mislabel safety)', async () => {
+    const { db, task } = createFakeTaskDb({ state: 'QUEUED' });
+    adapterState.title = 'Software Engineer Intern';
+    adapterState.employmentType = 'Full time';
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'REVIEW' });
+    expect(task.state).toBe('REVIEW');
+  });
+
+  it('proceeds when the ingest-recorded job title says intern despite a full-time label', async () => {
+    const { db, task } = createFakeTaskDb({
+      state: 'QUEUED',
+      title: 'SWE Internship (Summer 2027)',
+    });
+    adapterState.title = 'Backend Engineer';
+    adapterState.employmentType = 'Full time';
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'REVIEW' });
+    expect(task.state).toBe('REVIEW');
+  });
+
+  it('proceeds when the employment type itself also says intern', async () => {
+    const { db } = createFakeTaskDb({ state: 'QUEUED' });
+    adapterState.title = 'Backend Engineer';
+    adapterState.employmentType = 'Full time (Internship program)';
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'REVIEW' });
+  });
+
+  it('never re-discards a task a human restored (RESTORE event guard)', async () => {
+    const { db, task, eventRows } = createFakeTaskDb({
+      state: 'QUEUED',
+      events: [
+        {
+          taskId: 'task-1',
+          type: 'DISCARD',
+          fromState: 'PREPARING',
+          toState: 'DISCARDED',
+          data: { reason: 'auto', note: 'Employment type: Full time' },
+        },
+        {
+          taskId: 'task-1',
+          type: 'RESTORE',
+          fromState: 'DISCARDED',
+          toState: 'NEEDS_INPUT',
+          data: { reason: 'manual' },
+        },
+        {
+          taskId: 'task-1',
+          type: 'RETRY',
+          fromState: 'NEEDS_INPUT',
+          toState: 'QUEUED',
+          data: null,
+        },
+      ],
+    });
+    adapterState.title = 'Staff Software Engineer';
+    adapterState.employmentType = 'Full time';
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    // The human's restore overrides the rule: the task processes normally.
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'REVIEW' });
+    expect(task.state).toBe('REVIEW');
+    expect(eventRows.filter((e) => e.type === 'DISCARD')).toHaveLength(1);
+  });
+
+  it('still persists the spec, backfill, and description before discarding', async () => {
+    const { db, task, job, descriptionRows } = createFakeTaskDb({
+      state: 'QUEUED',
+      company: null,
+      title: null,
+    });
+    adapterState.title = 'Staff Software Engineer';
+    adapterState.company = 'Acme Corp';
+    adapterState.employmentType = 'Full time';
+    adapterState.description = 'Full-time role description.';
+
+    await processTask(createDeps(db), 'task-1');
+
+    // Even a discarded task keeps its parsed record: the Archive row shows
+    // the real title/company and the JD is versioned for later reference.
+    expect(task.jobSpec).toMatchObject({ employmentType: 'Full time' });
+    expect(job.company).toBe('Acme Corp');
+    expect(job.title).toBe('Staff Software Engineer');
+    expect(descriptionRows).toHaveLength(1);
   });
 });

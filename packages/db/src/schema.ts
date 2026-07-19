@@ -273,6 +273,13 @@ export interface DiscoveredForm {
   applyUrl?: string;
   company?: string;
   title?: string;
+  /**
+   * JD markdown scraped programmatically from the details page (~20k cap).
+   * The result endpoint also persists it as a job_descriptions row.
+   */
+  descriptionMarkdown?: string;
+  /** Employment type when the page exposes one (future extraction). */
+  employmentType?: string;
   questions: Question[];
   confidence: 'high' | 'medium' | 'low';
   /** Incl. "form is JS-rendered/behind login/not found" when relevant. */

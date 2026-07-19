@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { BankValue } from '@sower/answers';
 import { loadProfile, resolveAnswers } from '@sower/answers';
 import type {
   JobSpec,
@@ -37,6 +38,17 @@ export type ProcessOutcome =
   | { kind: 'not_found' }
   | { kind: 'skipped'; state: string }
   | { kind: 'processed'; state: TaskState; resolved: number; missing: number }
+  | {
+      /**
+       * The parse succeeded but the posting's employment type is full-time
+       * (and nothing says intern), so the task was DISCARDED instead of
+       * resolved/enqueued. A final outcome — /tasks/process answers 200 so
+       * Cloud Tasks never retries it.
+       */
+      kind: 'auto_discarded';
+      state: TaskState;
+      employmentType: string;
+    }
   | { kind: 'failed'; error: string; attempt: number; gaveUp: boolean };
 
 /**
@@ -135,7 +147,29 @@ export async function processTask(
     // run inside the processing try, so a DB hiccup here surfaces as a normal
     // FAIL/retry rather than silently dropping the discovered data.
     await backfillJobFields(db, job, jobSpec);
-    await recordJobDescription(db, job.id, jobSpec);
+    await recordJobDescription(db, job.id, jobSpec.description);
+
+    // Auto-discard full-time roles: the user hunts internships, so a posting
+    // whose employment type says full-time (and whose title/type nowhere says
+    // intern — mislabeled internships must survive) is removed from the queue
+    // right after the parse persisted its spec/description. A prior RESTORE
+    // event means a human already overrode this rule for the task — never
+    // re-discard against that decision.
+    const fullTimeType = autoDiscardableEmploymentType(jobSpec, job.title);
+    if (fullTimeType !== null && !(await hasRestoreEvent(db, taskId))) {
+      currentState = await transitionTask(db, taskId, currentState, 'DISCARD', {
+        reason: 'auto',
+        note: `Employment type: ${fullTimeType}`,
+      });
+      // Flip the #ingest reply line to "discarded". Best-effort (never
+      // throws), but guard anyway — a reply edit must not change the outcome.
+      await refreshIngestReply(deps, taskId).catch(() => {});
+      return {
+        kind: 'auto_discarded',
+        state: currentState,
+        employmentType: fullTimeType,
+      };
+    }
 
     const profile = await loadProfile(config.PROFILE_PATH);
     // The curated answer bank (loaded once at startup, on deps), the answers
@@ -172,7 +206,7 @@ export async function processTask(
       {
         bank: bankRows.map((row) => ({
           normalizedLabel: row.normalizedLabel,
-          value: row.value as string | string[],
+          value: row.value as BankValue,
           company: row.company,
         })),
         documents: documentRows,
@@ -313,18 +347,64 @@ async function enrichWorkdayQuestionnaire(
   }
 }
 
+const FULL_TIME_RE = /full[\s-]?time/i;
+const INTERN_RE = /intern/i;
+
+/**
+ * The employment type to auto-discard this parse for, or null to proceed.
+ * Fires only when the spec's employmentType reads full-time AND neither the
+ * employment type itself nor any known title says intern — a safety against
+ * mislabeled internship postings ("Software Engineer Intern" tagged
+ * "Full time" must reach a human, not the trash).
+ */
+export function autoDiscardableEmploymentType(
+  spec: JobSpec,
+  jobTitle: string | null,
+): string | null {
+  const employmentType = spec.employmentType;
+  if (!employmentType || !FULL_TIME_RE.test(employmentType)) {
+    return null;
+  }
+  if (
+    INTERN_RE.test(employmentType) ||
+    INTERN_RE.test(spec.title) ||
+    (jobTitle !== null && INTERN_RE.test(jobTitle))
+  ) {
+    return null;
+  }
+  return employmentType;
+}
+
+/**
+ * True when the task's history holds a RESTORE event — a human brought it
+ * back from DISCARDED once, which permanently exempts it from auto-discard.
+ */
+async function hasRestoreEvent(
+  db: Deps['db'],
+  taskId: string,
+): Promise<boolean> {
+  const rows = await db
+    .select({ id: events.id })
+    .from(events)
+    .where(and(eq(events.taskId, taskId), eq(events.type, 'RESTORE')))
+    .limit(1);
+  return rows.length > 0;
+}
+
 /**
  * Backfill the jobs row's company/title from the discovered JobSpec when the
  * ingest-time values are missing. A raw-URL ingest records no company/title
  * (and Ashby's posting-api has no org display name at all), so without this an
  * Ashby/Lever URL-ingested task would show a BLANK company & title on the
  * dashboard. Only blanks are filled — a value the ingest already recorded is
- * never overwritten, and empty discovered values are ignored.
+ * never overwritten, and empty discovered values are ignored. Exported for the
+ * form-discovery result endpoint, which backfills from the agent's finding the
+ * same way ("— untitled role" rows on unsupported links).
  */
-async function backfillJobFields(
+export async function backfillJobFields(
   db: Deps['db'],
   job: { id: string; company: string | null; title: string | null },
-  spec: JobSpec,
+  spec: { company?: string; title?: string },
 ): Promise<void> {
   const updates: { company?: string; title?: string } = {};
   if (!job.company && spec.company) {
@@ -340,20 +420,20 @@ async function backfillJobFields(
 }
 
 /**
- * Version the job description. Computes the sha256 of the plain-text
- * description and compares it against the latest stored row; a new version
- * (max(version)+1, or 1 when none exists) is inserted ONLY when the content
- * changed. A re-discover that returns an identical description stores nothing,
- * so the history captures every real change without duplicating unchanged
- * re-fetches. No description on the spec (e.g. an adapter that does not expose
- * one) is a no-op.
+ * Version the job description. Computes the sha256 of the content and
+ * compares it against the latest stored row; a new version (max(version)+1,
+ * or 1 when none exists) is inserted ONLY when the content changed. A
+ * re-discover that returns identical content stores nothing, so the history
+ * captures every real change without duplicating unchanged re-fetches. No
+ * content (e.g. an adapter that exposes none) is a no-op. Exported for the
+ * form-discovery result endpoint, which stores the agent-scraped markdown
+ * through the same versioning.
  */
-async function recordJobDescription(
+export async function recordJobDescription(
   db: Deps['db'],
   jobId: string,
-  spec: JobSpec,
+  content: string | undefined,
 ): Promise<void> {
-  const content = spec.description;
   if (!content) {
     return;
   }
