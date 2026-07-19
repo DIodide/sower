@@ -22,7 +22,7 @@
     "@sower/db": "workspace:*",
     "@sower/platforms": "workspace:*",
     "@sower/storage": "workspace:*",
-    "drizzle-orm": "^0.44.0",
+    "drizzle-orm": "^0.45.2",
     "playwright": "^1.49.0"
   },
   "devDependencies": {
