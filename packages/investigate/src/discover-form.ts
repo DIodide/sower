@@ -1,6 +1,7 @@
 /**
  * Form discovery for UNSUPPORTED job links (no platform adapter): render the
- * page in headless Chromium, extract the application form's controls
+ * page in headless Chromium, extract the job posting's metadata (title,
+ * company, full description as markdown) and the application form's controls
  * programmatically, then have a text-only Claude Agent SDK run normalize the
  * raw extraction into canonical Question[].
  *
@@ -14,6 +15,17 @@
  *     (no browser, no web, no shell/file) and the same minimal env
  *     allowlist as investigateScreenshot, so a prompt-injected job page can
  *     at worst distort its own Question list — which zod then validates.
+ *     descriptionMarkdown is NEVER agent-generated: it is the raw
+ *     programmatic extraction, so the agent cannot hallucinate a JD.
+ *
+ * Anti-bot posture: many career sites 403 obvious headless browsers, so the
+ * launch/context mirrors a real Chrome (stable-Chrome UA without
+ * "HeadlessChrome", AutomationControlled blink feature disabled, masked
+ * navigator.webdriver, normal viewport/locale). When the main navigation
+ * still returns >=400, it retries once on a fresh page, and if the site
+ * keeps blocking, the result says HONESTLY that the site blocked automated
+ * access (a distinct outcome and transcript step — NOT "no form found"),
+ * and the interpretation agent is never run on the error page.
  *
  * Both phases are recorded into the same TranscriptStep[] (browser.navigate /
  * browser.click / browser.extract steps, then the agent's steps), so the
@@ -21,7 +33,13 @@
  */
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Question } from '@sower/core';
-import { type Browser, chromium, type Page } from 'playwright';
+import {
+  type Browser,
+  type BrowserContext,
+  chromium,
+  type Frame,
+  type Page,
+} from 'playwright';
 import { z } from 'zod';
 import {
   buildSubprocessEnv,
@@ -31,6 +49,10 @@ import {
   type TranscriptStep,
   truncateOutput,
 } from './agent-runner.js';
+import {
+  scoreApplyControlText,
+  serializeToMarkdown,
+} from './page-functions.js';
 import { assertSafeFetchTarget, isSafeRequestTarget } from './ssrf.js';
 
 export interface DiscoveredForm {
@@ -39,9 +61,15 @@ export interface DiscoveredForm {
   applyUrl?: string;
   company?: string;
   title?: string;
+  /**
+   * The job description + requirements as markdown, extracted
+   * PROGRAMMATICALLY from the details page DOM (before any Apply hop).
+   * Never agent-generated. Capped at ~20k chars (truncation noted in notes).
+   */
+  descriptionMarkdown?: string;
   questions: Question[];
   confidence: 'high' | 'medium' | 'low';
-  /** Incl. "form is JS-rendered/behind login/not found" when relevant. */
+  /** Incl. "form is JS-rendered/behind login/blocked by site" when relevant. */
   notes: string;
 }
 
@@ -80,26 +108,50 @@ export interface RawExtraction {
   pageText: string;
 }
 
-const BROWSER_UA =
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+/** Job-posting metadata extracted programmatically from the DETAILS page. */
+export interface JobMetadata {
+  title: string;
+  company: string;
+  descriptionMarkdown: string;
+  descriptionTruncated: boolean;
+}
+
+/** UA major when browser.version() is unavailable (kept near current stable). */
+const FALLBACK_CHROME_MAJOR = 143;
 const LAUNCH_TIMEOUT_MS = 30_000;
 const NAV_TIMEOUT_MS = 45_000;
+const NAV_RETRY_DELAY_MS = 2_000;
 const NETWORKIDLE_TIMEOUT_MS = 10_000;
 const FORM_WAIT_TIMEOUT_MS = 5_000;
 const CLICK_TIMEOUT_MS = 5_000;
 const POPUP_WAIT_MS = 3_000;
 const APPLY_SELECTOR = '[data-sower-apply="1"]';
+/** details → interstitial → form: at most two Apply-style click hops. */
+const MAX_APPLY_HOPS = 2;
+const MAX_IFRAME_SCANS = 8;
 const DEFAULT_INTERPRET_MAX_TURNS = 6;
 const MAX_EXTRACTION_JSON_CHARS = 24_000;
+const MAX_DESCRIPTION_MARKDOWN_CHARS = 20_000;
+const DESCRIPTION_EXCERPT_CHARS = 1_500;
+
+/**
+ * Masks the most-checked headless fingerprint before any page script runs.
+ * Installed via addInitScript so it applies to every page and popup.
+ */
+const WEBDRIVER_MASK_SCRIPT =
+  "try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch (e) {}";
 
 /**
  * Runs INSIDE the page (page.evaluate serializes it): collect every visible
  * form control with its accessible label, type, required flag, and options;
  * group radio/checkbox inputs by name; and, when the page doesn't look like
- * an application form yet, find and tag an Apply-style button/link so the
- * driver can click it. Must stay self-contained (no outer-scope references).
+ * an application form yet, find and tag the best-scoring Apply-style
+ * button/link so the driver can click it. Must stay self-contained (no
+ * outer-scope references — the scorer is injected as a parameter).
  */
-function extractPageState(): RawExtraction {
+function extractPageState(
+  scoreApplyText: (text: string | null | undefined) => number,
+): RawExtraction {
   const MAX_CONTROLS = 80;
   const MAX_OPTIONS = 40;
   const MAX_PAGE_TEXT = 2500;
@@ -288,7 +340,9 @@ function extractPageState(): RawExtraction {
   const looksLikeApplicationForm =
     controls.length >= 3 || controls.some((c) => c.inputType === 'file');
 
-  // No form yet → find an Apply-style control and tag it for the driver.
+  // No form yet → tag the BEST-scoring Apply-style control for the driver
+  // (exact "apply"-ish beats apply-prefixed beats a generic "continue";
+  // aria-label is checked as well as visible text; DOM order breaks ties).
   let applyCandidate: string | null = null;
   if (!looksLikeApplicationForm) {
     const clickables = Array.from(
@@ -296,6 +350,9 @@ function extractPageState(): RawExtraction {
         'a, button, [role="button"], input[type="submit"]',
       ),
     );
+    let bestEl: HTMLElement | null = null;
+    let bestLabel = '';
+    let bestScore = 0;
     for (const node of clickables) {
       const el = node as HTMLElement;
       if (!isVisible(el)) continue;
@@ -303,34 +360,17 @@ function extractPageState(): RawExtraction {
         el.tagName === 'INPUT'
           ? norm((el as HTMLInputElement).value)
           : norm(el.textContent);
-      const text = raw
-        .toLowerCase()
-        .replace(/[^a-z ]/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (!text || text.length > 40) continue;
-      const isApply =
-        text === 'apply' ||
-        text === 'apply now' ||
-        text === 'apply today' ||
-        text === 'apply here' ||
-        text === 'apply online' ||
-        text === 'apply for job' ||
-        text === 'apply for this job' ||
-        text === 'apply for this position' ||
-        text === 'apply for this role' ||
-        text === 'apply to this job' ||
-        text === 'apply to this position' ||
-        text === 'im interested' ||
-        text === 'i am interested' ||
-        text === 'start application' ||
-        text === 'start your application' ||
-        text === 'apply for this opening';
-      if (isApply) {
-        el.setAttribute('data-sower-apply', '1');
-        applyCandidate = raw;
-        break;
+      const aria = norm(el.getAttribute('aria-label'));
+      const score = Math.max(scoreApplyText(raw), scoreApplyText(aria));
+      if (score > bestScore) {
+        bestScore = score;
+        bestEl = el;
+        bestLabel = raw || aria;
       }
+    }
+    if (bestEl) {
+      bestEl.setAttribute('data-sower-apply', '1');
+      applyCandidate = bestLabel;
     }
   }
 
@@ -368,18 +408,184 @@ function extractPageState(): RawExtraction {
 }
 
 /**
- * page.evaluate expression wrapping extractPageState. The function is
- * serialized via toString(), and when this package runs under tsx/esbuild
- * (keepNames) the compiled body contains calls to an injected `__name`
- * helper that does not exist inside the browser — the IIFE provides a
- * no-op `__name` binding so the serialized body runs anywhere.
+ * Runs INSIDE the page: extract the posting's title, company, and the full
+ * description/requirements content serialized to markdown. The content node
+ * is chosen by tiered heuristics — description-ish class/id selectors first,
+ * then article/job sections, then main — taking within each tier the node
+ * whose serialized markdown is largest, and falling through to the next tier
+ * (finally body) when nothing yields a substantial block. The serializer
+ * (injected as a parameter) skips nav/header/footer/aside, scripts, forms,
+ * cookie/consent banners, and hidden elements. Self-contained otherwise.
  */
-function extractionExpression(): string {
-  return `((__name) => (${extractPageState.toString()})())((t) => t)`;
+function extractJobMetadata(
+  serialize: (
+    root: Element,
+    maxChars: number,
+  ) => { markdown: string; truncated: boolean },
+  maxChars: number,
+): JobMetadata {
+  const MIN_CONTENT_CHARS = 200;
+  const MAX_CANDIDATES_PER_TIER = 25;
+
+  const norm = (s: string | null | undefined): string =>
+    (s ?? '').replace(/\s+/g, ' ').trim();
+  const metaContent = (selector: string): string =>
+    norm(document.querySelector(selector)?.getAttribute('content'));
+
+  // JSON-LD JobPosting — the most precise source when present.
+  let ldTitle = '';
+  let ldCompany = '';
+  for (const script of Array.from(
+    document.querySelectorAll('script[type="application/ld+json"]'),
+  )) {
+    try {
+      const data: unknown = JSON.parse(script.textContent ?? '');
+      const graph = (data as { '@graph'?: unknown })['@graph'];
+      const items: unknown[] = Array.isArray(data)
+        ? data
+        : Array.isArray(graph)
+          ? graph
+          : [data];
+      for (const item of items) {
+        if (!item || typeof item !== 'object') continue;
+        const posting = item as {
+          '@type'?: unknown;
+          title?: unknown;
+          hiringOrganization?: unknown;
+        };
+        if (
+          !String(posting['@type'] ?? '')
+            .toLowerCase()
+            .includes('jobposting')
+        ) {
+          continue;
+        }
+        if (!ldTitle && typeof posting.title === 'string') {
+          ldTitle = norm(posting.title);
+        }
+        if (!ldCompany) {
+          const org = posting.hiringOrganization;
+          if (typeof org === 'string') ldCompany = norm(org);
+          else if (org && typeof org === 'object') {
+            const name = (org as { name?: unknown }).name;
+            if (typeof name === 'string') ldCompany = norm(name);
+          }
+        }
+      }
+    } catch {
+      // not JSON — skip
+    }
+  }
+
+  const h1 = norm(document.querySelector('h1')?.textContent);
+  const title =
+    ldTitle ||
+    h1 ||
+    metaContent('meta[property="og:title"]') ||
+    norm(document.title);
+
+  const logoAlt = norm(
+    document
+      .querySelector(
+        'header img[alt], [class*="logo" i] img[alt], img[class*="logo" i]',
+      )
+      ?.getAttribute('alt'),
+  );
+  let hostname = location.hostname.toLowerCase().replace(/^www\./, '');
+  hostname = hostname.replace(/^(careers|jobs|apply|boards|talent|hire)\./, '');
+  const hostLabel = hostname.split('.')[0] ?? '';
+  const hostCompany = hostLabel
+    ? hostLabel.charAt(0).toUpperCase() + hostLabel.slice(1)
+    : '';
+  const company =
+    ldCompany ||
+    metaContent('meta[property="og:site_name"]') ||
+    logoAlt ||
+    hostCompany;
+
+  const candidateTiers: string[][] = [
+    [
+      '[class*="description" i]',
+      '[id*="description" i]',
+      '[class*="posting" i]',
+      '[data-testid*="description" i]',
+    ],
+    ['article', 'section[class*="job" i]', 'div[class*="job" i]'],
+    ['main', '[role="main"]'],
+  ];
+  let contentNode: Element | null = null;
+  for (const tier of candidateTiers) {
+    let bestNode: Element | null = null;
+    let bestLength = 0;
+    const seen = new Set<Element>();
+    for (const selector of tier) {
+      for (const el of Array.from(document.querySelectorAll(selector)).slice(
+        0,
+        MAX_CANDIDATES_PER_TIER,
+      )) {
+        if (seen.has(el)) continue;
+        seen.add(el);
+        const length = serialize(el, maxChars).markdown.length;
+        if (length > bestLength) {
+          bestLength = length;
+          bestNode = el;
+        }
+      }
+    }
+    if (bestNode && bestLength >= MIN_CONTENT_CHARS) {
+      contentNode = bestNode;
+      break;
+    }
+  }
+  if (!contentNode) contentNode = document.body;
+
+  const serialized = contentNode
+    ? serialize(contentNode, maxChars)
+    : { markdown: '', truncated: false };
+  return {
+    title,
+    company,
+    descriptionMarkdown: serialized.markdown,
+    descriptionTruncated: serialized.truncated,
+  };
 }
 
-async function runExtraction(page: Page): Promise<RawExtraction> {
-  return (await page.evaluate(extractionExpression())) as RawExtraction;
+/**
+ * page.evaluate expressions wrapping the in-page functions. Each function is
+ * serialized via toString(), and when this package runs under tsx/esbuild
+ * (keepNames) the compiled bodies contain calls to an injected `__name`
+ * helper that does not exist inside the browser — the IIFE provides a
+ * no-op `__name` binding so the serialized bodies run anywhere. The leading
+ * marker comments identify the expression kind (also used by test doubles).
+ */
+function extractionExpression(): string {
+  return `/* sower:extract */((__name) => (${extractPageState.toString()})((${scoreApplyControlText.toString()})))((t) => t)`;
+}
+
+function metadataExpression(): string {
+  return `/* sower:metadata */((__name) => (${extractJobMetadata.toString()})((${serializeToMarkdown.toString()}), ${MAX_DESCRIPTION_MARKDOWN_CHARS}))((t) => t)`;
+}
+
+async function runExtraction(target: Page | Frame): Promise<RawExtraction> {
+  return (await target.evaluate(extractionExpression())) as RawExtraction;
+}
+
+async function runMetadataExtraction(
+  page: Page,
+): Promise<JobMetadata | undefined> {
+  const value = (await page.evaluate(metadataExpression())) as
+    | Partial<JobMetadata>
+    | null
+    | undefined;
+  if (!value || typeof value.descriptionMarkdown !== 'string') {
+    return undefined;
+  }
+  return {
+    title: typeof value.title === 'string' ? value.title : '',
+    company: typeof value.company === 'string' ? value.company : '',
+    descriptionMarkdown: value.descriptionMarkdown,
+    descriptionTruncated: value.descriptionTruncated === true,
+  };
 }
 
 type StepFn = (step: Omit<TranscriptStep, 'seq' | 'ts'>) => void;
@@ -434,6 +640,62 @@ function noFormNotes(extraction: RawExtraction): string {
   return reasons.join('; ');
 }
 
+/** Honest wording for an HTTP >=400 main navigation (after the one retry). */
+function blockedNotes(status: number): string {
+  const blockish = [401, 403, 407, 429, 503].includes(status);
+  if (blockish) {
+    return `the site blocked automated access (HTTP ${status}) — the posting may well have an application form, but the browser could not reach it`;
+  }
+  return `the page returned HTTP ${status} — the posting could not be loaded`;
+}
+
+/** Supported ATS host detection for cross-origin iframe embeds. */
+function detectAtsHost(
+  url: string,
+): 'greenhouse' | 'lever' | 'ashby' | undefined {
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return undefined;
+  }
+  if (host === 'greenhouse.io' || host.endsWith('.greenhouse.io')) {
+    return 'greenhouse';
+  }
+  if (host === 'lever.co' || host.endsWith('.lever.co')) return 'lever';
+  if (host === 'ashbyhq.com' || host.endsWith('.ashbyhq.com')) return 'ashby';
+  return undefined;
+}
+
+/** Real-Chrome UA (no "HeadlessChrome"), major matched to the engine. */
+function chromeUserAgent(browserVersion: string): string {
+  const major = Number.parseInt(browserVersion.split('.')[0] ?? '', 10);
+  const version =
+    Number.isFinite(major) && major > 0 ? major : FALLBACK_CHROME_MAJOR;
+  return `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version}.0.0.0 Safari/537.36`;
+}
+
+/**
+ * Launch hardened against headless fingerprinting: prefer Playwright's NEW
+ * headless mode (full Chromium via channel:'chromium' — less fingerprintable
+ * than the default headless shell), falling back to the default when the
+ * full browser isn't installed; AutomationControlled disabled either way.
+ * A launch failure on both paths (chromium not installed) is a config
+ * error — let it throw.
+ */
+async function launchHardenedBrowser(): Promise<Browser> {
+  const options = {
+    headless: true,
+    timeout: LAUNCH_TIMEOUT_MS,
+    args: ['--disable-blink-features=AutomationControlled'],
+  };
+  try {
+    return await chromium.launch({ ...options, channel: 'chromium' });
+  } catch {
+    return chromium.launch(options);
+  }
+}
+
 async function settle(page: Page): Promise<void> {
   await page
     .waitForLoadState('networkidle', { timeout: NETWORKIDLE_TIMEOUT_MS })
@@ -445,30 +707,132 @@ async function settle(page: Page): Promise<void> {
     .catch(() => {});
 }
 
+type NavigationResult =
+  | { ok: true; page: Page }
+  | { ok: false; kind: 'error'; message: string }
+  | { ok: false; kind: 'blocked'; status: number };
+
+/**
+ * Navigate with response-status awareness: when the main navigation returns
+ * HTTP >=400 (bot walls usually 403), wait briefly and retry ONCE on a
+ * fresh page; when the retry still fails, report a distinct "blocked"
+ * outcome (its own transcript step) so triage can tell blocked from
+ * formless — the caller must never run the interpretation agent on it.
+ */
+async function navigateWithRetry(
+  context: BrowserContext,
+  url: string,
+  step: StepFn,
+): Promise<NavigationResult> {
+  let page = await context.newPage();
+
+  step({ kind: 'tool_use', tool: 'browser.navigate', input: { url } });
+  let status: number | undefined;
+  try {
+    const response = await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: NAV_TIMEOUT_MS,
+    });
+    status = response?.status();
+  } catch (error) {
+    const message = errorMessage(error);
+    step({
+      kind: 'tool_result',
+      tool: 'browser.navigate',
+      output: `navigation failed: ${message}`,
+    });
+    return { ok: false, kind: 'error', message };
+  }
+  step({
+    kind: 'tool_result',
+    tool: 'browser.navigate',
+    output: `HTTP ${status ?? 'n/a'} → ${page.url()}`,
+  });
+  if (status === undefined || status < 400) return { ok: true, page };
+
+  step({
+    kind: 'system',
+    text: 'http_error_retry',
+    output: `HTTP ${status} on first attempt — retrying once with a fresh page after ${NAV_RETRY_DELAY_MS}ms`,
+  });
+  await page.waitForTimeout(NAV_RETRY_DELAY_MS).catch(() => {});
+  await page.close().catch(() => {});
+  page = await context.newPage();
+
+  step({
+    kind: 'tool_use',
+    tool: 'browser.navigate',
+    input: { url, retry: true },
+  });
+  let retryStatus: number | undefined;
+  try {
+    const response = await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: NAV_TIMEOUT_MS,
+    });
+    retryStatus = response?.status();
+  } catch (error) {
+    const message = errorMessage(error);
+    step({
+      kind: 'tool_result',
+      tool: 'browser.navigate',
+      output: `retry navigation failed: ${message}`,
+    });
+    return { ok: false, kind: 'error', message };
+  }
+  step({
+    kind: 'tool_result',
+    tool: 'browser.navigate',
+    output: `HTTP ${retryStatus ?? 'n/a'} → ${page.url()}`,
+  });
+  if (retryStatus !== undefined && retryStatus >= 400) {
+    step({
+      kind: 'system',
+      text: 'blocked_by_site',
+      output: `HTTP ${retryStatus} after retry — treating the page as blocked, skipping extraction and interpretation`,
+    });
+    return { ok: false, kind: 'blocked', status: retryStatus };
+  }
+  return { ok: true, page };
+}
+
 type RenderResult =
-  | { ok: true; extraction: RawExtraction; applyUrl: string }
+  | {
+      ok: true;
+      extraction: RawExtraction;
+      applyUrl: string;
+      metadata?: JobMetadata;
+      iframeNotes: string[];
+    }
   | { ok: false; notes: string };
 
 /**
  * Phase 1 — render + extract (programmatic Playwright, no agent). Navigates
- * the URL headless, waits for a form to render, clicks an Apply-style
- * control when the landing page has no form, and re-extracts. Every request
- * the browser makes goes through the SSRF route interceptor.
+ * the URL headless (with a hardened, real-Chrome-looking context and one
+ * retry on HTTP >=400), extracts the posting's metadata/description from
+ * the details page, then extracts form controls — clicking through up to
+ * two Apply-style hops and scanning iframes when the page has no form.
+ * Every request the browser makes goes through the SSRF route interceptor.
  */
 async function renderAndExtract(
   url: string,
   step: StepFn,
 ): Promise<RenderResult> {
-  // A launch failure (chromium not installed) is a config error — let it throw.
-  const browser: Browser = await chromium.launch({
-    headless: true,
-    timeout: LAUNCH_TIMEOUT_MS,
-  });
+  const browser: Browser = await launchHardenedBrowser();
   try {
+    let browserVersion = '';
+    try {
+      browserVersion = browser.version();
+    } catch {
+      // test doubles / exotic launchers may not implement version()
+    }
     const context = await browser.newContext({
-      userAgent: BROWSER_UA,
-      viewport: { width: 1280, height: 1600 },
+      userAgent: chromeUserAgent(browserVersion),
+      viewport: { width: 1440, height: 900 },
+      locale: 'en-US',
+      extraHTTPHeaders: { 'accept-language': 'en-US,en;q=0.9' },
     });
+    await context.addInitScript({ content: WEBDRIVER_MASK_SCRIPT });
 
     // SSRF containment at the network layer: abort ANY request (navigation,
     // redirect hop, subresource, XHR) whose host is or resolves to a
@@ -490,51 +854,76 @@ async function renderAndExtract(
       }
     });
 
-    let page = await context.newPage();
+    const nav = await navigateWithRetry(context, url, step);
+    if (!nav.ok) {
+      return {
+        ok: false,
+        notes:
+          nav.kind === 'blocked'
+            ? blockedNotes(nav.status)
+            : `could not load page: ${nav.message}`,
+      };
+    }
+    let page = nav.page;
+    await settle(page);
 
-    step({ kind: 'tool_use', tool: 'browser.navigate', input: { url } });
-    let status: number | undefined;
+    // Job metadata + description markdown from the DETAILS page (before any
+    // Apply hop). Failure here is non-fatal — form discovery continues.
+    let metadata: JobMetadata | undefined;
+    step({
+      kind: 'tool_use',
+      tool: 'browser.extract',
+      input: { url: page.url(), target: 'job-metadata' },
+    });
     try {
-      const response = await page.goto(url, {
-        waitUntil: 'domcontentloaded',
-        timeout: NAV_TIMEOUT_MS,
-      });
-      status = response?.status();
-    } catch (error) {
-      const message = errorMessage(error);
+      metadata = await runMetadataExtraction(page);
       step({
         kind: 'tool_result',
-        tool: 'browser.navigate',
-        output: `navigation failed: ${message}`,
+        tool: 'browser.extract',
+        output: metadata
+          ? truncateOutput(
+              `title: ${metadata.title || '(none)'}; company: ${metadata.company || '(none)'}; description: ${metadata.descriptionMarkdown.length} chars of markdown${metadata.descriptionTruncated ? ` (truncated at ${MAX_DESCRIPTION_MARKDOWN_CHARS}-char cap)` : ''}`,
+            )
+          : 'metadata extraction returned no description',
       });
-      return { ok: false, notes: `could not load page: ${message}` };
+    } catch (error) {
+      step({
+        kind: 'tool_result',
+        tool: 'browser.extract',
+        output: `metadata extraction failed: ${errorMessage(error)}`,
+      });
     }
-    await settle(page);
-    step({
-      kind: 'tool_result',
-      tool: 'browser.navigate',
-      output: `HTTP ${status ?? 'n/a'} → ${page.url()}`,
-    });
 
     step({
       kind: 'tool_use',
       tool: 'browser.extract',
       input: { url: page.url() },
     });
-    let extraction = await runExtraction(page);
+    const extraction = await runExtraction(page);
     step({
       kind: 'tool_result',
       tool: 'browser.extract',
       output: summarizeExtraction(extraction),
     });
 
-    // Posting page without a form but with an Apply control → click through
-    // (same tab or popup) and extract again.
-    if (!extraction.looksLikeApplicationForm && extraction.applyCandidate) {
+    // Posting page without a form but with an Apply-style control → click
+    // through (same tab, SPA render, or popup) and extract again — up to
+    // two hops (details → interstitial → form), stopping early when form
+    // controls appear. `best` is what gets interpreted; `current` tracks
+    // the live page so a later hop can still be attempted.
+    let best = extraction;
+    let current = extraction;
+    let hops = 0;
+    while (
+      hops < MAX_APPLY_HOPS &&
+      !current.looksLikeApplicationForm &&
+      current.applyCandidate
+    ) {
+      hops += 1;
       step({
         kind: 'tool_use',
         tool: 'browser.click',
-        input: { selector: APPLY_SELECTOR, text: extraction.applyCandidate },
+        input: { selector: APPLY_SELECTOR, text: current.applyCandidate },
       });
       const popupPromise = context
         .waitForEvent('page', { timeout: CLICK_TIMEOUT_MS + POPUP_WAIT_MS })
@@ -565,7 +954,7 @@ async function renderAndExtract(
         tool: 'browser.click',
         output: clickError
           ? `click failed: ${clickError}`
-          : `clicked "${extraction.applyCandidate}" → ${page.url()}${popup ? ' (popup)' : ''}`,
+          : `clicked "${current.applyCandidate}" → ${page.url()}${popup ? ' (popup)' : ''}`,
       });
 
       // Re-extract even after a click error — the click may still have
@@ -576,20 +965,21 @@ async function renderAndExtract(
           tool: 'browser.extract',
           input: { url: page.url() },
         });
-        const second = await runExtraction(page);
+        const next = await runExtraction(page);
         step({
           kind: 'tool_result',
           tool: 'browser.extract',
-          output: summarizeExtraction(second),
+          output: summarizeExtraction(next),
         });
+        current = next;
         // The post-click page is where applyUrl points, so it wins ties —
         // its login/captcha signals must drive the notes (e.g. a 0-control
         // captcha wall after the Apply hop).
         if (
-          second.looksLikeApplicationForm ||
-          second.controls.length >= extraction.controls.length
+          next.looksLikeApplicationForm ||
+          next.controls.length >= best.controls.length
         ) {
-          extraction = second;
+          best = next;
         }
       } catch (error) {
         step({
@@ -597,6 +987,75 @@ async function renderAndExtract(
           tool: 'browser.extract',
           output: `re-extraction failed: ${errorMessage(error)}`,
         });
+        break;
+      }
+    }
+
+    // Still no form on the final page → look inside iframes: extract in
+    // same-origin frames (custom career sites embedding their own form);
+    // for cross-origin frames record the src — and when it's a supported
+    // ATS host (greenhouse/lever/ashby), say so, since the caller can
+    // ingest that URL directly.
+    const iframeNotes: string[] = [];
+    if (!best.looksLikeApplicationForm) {
+      const mainFrame = page.mainFrame();
+      const childFrames = page
+        .frames()
+        .filter((frame) => frame !== mainFrame)
+        .slice(0, MAX_IFRAME_SCANS);
+      let pageOrigin: string | undefined;
+      try {
+        pageOrigin = new URL(page.url()).origin;
+      } catch {
+        // about:blank etc — treat every frame as cross-origin
+      }
+      for (const frame of childFrames) {
+        const frameUrl = frame.url();
+        if (!frameUrl || frameUrl === 'about:blank') continue;
+        let frameOrigin: string | undefined;
+        try {
+          frameOrigin = new URL(frameUrl).origin;
+        } catch {
+          continue;
+        }
+        if (pageOrigin && frameOrigin === pageOrigin) {
+          step({
+            kind: 'tool_use',
+            tool: 'browser.extract',
+            input: { url: frameUrl, target: 'same-origin iframe' },
+          });
+          try {
+            const frameExtraction = await runExtraction(frame);
+            step({
+              kind: 'tool_result',
+              tool: 'browser.extract',
+              output: summarizeExtraction(frameExtraction),
+            });
+            if (
+              frameExtraction.looksLikeApplicationForm ||
+              frameExtraction.controls.length > best.controls.length
+            ) {
+              best = frameExtraction;
+              iframeNotes.push(
+                `form controls were found inside an embedded same-origin iframe (${frameUrl})`,
+              );
+              if (best.looksLikeApplicationForm) break;
+            }
+          } catch (error) {
+            step({
+              kind: 'tool_result',
+              tool: 'browser.extract',
+              output: `iframe extraction failed: ${errorMessage(error)}`,
+            });
+          }
+        } else {
+          const ats = detectAtsHost(frameUrl);
+          const note = ats
+            ? `the page embeds a supported ATS (${ats}) in a cross-origin iframe: ${frameUrl} — that URL can be ingested directly`
+            : `a cross-origin iframe is present (${frameUrl}) — the application form may live inside it`;
+          iframeNotes.push(note);
+          step({ kind: 'system', text: 'cross_origin_iframe', output: note });
+        }
       }
     }
 
@@ -608,7 +1067,13 @@ async function renderAndExtract(
       });
     }
 
-    return { ok: true, extraction, applyUrl: page.url() };
+    return {
+      ok: true,
+      extraction: best,
+      applyUrl: page.url(),
+      metadata,
+      iframeNotes,
+    };
   } catch (error) {
     // Browser-phase runtime failure (page crash, evaluate on a closed page,
     // …) is a "couldn't discover it", not a programmer error.
@@ -658,6 +1123,7 @@ type InterpretedForm = z.infer<typeof interpretedFormSchema>;
 function buildInterpretationPrompt(
   extraction: RawExtraction,
   hint?: string,
+  descriptionExcerpt?: string,
 ): string {
   const { pageText, ...raw } = extraction;
   let rawJson = JSON.stringify(raw, null, 2);
@@ -682,21 +1148,22 @@ function buildInterpretationPrompt(
     '- id: short stable snake_case for the field MEANING (first_name, last_name, email, phone, resume, cover_letter, linkedin_url, work_authorization, ...). Never reuse an id.',
     '- required: keep the extracted flag; also set true when the label clearly marks the field mandatory (e.g. "*").',
     '- options: keep the extracted options as {label, value} (raw value when present, else the label). Drop placeholder options like "Select…".',
-    '- company and title: infer the employer and the role title from pageTitle / headingText / the page text.',
+    '- company and title: infer the employer and the role title from pageTitle / headingText / the job description excerpt / the page text.',
     '- formFound: true only when the controls form a plausible job application form. If the fields are only login/search/newsletter or there are none, set formFound false with questions [] and explain in notes (e.g. "behind login", "captcha", "no form rendered").',
     '- confidence: "high" when labels and types were clear, "medium" if some mappings were guesses, "low" otherwise.',
     '',
     'When done, output ONLY a fenced ```json code block matching: {formFound, company, title, questions, confidence, notes}.',
   ];
   if (hint) lines.push('', `Caller hint: ${hint}`);
-  lines.push(
-    '',
-    '--- RAW EXTRACTION (JSON) ---',
-    rawJson,
-    '',
-    '--- PAGE TEXT SNIPPET (untrusted) ---',
-    pageText,
-  );
+  lines.push('', '--- RAW EXTRACTION (JSON) ---', rawJson);
+  if (descriptionExcerpt) {
+    lines.push(
+      '',
+      '--- JOB DESCRIPTION EXCERPT (markdown, untrusted) ---',
+      descriptionExcerpt,
+    );
+  }
+  lines.push('', '--- PAGE TEXT SNIPPET (untrusted) ---', pageText);
   return lines.join('\n');
 }
 
@@ -714,21 +1181,46 @@ function dedupeQuestionIds(
   });
 }
 
+/** Programmatic notes appended after the agent's own (iframes, truncation). */
+function appendProgrammaticNotes(
+  base: string,
+  args: { metadata?: JobMetadata; iframeNotes: string[] },
+): string {
+  const parts = [base, ...args.iframeNotes];
+  if (args.metadata?.descriptionTruncated) {
+    parts.push(
+      `description markdown truncated at ${MAX_DESCRIPTION_MARKDOWN_CHARS} chars`,
+    );
+  }
+  return parts.filter(Boolean).join('; ');
+}
+
 /**
  * Phase 2 — interpret (Agent SDK, TEXT-ONLY). The agent gets the raw
- * extraction and page-text snippet in its prompt and NO tools at all; its
- * JSON answer is zod-validated. Same hardened env/options posture as
- * investigateScreenshot.
+ * extraction, a description excerpt, and page-text snippet in its prompt and
+ * NO tools at all; its JSON answer is zod-validated. Same hardened
+ * env/options posture as investigateScreenshot. The stored
+ * descriptionMarkdown stays the raw programmatic extraction — the agent
+ * only refines title/company/questions.
  */
 async function interpretExtraction(args: {
   extraction: RawExtraction;
   applyUrl: string;
+  metadata?: JobMetadata;
+  iframeNotes: string[];
   hint?: string;
   maxTurns?: number;
   transcript: TranscriptStep[];
 }): Promise<DiscoveredForm> {
+  const descriptionExcerpt = args.metadata?.descriptionMarkdown
+    ? args.metadata.descriptionMarkdown.slice(0, DESCRIPTION_EXCERPT_CHARS)
+    : undefined;
   const stream = query({
-    prompt: buildInterpretationPrompt(args.extraction, args.hint),
+    prompt: buildInterpretationPrompt(
+      args.extraction,
+      args.hint,
+      descriptionExcerpt,
+    ),
     options: {
       // Base tool set: EMPTY — interpretation is text-only, so no tool
       // exists in the agent's context at all.
@@ -744,6 +1236,10 @@ async function interpretExtraction(args: {
     },
   });
 
+  const programmaticCompany = args.metadata?.company || undefined;
+  const programmaticTitle = args.metadata?.title || undefined;
+  const descriptionMarkdown = args.metadata?.descriptionMarkdown || undefined;
+
   const capture = await consumeAgentStream(stream, args.transcript);
   const parsed = parseAgentJson(capture, (candidate) => {
     const result = interpretedFormSchema.safeParse(candidate);
@@ -753,9 +1249,12 @@ async function interpretExtraction(args: {
     return {
       formFound: false,
       applyUrl: args.applyUrl,
+      company: programmaticCompany,
+      title: programmaticTitle,
+      descriptionMarkdown,
       questions: [],
       confidence: 'low',
-      notes: 'could not parse agent output',
+      notes: appendProgrammaticNotes('could not parse agent output', args),
     };
   }
 
@@ -779,22 +1278,26 @@ async function interpretExtraction(args: {
   return {
     formFound: parsed.formFound,
     applyUrl: args.applyUrl,
-    company: parsed.company ?? undefined,
-    title: parsed.title ?? undefined,
+    company: parsed.company || programmaticCompany,
+    title: parsed.title || programmaticTitle,
+    descriptionMarkdown,
     questions,
     confidence: parsed.confidence,
-    notes: parsed.notes,
+    notes: appendProgrammaticNotes(parsed.notes, args),
   };
 }
 
 /**
  * Discover the application form behind an UNSUPPORTED job link: render it
- * headless, extract the form controls programmatically, then have a
- * text-only agent normalize them into canonical Question[]. Never throws
- * for "couldn't find it" (login wall, captcha, no form, SPA that never
- * renders one) — those return formFound:false with explanatory notes and
- * the full transcript. Throws only on programmer/config error (missing
- * token, chromium not installed).
+ * headless (hardened against bot detection), scrape the posting's
+ * title/company/description-as-markdown programmatically, extract the form
+ * controls (clicking through up to two Apply hops and scanning iframes),
+ * then have a text-only agent normalize them into canonical Question[].
+ * Never throws for "couldn't find it" (login wall, captcha, bot-blocked
+ * site, no form, SPA that never renders one) — those return formFound:false
+ * with explanatory notes and the full transcript; a bot-blocked site is
+ * reported as blocked (HTTP status), NOT as "no form found". Throws only on
+ * programmer/config error (missing token, chromium not installed).
  */
 export async function discoverForm(input: {
   url: string;
@@ -842,14 +1345,23 @@ export async function discoverForm(input: {
     };
   }
 
+  // Nothing to interpret — never run the agent on an empty extraction, but
+  // still surface the programmatically scraped metadata.
   if (rendered.extraction.controls.length === 0) {
     return {
       result: {
         formFound: false,
         applyUrl: rendered.applyUrl,
+        company: rendered.metadata?.company || undefined,
+        title: rendered.metadata?.title || undefined,
+        descriptionMarkdown:
+          rendered.metadata?.descriptionMarkdown || undefined,
         questions: [],
         confidence: 'low',
-        notes: noFormNotes(rendered.extraction),
+        notes: appendProgrammaticNotes(noFormNotes(rendered.extraction), {
+          metadata: rendered.metadata,
+          iframeNotes: rendered.iframeNotes,
+        }),
       },
       transcript,
     };
@@ -858,6 +1370,8 @@ export async function discoverForm(input: {
   const result = await interpretExtraction({
     extraction: rendered.extraction,
     applyUrl: rendered.applyUrl,
+    metadata: rendered.metadata,
+    iframeNotes: rendered.iframeNotes,
     hint: input.hint,
     maxTurns: input.maxTurns,
     transcript,

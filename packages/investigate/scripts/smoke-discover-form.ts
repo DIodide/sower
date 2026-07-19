@@ -21,8 +21,22 @@ const { result, transcript } = await discoverForm({
   hint: process.argv[3],
 });
 
-console.log('=== DiscoveredForm ===');
-console.log(JSON.stringify(result, null, 2));
+const { descriptionMarkdown, ...rest } = result;
+console.log('=== DiscoveredForm (sans descriptionMarkdown) ===');
+console.log(JSON.stringify(rest, null, 2));
+
+if (descriptionMarkdown) {
+  const lines = descriptionMarkdown.split('\n');
+  console.log('\n=== descriptionMarkdown (first 40 lines) ===');
+  console.log(lines.slice(0, 40).join('\n'));
+  if (lines.length > 40) {
+    console.log(
+      `… (${lines.length - 40} more lines, ${descriptionMarkdown.length} chars total)`,
+    );
+  }
+} else {
+  console.log('\n(no descriptionMarkdown extracted)');
+}
 
 console.log('\n=== Transcript summary ===');
 for (const step of transcript) {

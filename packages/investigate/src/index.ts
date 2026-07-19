@@ -33,6 +33,7 @@ export {
   type DiscoveredForm,
   discoverForm,
   type FormDiscoveryOutcome,
+  type JobMetadata,
 } from './discover-form.js';
 
 export interface InvestigationResult {

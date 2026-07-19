@@ -1,7 +1,7 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { chromium } from 'playwright';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { RawExtraction } from './discover-form.js';
+import type { JobMetadata, RawExtraction } from './discover-form.js';
 import { discoverForm } from './index.js';
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
@@ -29,37 +29,83 @@ interface FakeRoute {
 
 type RouteHandler = (route: FakeRoute) => Promise<void>;
 
+interface FakeFrameSpec {
+  url: string;
+  extraction?: RawExtraction;
+}
+
+const DEFAULT_METADATA: JobMetadata = {
+  title: 'Software Engineer Intern',
+  company: 'Example Co',
+  descriptionMarkdown:
+    '# Software Engineer Intern\n\nBuild things at Example Co.\n\n## Requirements\n\n- TypeScript\n- Grit',
+  descriptionTruncated: false,
+};
+
 /**
- * A scripted Playwright double: `evaluate` returns the queued extractions in
- * order; `click` advances the page URL to `urls[1]` when present.
+ * A scripted Playwright double: `evaluate` answers the metadata expression
+ * with `metadata`, click-fallback expressions with undefined, and extraction
+ * expressions with the queued extractions in order; `goto` returns `statuses`
+ * per call (default 200); each `click` advances the page URL to the next
+ * entry in `urls`; `frames` become child frames alongside a main frame.
  */
 function fakePlaywright(opts: {
   extractions: RawExtraction[];
   urls?: [string, ...string[]];
   gotoError?: Error;
+  statuses?: number[];
+  metadata?: JobMetadata | null;
+  frames?: FakeFrameSpec[];
 }) {
   const urls = opts.urls ?? ['https://jobs.example.com/posting/123'];
   let currentUrl = urls[0];
   let extractCall = 0;
+  let clickCount = 0;
+  let gotoCall = 0;
   const routeHandlers: RouteHandler[] = [];
+
+  const mainFrame = { url: () => currentUrl };
+  const childFrames = (opts.frames ?? []).map((spec) => ({
+    url: () => spec.url,
+    evaluate: vi.fn(async () => {
+      if (spec.extraction === undefined) {
+        throw new Error('no extraction scripted for this frame');
+      }
+      return spec.extraction;
+    }),
+  }));
 
   const page = {
     goto: vi.fn(async (url: string) => {
+      const status = opts.statuses?.[gotoCall] ?? 200;
+      gotoCall += 1;
       if (opts.gotoError) throw opts.gotoError;
       currentUrl = urls[0] ?? url;
-      return { status: () => 200 };
+      return { status: () => status };
     }),
+    close: vi.fn(async () => {}),
+    waitForTimeout: vi.fn(async () => {}),
     waitForLoadState: vi.fn(async () => {}),
     waitForSelector: vi.fn(async () => {}),
     url: () => currentUrl,
-    evaluate: vi.fn(async () => {
+    mainFrame: () => mainFrame,
+    frames: () => [mainFrame, ...childFrames],
+    evaluate: vi.fn(async (expr: string) => {
+      if (typeof expr === 'string' && expr.includes('sower:metadata')) {
+        return opts.metadata === undefined ? DEFAULT_METADATA : opts.metadata;
+      }
+      if (typeof expr === 'string' && expr.includes('.click()')) {
+        return undefined;
+      }
       const extraction =
         opts.extractions[Math.min(extractCall, opts.extractions.length - 1)];
       extractCall += 1;
       return extraction;
     }),
     click: vi.fn(async () => {
-      if (urls[1]) currentUrl = urls[1];
+      clickCount += 1;
+      const next = urls[Math.min(clickCount, urls.length - 1)];
+      if (next) currentUrl = next;
     }),
   };
 
@@ -67,6 +113,7 @@ function fakePlaywright(opts: {
     route: vi.fn(async (_pattern: string, handler: RouteHandler) => {
       routeHandlers.push(handler);
     }),
+    addInitScript: vi.fn(async (_script: { content: string }) => {}),
     newPage: vi.fn(async () => page),
     waitForEvent: vi.fn(async () => {
       throw new Error('no popup');
@@ -74,12 +121,13 @@ function fakePlaywright(opts: {
   };
 
   const browser = {
-    newContext: vi.fn(async () => context),
+    newContext: vi.fn(async (_options: Record<string, unknown>) => context),
+    version: () => '143.0.7204.97',
     close: vi.fn(async () => {}),
   };
 
   launchMock.mockResolvedValue(browser as never);
-  return { browser, context, page, routeHandlers };
+  return { browser, context, page, childFrames, routeHandlers };
 }
 
 const APPLICATION_EXTRACTION: RawExtraction = {
@@ -205,7 +253,9 @@ describe('discoverForm', () => {
   });
 
   it('extracts a form and has the agent interpret it into Question[]', async () => {
-    fakePlaywright({ extractions: [APPLICATION_EXTRACTION] });
+    const { context, browser } = fakePlaywright({
+      extractions: [APPLICATION_EXTRACTION],
+    });
     queryMock.mockReturnValue(fakeStream(AGENT_MESSAGES));
 
     const { result, transcript } = await discoverForm({
@@ -234,7 +284,34 @@ describe('discoverForm', () => {
       { label: 'No', value: 'no' },
     ]);
 
-    // Browser phase steps come first, then the agent's steps; seq monotonic.
+    // descriptionMarkdown comes PROGRAMMATICALLY from the details page —
+    // never from the agent (the agent's JSON has no such field).
+    expect(result.descriptionMarkdown).toBe(
+      DEFAULT_METADATA.descriptionMarkdown,
+    );
+
+    // The context is hardened: real-Chrome UA (no HeadlessChrome), normal
+    // viewport, locale, and a webdriver-masking init script.
+    const contextOptions = browser.newContext.mock.calls[0]?.[0] as
+      | {
+          userAgent: string;
+          viewport: { width: number; height: number };
+          locale: string;
+        }
+      | undefined;
+    expect(contextOptions?.userAgent).toContain('Chrome/143.0.0.0');
+    expect(contextOptions?.userAgent).not.toContain('Headless');
+    expect(contextOptions?.viewport).toEqual({ width: 1440, height: 900 });
+    expect(contextOptions?.locale).toBe('en-US');
+    const initScript = context.addInitScript.mock.calls[0]?.[0];
+    expect(initScript?.content).toContain('webdriver');
+    const launchOptions = launchMock.mock.calls[0]?.[0];
+    expect(launchOptions?.args).toContain(
+      '--disable-blink-features=AutomationControlled',
+    );
+
+    // Browser phase steps come first (navigate, metadata extract, form
+    // extract), then the agent's steps; seq monotonic.
     const browserSteps = transcript.filter((s) =>
       s.tool?.startsWith('browser.'),
     );
@@ -243,18 +320,33 @@ describe('discoverForm', () => {
       ['tool_result', 'browser.navigate'],
       ['tool_use', 'browser.extract'],
       ['tool_result', 'browser.extract'],
+      ['tool_use', 'browser.extract'],
+      ['tool_result', 'browser.extract'],
     ]);
     expect(browserSteps[0]?.input).toEqual({
       url: 'https://jobs.example.com/posting/123',
     });
+    const metadataResult = transcript.find(
+      (s) =>
+        s.kind === 'tool_result' &&
+        s.tool === 'browser.extract' &&
+        s.output?.includes('chars of markdown'),
+    );
+    expect(metadataResult?.output).toMatch(
+      /description: \d+ chars of markdown/,
+    );
     const extractResult = transcript.find(
-      (s) => s.kind === 'tool_result' && s.tool === 'browser.extract',
+      (s) =>
+        s.kind === 'tool_result' &&
+        s.tool === 'browser.extract' &&
+        s.output?.includes('form controls'),
     );
     expect(extractResult?.output).toContain('found 7 form controls');
     expect(transcript.at(-1)?.kind).toBe('result');
     expect(transcript.map((s) => s.seq)).toEqual(transcript.map((_, i) => i));
 
-    // The interpretation agent is TEXT-ONLY and hardened.
+    // The interpretation agent is TEXT-ONLY and hardened, and sees a
+    // description excerpt for context.
     expect(queryMock).toHaveBeenCalledTimes(1);
     const call = queryMock.mock.calls[0]?.[0] as {
       prompt: string;
@@ -263,6 +355,8 @@ describe('discoverForm', () => {
     expect(call.prompt).toContain('RAW EXTRACTION');
     expect(call.prompt).toContain('First name');
     expect(call.prompt).toContain('Caller hint: software intern');
+    expect(call.prompt).toContain('JOB DESCRIPTION EXCERPT');
+    expect(call.prompt).toContain('# Software Engineer Intern');
     expect(call.options.tools).toEqual([]);
     expect(call.options.permissionMode).toBe('dontAsk');
     expect(call.options.disallowedTools).toEqual(
@@ -336,7 +430,86 @@ describe('discoverForm', () => {
     }
   });
 
-  it('returns formFound:false with an explanatory note (and transcript) when no form renders', async () => {
+  it('retries once on HTTP 403 and reports an honest "blocked" outcome (never "no form found", no agent)', async () => {
+    const { page } = fakePlaywright({
+      extractions: [APPLICATION_EXTRACTION],
+      statuses: [403, 403],
+    });
+
+    const { result, transcript } = await discoverForm({
+      url: 'https://www.example.com/careers/details/swe-intern/',
+    });
+
+    expect(result.formFound).toBe(false);
+    expect(result.confidence).toBe('low');
+    expect(result.notes).toMatch(
+      /the site blocked automated access \(HTTP 403\)/,
+    );
+    expect(result.notes).not.toMatch(/no application form controls/);
+    // Two navigation attempts, a delay between them, no extraction, no agent.
+    expect(page.goto).toHaveBeenCalledTimes(2);
+    expect(page.waitForTimeout).toHaveBeenCalledTimes(1);
+    expect(queryMock).not.toHaveBeenCalled();
+    expect(transcript.some((s) => s.tool === 'browser.extract')).toBe(false);
+    expect(
+      transcript.some(
+        (s) => s.kind === 'system' && s.text === 'http_error_retry',
+      ),
+    ).toBe(true);
+    const blockedStep = transcript.find(
+      (s) => s.kind === 'system' && s.text === 'blocked_by_site',
+    );
+    expect(blockedStep?.output).toContain('HTTP 403');
+    const navResults = transcript.filter(
+      (s) => s.kind === 'tool_result' && s.tool === 'browser.navigate',
+    );
+    expect(navResults).toHaveLength(2);
+    expect(navResults[0]?.output).toContain('HTTP 403');
+    expect(navResults[1]?.output).toContain('HTTP 403');
+  });
+
+  it('recovers when the retry succeeds after an initial 403', async () => {
+    const { page } = fakePlaywright({
+      extractions: [APPLICATION_EXTRACTION],
+      statuses: [403, 200],
+    });
+    queryMock.mockReturnValue(fakeStream(AGENT_MESSAGES));
+
+    const { result, transcript } = await discoverForm({
+      url: 'https://jobs.example.com/posting/123',
+    });
+
+    expect(result.formFound).toBe(true);
+    expect(result.questions).toHaveLength(7);
+    expect(page.goto).toHaveBeenCalledTimes(2);
+    expect(
+      transcript.some(
+        (s) => s.kind === 'system' && s.text === 'http_error_retry',
+      ),
+    ).toBe(true);
+    expect(
+      transcript.some(
+        (s) => s.kind === 'system' && s.text === 'blocked_by_site',
+      ),
+    ).toBe(false);
+  });
+
+  it('reports a non-bot HTTP failure with its status wording', async () => {
+    fakePlaywright({
+      extractions: [APPLICATION_EXTRACTION],
+      statuses: [404, 404],
+    });
+
+    const { result } = await discoverForm({
+      url: 'https://jobs.example.com/gone',
+    });
+
+    expect(result.formFound).toBe(false);
+    expect(result.notes).toMatch(/returned HTTP 404/);
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
+  it('returns formFound:false with an explanatory note (and scraped metadata) when no form renders', async () => {
     fakePlaywright({ extractions: [EMPTY_EXTRACTION] });
 
     const { result, transcript } = await discoverForm({
@@ -349,17 +522,24 @@ describe('discoverForm', () => {
     expect(result.questions).toEqual([]);
     expect(result.notes).toMatch(/no application form controls found/);
     expect(result.notes).toMatch(/JS-rendered/);
+    // Metadata is still scraped and surfaced even without a form.
+    expect(result.company).toBe('Example Co');
+    expect(result.title).toBe('Software Engineer Intern');
+    expect(result.descriptionMarkdown).toBe(
+      DEFAULT_METADATA.descriptionMarkdown,
+    );
     // The agent is never invoked when there is nothing to interpret.
     expect(queryMock).not.toHaveBeenCalled();
+    // Two extract pairs: job-metadata + form controls.
     expect(transcript.filter((s) => s.tool === 'browser.extract')).toHaveLength(
-      2,
+      4,
     );
   });
 
   it('clicks an Apply control when the landing page has no form, then extracts the revealed form', async () => {
     const { page } = fakePlaywright({
       extractions: [
-        { ...EMPTY_EXTRACTION, applyCandidate: 'Apply now' },
+        { ...EMPTY_EXTRACTION, applyCandidate: 'Start Application' },
         APPLICATION_EXTRACTION,
       ],
       urls: [
@@ -376,6 +556,7 @@ describe('discoverForm', () => {
     expect(page.click).toHaveBeenCalledWith('[data-sower-apply="1"]', {
       timeout: expect.any(Number),
     });
+    expect(page.click).toHaveBeenCalledTimes(1);
     expect(result.formFound).toBe(true);
     expect(result.applyUrl).toBe('https://jobs.example.com/posting/123/apply');
     expect(result.questions).toHaveLength(7);
@@ -385,7 +566,7 @@ describe('discoverForm', () => {
     );
     expect(clickStep?.input).toEqual({
       selector: '[data-sower-apply="1"]',
-      text: 'Apply now',
+      text: 'Start Application',
     });
     const clickResult = transcript.find(
       (s) => s.kind === 'tool_result' && s.tool === 'browser.click',
@@ -393,6 +574,101 @@ describe('discoverForm', () => {
     expect(clickResult?.output).toContain(
       'https://jobs.example.com/posting/123/apply',
     );
+  });
+
+  it('follows up to two apply hops (details → interstitial → form)', async () => {
+    const { page } = fakePlaywright({
+      extractions: [
+        { ...EMPTY_EXTRACTION, applyCandidate: 'Apply now' },
+        { ...EMPTY_EXTRACTION, applyCandidate: 'Continue to application' },
+        APPLICATION_EXTRACTION,
+      ],
+      urls: [
+        'https://jobs.example.com/posting/123',
+        'https://jobs.example.com/posting/123/interstitial',
+        'https://jobs.example.com/posting/123/apply',
+      ],
+    });
+    queryMock.mockReturnValue(fakeStream(AGENT_MESSAGES));
+
+    const { result, transcript } = await discoverForm({
+      url: 'https://jobs.example.com/posting/123',
+    });
+
+    expect(page.click).toHaveBeenCalledTimes(2);
+    expect(result.formFound).toBe(true);
+    expect(result.applyUrl).toBe('https://jobs.example.com/posting/123/apply');
+    const clickSteps = transcript.filter(
+      (s) => s.kind === 'tool_use' && s.tool === 'browser.click',
+    );
+    expect(clickSteps.map((s) => (s.input as { text: string }).text)).toEqual([
+      'Apply now',
+      'Continue to application',
+    ]);
+  });
+
+  it('stops after two hops even when every page dangles another apply control', async () => {
+    const { page } = fakePlaywright({
+      extractions: [{ ...EMPTY_EXTRACTION, applyCandidate: 'Apply now' }],
+    });
+
+    const { result } = await discoverForm({
+      url: 'https://jobs.example.com/posting/123',
+    });
+
+    expect(page.click).toHaveBeenCalledTimes(2);
+    expect(result.formFound).toBe(false);
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
+  it('extracts inside a same-origin iframe when the top page has no form', async () => {
+    const frameUrl = 'https://jobs.example.com/embed/apply-form';
+    const { childFrames } = fakePlaywright({
+      extractions: [{ ...EMPTY_EXTRACTION, iframeCount: 1 }],
+      frames: [{ url: frameUrl, extraction: APPLICATION_EXTRACTION }],
+    });
+    queryMock.mockReturnValue(fakeStream(AGENT_MESSAGES));
+
+    const { result, transcript } = await discoverForm({
+      url: 'https://jobs.example.com/posting/123',
+    });
+
+    expect(childFrames[0]?.evaluate).toHaveBeenCalled();
+    expect(result.formFound).toBe(true);
+    expect(result.questions).toHaveLength(7);
+    expect(result.notes).toContain('same-origin iframe');
+    const frameExtract = transcript.find(
+      (s) =>
+        s.kind === 'tool_use' &&
+        s.tool === 'browser.extract' &&
+        (s.input as { target?: string }).target === 'same-origin iframe',
+    );
+    expect((frameExtract?.input as { url: string } | undefined)?.url).toBe(
+      frameUrl,
+    );
+  });
+
+  it('records a cross-origin ATS iframe (greenhouse) in notes and transcript instead of extracting it', async () => {
+    const frameUrl = 'https://boards.greenhouse.io/embed/job_app?for=example';
+    const { childFrames } = fakePlaywright({
+      extractions: [{ ...EMPTY_EXTRACTION, iframeCount: 1 }],
+      frames: [{ url: frameUrl }],
+    });
+
+    const { result, transcript } = await discoverForm({
+      url: 'https://jobs.example.com/posting/123',
+    });
+
+    expect(childFrames[0]?.evaluate).not.toHaveBeenCalled();
+    expect(result.formFound).toBe(false);
+    expect(result.notes).toContain('supported ATS (greenhouse)');
+    expect(result.notes).toContain(frameUrl);
+    const iframeStep = transcript.find(
+      (s) => s.kind === 'system' && s.text === 'cross_origin_iframe',
+    );
+    expect(iframeStep?.output).toContain(frameUrl);
+    expect(iframeStep?.output).toContain('greenhouse');
+    expect(queryMock).not.toHaveBeenCalled();
   });
 
   it('returns formFound:false when navigation fails (never throws)', async () => {
@@ -438,6 +714,10 @@ describe('discoverForm', () => {
     expect(result.confidence).toBe('low');
     expect(result.notes).toBe('could not parse agent output');
     expect(result.questions).toEqual([]);
+    // The programmatic metadata still comes through.
+    expect(result.descriptionMarkdown).toBe(
+      DEFAULT_METADATA.descriptionMarkdown,
+    );
     // Browser steps AND agent steps are both present.
     expect(transcript.some((s) => s.tool === 'browser.extract')).toBe(true);
     expect(transcript.some((s) => s.kind === 'result')).toBe(true);
