@@ -10,8 +10,13 @@ RUN corepack enable
 
 # git for the portfolio clone/commit/push (submodule included),
 # ca-certificates for https remotes, curl only to fetch the tectonic binary.
+# fontconfig + fonts-liberation: tectonic's XeTeX engine consults fontconfig
+# for system fonts; the bare slim image has neither a fontconfig config nor
+# any fonts, so compiles logged "Fontconfig error: Cannot load default
+# config file". A default config plus one base font family fixes that.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git ca-certificates curl \
+    fontconfig fonts-liberation \
   && rm -rf /var/lib/apt/lists/*
 
 # tectonic (LaTeX engine), pinned. The musl builds are fully static, so no

@@ -50,6 +50,14 @@ const probeState = vi.hoisted(() => ({
 }));
 
 vi.mock('@sower/platforms', () => ({
+  // link-extract.ts (imported by process.ts for trailingNumericJobId) also
+  // pulls detectPlatform from this module; the stub keeps the mocked module
+  // graph loadable — nothing in these tests exercises it.
+  detectPlatform: () => ({
+    platform: 'unknown',
+    tenant: null,
+    externalId: null,
+  }),
   deriveGreenhouseTenant: async (url: string, jobId: string) => {
     probeState.calls.push({ url, jobId });
     return probeState.tenant;
@@ -236,6 +244,8 @@ function createFakeTaskDb(initial: {
   url?: string;
   /** Job externalId override. */
   externalId?: string | null;
+  /** Pre-existing tasks.last_error (e.g. from an earlier FAILED attempt). */
+  lastError?: string | null;
   /**
    * When set, the tenant self-heal's canonical-collision select (FROM jobs)
    * reports this OTHER job as already owning the canonical board identity.
@@ -249,7 +259,7 @@ function createFakeTaskDb(initial: {
     attempt: initial.attempt ?? 0,
     jobSpec: null,
     resolution: null,
-    lastError: null,
+    lastError: initial.lastError ?? null,
     updatedAt: new Date(0),
   };
   const isWorkday = initial.platform === 'workday';
@@ -290,7 +300,9 @@ function createFakeTaskDb(initial: {
   const JOB_COLUMNS = new Set([
     'company',
     'title',
+    'platform',
     'tenant',
+    'externalId',
     'url',
     'canonicalUrl',
     'dedupeKey',
@@ -1631,5 +1643,184 @@ describe('processTask greenhouse tenant self-heal (custom domain)', () => {
 
     expect(outcome).toMatchObject({ kind: 'processed' });
     expect(probeState.calls).toEqual([]);
+  });
+});
+
+describe('processTask unknown-platform self-heal (trailing numeric id)', () => {
+  // The live databricks shape: no gh_jid, no board host — the only greenhouse
+  // evidence is the numeric job id at the tail of the URL path.
+  const SLUG_URL =
+    'https://www.databricks.com/company/careers/university-recruiting/swe-intern-2027-7011263002';
+  const BOARD_URL =
+    'https://job-boards.greenhouse.io/databricks/jobs/7011263002';
+
+  function unknownDb(
+    overrides: { collidingJobId?: string; url?: string } = {},
+  ) {
+    return createFakeTaskDb({
+      state: 'QUEUED',
+      platform: 'unknown',
+      tenant: null,
+      externalId: null,
+      url: SLUG_URL,
+      ...overrides,
+    });
+  }
+
+  it('probe hit adopts the greenhouse identity + canonical URL, then processes normally', async () => {
+    const { db, task, job } = unknownDb();
+    probeState.tenant = 'databricks';
+    answersState.result = {
+      resolved: [{ questionId: 'email', source: 'profile', value: 'x' }],
+      missing: [],
+    };
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    // Probed with the stored URL + the id extracted from its tail.
+    expect(probeState.calls).toEqual([{ url: SLUG_URL, jobId: '7011263002' }]);
+    // The jobs row was healed into a first-class greenhouse job.
+    expect(job.platform).toBe('greenhouse');
+    expect(job.tenant).toBe('databricks');
+    expect(job.externalId).toBe('7011263002');
+    expect(job.url).toBe(BOARD_URL);
+    expect(job.canonicalUrl).toBe(BOARD_URL);
+    expect(job.dedupeKey).toBe('greenhouse:databricks:7011263002');
+    // Discovery ran with the adopted identity and the task flowed to REVIEW.
+    expect(adapterState.lastDiscoverRef).toMatchObject({
+      tenant: 'databricks',
+      externalId: '7011263002',
+    });
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'REVIEW' });
+    expect(task.state).toBe('REVIEW');
+  });
+
+  it('keeps the custom-domain url when the canonical identity collides with another job', async () => {
+    const { db, job } = unknownDb({ collidingJobId: 'job-2' });
+    probeState.tenant = 'databricks';
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    // Identity adopted; URL/dedupe key untouched (both UNIQUE, already owned).
+    expect(job.platform).toBe('greenhouse');
+    expect(job.tenant).toBe('databricks');
+    expect(job.externalId).toBe('7011263002');
+    expect(job.url).toBe(SLUG_URL);
+    expect(job.canonicalUrl).toBe(SLUG_URL);
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'REVIEW' });
+  });
+
+  it('probe miss falls through unchanged (the unknown-platform failure, job untouched)', async () => {
+    const { db, task, job } = unknownDb();
+    // probeState.tenant stays null: the candidate id verified nowhere.
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(probeState.calls).toEqual([{ url: SLUG_URL, jobId: '7011263002' }]);
+    // Exactly the pre-fix outcome for a requeued unknown task.
+    expect(outcome).toMatchObject({
+      kind: 'failed',
+      error: "no adapter for platform 'unknown'",
+    });
+    expect(task.state).toBe('FAILED');
+    expect(job.platform).toBe('unknown');
+    expect(job.url).toBe(SLUG_URL);
+  });
+
+  it('never probes an unknown job whose URL carries no trailing numeric id', async () => {
+    const { db } = unknownDb({
+      url: 'https://weirdats.example/careers/senior-baker',
+    });
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(probeState.calls).toEqual([]);
+    expect(outcome).toMatchObject({ kind: 'failed' });
+  });
+});
+
+describe('processTask clears lastError on a successful pass', () => {
+  const STALE = 'ENOENT: no such file or directory';
+
+  it('clears a stale lastError when the pass resolves to REVIEW', async () => {
+    const { db, task } = createFakeTaskDb({
+      state: 'FAILED',
+      attempt: 1,
+      lastError: STALE,
+    });
+    answersState.result = {
+      resolved: [{ questionId: 'email', source: 'profile', value: 'x' }],
+      missing: [],
+    };
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'REVIEW' });
+    // The stale error from the earlier attempt is gone (live case: Aquatic
+    // processed fine but the dashboard kept showing the old ENOENT).
+    expect(task.lastError).toBeNull();
+  });
+
+  it('clears a stale lastError when the pass parks in NEEDS_INPUT', async () => {
+    const { db, task } = createFakeTaskDb({
+      state: 'FAILED',
+      attempt: 1,
+      lastError: STALE,
+    });
+    answersState.result = {
+      resolved: [],
+      missing: [
+        { id: 'resume', label: 'Resume', type: 'file', required: true },
+      ],
+    };
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'NEEDS_INPUT' });
+    expect(task.lastError).toBeNull();
+  });
+
+  it('clears a stale lastError on auto-discard', async () => {
+    const { db, task } = createFakeTaskDb({
+      state: 'QUEUED',
+      lastError: STALE,
+    });
+    adapterState.title = 'Staff Software Engineer';
+    adapterState.employmentType = 'Full time';
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome).toMatchObject({ kind: 'auto_discarded' });
+    expect(task.lastError).toBeNull();
+  });
+
+  it('clears a stale lastError on the tenant-less greenhouse re-park', async () => {
+    const { db, task } = createFakeTaskDb({
+      state: 'QUEUED',
+      tenant: null,
+      url: 'https://akunacapital.com/careers/job/8018853/swe?gh_jid=8018853',
+      externalId: '8018853',
+      lastError: STALE,
+    });
+    // probeState.tenant stays null: the task re-parks — still a completed pass.
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome).toMatchObject({ kind: 'processed', state: 'NEEDS_INPUT' });
+    expect(task.lastError).toBeNull();
+  });
+
+  it('a failing pass still overwrites lastError with the fresh error', async () => {
+    const { db, task } = createFakeTaskDb({
+      state: 'FAILED',
+      attempt: 1,
+      lastError: STALE,
+    });
+    adapterState.discoverError = 'boom';
+
+    const outcome = await processTask(createDeps(db), 'task-1');
+
+    expect(outcome).toMatchObject({ kind: 'failed', error: 'boom' });
+    expect(task.lastError).toBe('boom');
   });
 });

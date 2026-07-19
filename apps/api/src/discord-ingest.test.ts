@@ -589,6 +589,71 @@ describe('ingestMessageLinks', () => {
     expect(ingestState.calls).toEqual([url]);
   });
 
+  it('sniff miss + trailing-numeric-id probe hit ingests the canonical board URL (live databricks shape)', async () => {
+    // databricks.com children carry NO gh_jid and no board markers in the
+    // JS-rendered HTML — the only greenhouse evidence is the numeric id at
+    // the tail of the URL path, which the verified probe can confirm.
+    const url =
+      'https://www.databricks.com/company/careers/university-recruiting/software-engineering-intern-2027-7011263002';
+    pageState.byUrl[url] = '<html><body><div id="root"></div></body></html>';
+    probeState.tenant = 'databricks';
+    const canonical =
+      'https://job-boards.greenhouse.io/databricks/jobs/7011263002';
+    const s = await ingestMessageLinks({} as Deps, url);
+    expect(s.ingested).toBe(1);
+    expect(s.outcomes[0]).toMatchObject({
+      kind: 'ingested',
+      platform: 'greenhouse',
+      url: canonical,
+    });
+    expect(ingestState.calls).toEqual([canonical]);
+    expect(probeState.calls).toEqual([{ url, jobId: '7011263002' }]);
+  });
+
+  it('parks a trailing-id URL exactly as before when the probe verifies nothing', async () => {
+    const url = 'https://acme-example.com/careers/senior-baker-7011263002';
+    pageState.byUrl[url] = '<html><body>join us</body></html>';
+    // probeState.tenant stays null: the candidate id verified nowhere.
+    const s = await ingestMessageLinks({} as Deps, url);
+    expect(s.unsupported).toBe(1);
+    expect(probeState.calls).toEqual([{ url, jobId: '7011263002' }]);
+    // Recorded + parked through ingestJob with the page URL, same as today.
+    expect(ingestState.calls).toEqual([url]);
+  });
+
+  it('never fires the trailing-id probe for a supported-platform URL', async () => {
+    // A workday careers page whose path happens to end in digits: workday is
+    // a SUPPORTED platform (just not an ingestable posting URL), so the
+    // greenhouse probe must not fire — it records + parks as before.
+    const url = 'https://caci.wd1.myworkdayjobs.com/External/opening-7654321';
+    platformState.byUrl[url] = {
+      platform: 'workday',
+      tenant: 'caci',
+      externalId: null,
+    };
+    const s = await ingestMessageLinks({} as Deps, url);
+    expect(s.unsupported).toBe(1);
+    expect(probeState.calls).toEqual([]);
+    expect(ingestState.calls).toEqual([url]);
+  });
+
+  it('never fires the trailing-id probe for directory children (depth 1)', async () => {
+    platformState.byUrl['https://dir/list'] = {
+      platform: 'unknown',
+      tenant: null,
+      externalId: null,
+    };
+    dirState.byUrl['https://dir/list'] = [
+      'https://acme-example.com/jobs/swe-7011263002',
+    ];
+    probeState.tenant = 'would-hit-if-ever-probed';
+    const s = await ingestMessageLinks({} as Deps, 'https://dir/list');
+    expect(s.directories).toBe(1);
+    // The child parks unprobed; a 50-link directory must not fan out probes.
+    expect(s.unsupported).toBe(1);
+    expect(probeState.calls).toEqual([]);
+  });
+
   it('counts a duplicate and handles a mixed message', async () => {
     platformState.byUrl['https://gh/1'] = {
       platform: 'greenhouse',

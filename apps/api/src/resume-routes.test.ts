@@ -198,6 +198,64 @@ describe('/resumes routes', () => {
     await app.close();
   });
 
+  it('POST /resumes/sync tolerates an EMPTY application/json body (no {} required)', async () => {
+    // Fastify's default JSON parser 400s on `content-type: application/json`
+    // with no bytes (the bare-curl shape); the server's tolerant parser must
+    // let the body-less route through.
+    const writes: DbWrite[] = [];
+    const db = createFakeDb({ insertResults: [[{ id: RUN_ID }]], writes });
+    const app = buildServer(createDeps(db));
+    const response = await app.inject({
+      method: 'POST',
+      url: '/resumes/sync',
+      headers: { 'x-api-key': 'test-key', 'content-type': 'application/json' },
+      payload: '',
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ runId: RUN_ID, fired: true });
+    expect(writes).toHaveLength(1);
+    await app.close();
+  });
+
+  it('POST /resumes/sync still requires the api key inside its parser scope', async () => {
+    const app = buildServer(createDeps(createFakeDb()));
+    const response = await app.inject({
+      method: 'POST',
+      url: '/resumes/sync',
+      headers: { 'content-type': 'application/json' },
+      payload: '',
+    });
+    expect(response.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it('POST /resumes/sync still 400s malformed (non-empty) JSON', async () => {
+    const app = buildServer(createDeps(createFakeDb()));
+    const response = await app.inject({
+      method: 'POST',
+      url: '/resumes/sync',
+      headers: { 'x-api-key': 'test-key', 'content-type': 'application/json' },
+      payload: '{not json',
+    });
+    expect(response.statusCode).toBe(400);
+    expect(jobState.calls).toEqual([]);
+    await app.close();
+  });
+
+  it('still 400s malformed (non-empty) JSON on a body-carrying route (default parser untouched)', async () => {
+    const db = createFakeDb({ selectResults: [[resumeRow]] });
+    const app = buildServer(createDeps(db));
+    const response = await app.inject({
+      method: 'POST',
+      url: `/resumes/${RESUME_ID}/edit`,
+      headers: { 'x-api-key': 'test-key', 'content-type': 'application/json' },
+      payload: '{not json',
+    });
+    expect(response.statusCode).toBe(400);
+    expect(jobState.calls).toEqual([]);
+    await app.close();
+  });
+
   it('POST /resumes/sync reports fired:false (run still recorded) when the Job fails to start', async () => {
     jobState.error = new Error('cloud run down');
     const writes: DbWrite[] = [];

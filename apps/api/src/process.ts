@@ -27,6 +27,7 @@ import { computeDedupeKey } from '@sower/sources';
 import { and, desc, eq, inArray, lt, ne, or, sql } from 'drizzle-orm';
 import { postReviewApprovalCard } from './discord.js';
 import { refreshIngestReply } from './ingest-reply.js';
+import { trailingNumericJobId } from './link-extract.js';
 import { createTaskRecorder } from './recorder.js';
 import { transitionTask } from './transitions.js';
 import type { Deps } from './types.js';
@@ -115,6 +116,24 @@ export async function processTask(
   });
 
   try {
+    // SELF-HEALING for unknown-platform jobs with a trailing numeric id: a
+    // greenhouse posting rendered on the company's own domain WITHOUT a
+    // gh_jid marker (databricks.com/…/<slug>-7011263002) ingests as
+    // platform=unknown and parks. On (re)process, feed the URL's candidate
+    // id through the VERIFIED tenant probe: a hit adopts platform + tenant +
+    // external id (+ the canonical board URL, collision rules below) and the
+    // task processes as a normal greenhouse job; a miss changes nothing —
+    // the task falls through to the unchanged unknown-platform outcome.
+    if (job.platform === 'unknown') {
+      const candidateId = trailingNumericJobId(job.url);
+      if (candidateId !== null) {
+        const tenant = await deriveGreenhouseTenant(job.url, candidateId);
+        if (tenant !== null) {
+          await adoptGreenhouseTenant(db, job, tenant, candidateId);
+        }
+      }
+    }
+
     // SELF-HEALING for tenant-less greenhouse jobs: a task parked with
     // "greenhouse job without tenant (custom domain)" re-enters here after a
     // requeue with jobs.tenant still NULL — discover would throw. Probe the
@@ -145,6 +164,9 @@ export async function processTask(
           currentState,
           'RESOLVED_PARTIAL',
           { reason: 'greenhouse job without tenant (custom domain)' },
+          // This pass completed without failure: drop any stale lastError so
+          // the dashboard stops showing an error from an older attempt.
+          { lastError: null },
         );
         return {
           kind: 'processed',
@@ -153,7 +175,7 @@ export async function processTask(
           missing: 0,
         };
       }
-      await adoptGreenhouseTenant(db, job, tenant);
+      await adoptGreenhouseTenant(db, job, tenant, job.externalId);
     }
 
     const adapter = getAdapter(job.platform as Platform);
@@ -201,10 +223,18 @@ export async function processTask(
     // re-discard against that decision.
     const fullTimeType = autoDiscardableEmploymentType(jobSpec, job.title);
     if (fullTimeType !== null && !(await hasRestoreEvent(db, taskId))) {
-      currentState = await transitionTask(db, taskId, currentState, 'DISCARD', {
-        reason: 'auto',
-        note: `Employment type: ${fullTimeType}`,
-      });
+      currentState = await transitionTask(
+        db,
+        taskId,
+        currentState,
+        'DISCARD',
+        {
+          reason: 'auto',
+          note: `Employment type: ${fullTimeType}`,
+        },
+        // A completed (non-failing) pass: clear any stale lastError alongside.
+        { lastError: null },
+      );
       // Flip the #ingest reply line to "discarded". Best-effort (never
       // throws), but guard anyway — a reply edit must not change the outcome.
       await refreshIngestReply(deps, taskId).catch(() => {});
@@ -298,11 +328,21 @@ export async function processTask(
       requiredMissing.length === 0 && !accountRequired
         ? 'RESOLVED_ALL'
         : 'RESOLVED_PARTIAL';
-    currentState = await transitionTask(db, taskId, currentState, event, {
-      resolved: resolved.length,
-      missing: missing.length,
-      requiredMissing: requiredMissing.length,
-    });
+    currentState = await transitionTask(
+      db,
+      taskId,
+      currentState,
+      event,
+      {
+        resolved: resolved.length,
+        missing: missing.length,
+        requiredMissing: requiredMissing.length,
+      },
+      // The pass completed without failure: clear any lastError left by a
+      // previous FAILED attempt in the SAME update that persists the outcome
+      // (live case: Aquatic resolved fine but kept showing an old ENOENT).
+      { lastError: null },
+    );
     if (currentState === 'REVIEW') {
       // Task entered REVIEW (initial process or requeue -> process): post the
       // Discord approval card and store its ids on the task. Best-effort —
@@ -349,32 +389,38 @@ export async function processTask(
 }
 
 /**
- * Adopt a probe-VERIFIED greenhouse tenant onto a tenant-less jobs row and
- * mirror it onto the in-memory `job` so discovery continues with it.
+ * Adopt a probe-VERIFIED greenhouse identity (platform + tenant + external
+ * id) onto a jobs row and mirror it onto the in-memory `job` so discovery
+ * continues with it. Serves both self-heals above: the tenant-less
+ * greenhouse row (externalId already stored) and the unknown-platform row
+ * whose id came from the URL's trailing numeric segment.
  *
  * The row normally also adopts the canonical board URL (url + canonical_url +
  * dedupe_key), so it dedupes with board-hosted pastes from now on. BUT both
  * canonical_url and dedupe_key are UNIQUE — when ANOTHER job already owns the
  * board identity (the same posting was pasted via its board URL), rewriting
- * would violate the constraint, so only the tenant is set and this row keeps
- * its custom-domain URL. Discovery works either way (the adapter reads
- * tenant+id, not the URL).
+ * would violate the constraint, so only the identity columns are set and
+ * this row keeps its custom-domain URL. Discovery works either way (the
+ * adapter reads tenant+id, not the URL).
  */
 async function adoptGreenhouseTenant(
   db: Deps['db'],
   job: {
     id: string;
     url: string;
+    platform: string;
     tenant: string | null;
     externalId: string | null;
   },
   tenant: string,
+  externalId: string,
 ): Promise<void> {
-  const canonicalUrl = `https://job-boards.greenhouse.io/${tenant}/jobs/${job.externalId}`;
+  const canonicalUrl = `https://job-boards.greenhouse.io/${tenant}/jobs/${externalId}`;
   const dedupeKey = computeDedupeKey(
-    { platform: 'greenhouse', tenant, externalId: job.externalId },
+    { platform: 'greenhouse', tenant, externalId },
     canonicalUrl,
   );
+  const identity = { platform: 'greenhouse', tenant, externalId };
   const collisions = await db
     .select({ id: jobs.id })
     .from(jobs)
@@ -386,16 +432,15 @@ async function adoptGreenhouseTenant(
     )
     .limit(1);
   if (collisions.length > 0) {
-    await db.update(jobs).set({ tenant }).where(eq(jobs.id, job.id));
-    job.tenant = tenant;
+    await db.update(jobs).set(identity).where(eq(jobs.id, job.id));
+    Object.assign(job, identity);
     return;
   }
   await db
     .update(jobs)
-    .set({ tenant, url: canonicalUrl, canonicalUrl, dedupeKey })
+    .set({ ...identity, url: canonicalUrl, canonicalUrl, dedupeKey })
     .where(eq(jobs.id, job.id));
-  job.tenant = tenant;
-  job.url = canonicalUrl;
+  Object.assign(job, identity, { url: canonicalUrl });
 }
 
 /**

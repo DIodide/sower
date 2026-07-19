@@ -78,6 +78,35 @@ export function isIngestableJobUrl(platform: string, url: string): boolean {
   }
 }
 
+/**
+ * A greenhouse-shaped job id at the tail of a URL path: the final segment is
+ * `<slug>-<digits>` or purely `<digits>` (6+ digits — greenhouse job ids are
+ * 7-digit-plus, and the floor keeps short numerics like `/page/2` or a year
+ * out). Several greenhouse tenants render postings on their own domain with
+ * ONLY this marker (databricks.com/company/careers/…/<slug>-7011263002 — no
+ * gh_jid, no board host), so this is the candidate id the VERIFIED tenant
+ * probe (deriveGreenhouseTenant) can confirm against the fixed boards API.
+ * Pure extraction — a false candidate merely costs the probe a few 404s.
+ */
+const TRAILING_NUMERIC_ID_RE = /^(?:.*-)?(\d{6,})$/;
+
+export function trailingNumericJobId(url: string): string | null {
+  let pathname: string;
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    return null;
+  }
+  const last = pathname
+    .split('/')
+    .filter((seg) => seg.length > 0)
+    .at(-1);
+  if (!last) {
+    return null;
+  }
+  return TRAILING_NUMERIC_ID_RE.exec(last)?.[1] ?? null;
+}
+
 /** Extract distinct http(s) URLs from message text (trailing punctuation trimmed). */
 export function extractUrlsFromText(text: string): string[] {
   const matches = text.match(URL_RE) ?? [];

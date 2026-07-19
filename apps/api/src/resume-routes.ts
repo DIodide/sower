@@ -85,22 +85,52 @@ export function registerResumeRoutes(app: FastifyInstance, deps: Deps): void {
 
   // Repo-wide sync: compile every developer/resumes/*.tex, refresh vault
   // PDFs + resumes rows. No commits. Returns the run id to poll.
-  app.post('/resumes/sync', async (_request, reply) => {
-    if (!deps.config.RESUME_EDITOR_ENABLED) {
-      return reply.code(503).send({
-        error: 'resume editor is not enabled (RESUME_EDITOR_ENABLED)',
-      });
-    }
-    const inserted = await deps.db
-      .insert(resumeRuns)
-      .values({ kind: 'sync', status: 'running' })
-      .returning({ id: resumeRuns.id });
-    const runId = inserted[0]?.id;
-    if (runId === undefined) {
-      return reply.code(500).send({ error: 'failed to record resume run' });
-    }
-    const fired = await fireResumeJob(deps, runId);
-    return reply.code(200).send({ runId, fired });
+  //
+  // The route reads NO body, but clients routinely send `content-type:
+  // application/json` with an EMPTY body (bare curl -X POST, fetch wrappers
+  // that always set the header), which Fastify's default parser rejects with
+  // "Body cannot be empty…" before the handler ever runs. Registered inside
+  // an encapsulated scope (the same pattern as /discord/interactions) whose
+  // JSON parser tolerates an absent/empty body; non-empty JSON still parses
+  // (so an explicit {} keeps working) and malformed JSON stays a 400. The
+  // server-wide x-api-key preHandler applies inside the scope unchanged.
+  app.register(async (scope) => {
+    scope.addContentTypeParser(
+      'application/json',
+      { parseAs: 'string' },
+      (_request, body, done) => {
+        const text = typeof body === 'string' ? body : body.toString('utf8');
+        if (text.trim() === '') {
+          done(null, undefined);
+          return;
+        }
+        try {
+          done(null, JSON.parse(text));
+        } catch (error) {
+          const parseError =
+            error instanceof Error ? error : new Error(String(error));
+          Object.assign(parseError, { statusCode: 400 });
+          done(parseError, undefined);
+        }
+      },
+    );
+    scope.post('/resumes/sync', async (_request, reply) => {
+      if (!deps.config.RESUME_EDITOR_ENABLED) {
+        return reply.code(503).send({
+          error: 'resume editor is not enabled (RESUME_EDITOR_ENABLED)',
+        });
+      }
+      const inserted = await deps.db
+        .insert(resumeRuns)
+        .values({ kind: 'sync', status: 'running' })
+        .returning({ id: resumeRuns.id });
+      const runId = inserted[0]?.id;
+      if (runId === undefined) {
+        return reply.code(500).send({ error: 'failed to record resume run' });
+      }
+      const fired = await fireResumeJob(deps, runId);
+      return reply.code(200).send({ runId, fired });
+    });
   });
 
   // Manual editor save: the job writes the full source to the submodule,

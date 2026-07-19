@@ -7,8 +7,61 @@ import {
   fetchPageHtml,
   isIngestableJobUrl,
   sniffGreenhouseJob,
+  trailingNumericJobId,
   unwrapRedirectShim,
 } from './link-extract.js';
+
+describe('trailingNumericJobId', () => {
+  it('extracts the id from a slug-suffixed final segment (live databricks shape)', () => {
+    expect(
+      trailingNumericJobId(
+        'https://www.databricks.com/company/careers/university-recruiting/software-engineering-intern-2027-start-7011263002',
+      ),
+    ).toBe('7011263002');
+  });
+
+  it('extracts a purely numeric final segment', () => {
+    expect(trailingNumericJobId('https://acme.com/careers/8018853')).toBe(
+      '8018853',
+    );
+    // Query strings / fragments do not disturb the path segment.
+    expect(
+      trailingNumericJobId('https://acme.com/jobs/4001234?src=x#apply'),
+    ).toBe('4001234');
+  });
+
+  it('tolerates a trailing slash', () => {
+    expect(
+      trailingNumericJobId('https://acme.com/jobs/swe-intern-7011263002/'),
+    ).toBe('7011263002');
+  });
+
+  it('requires the digits to END the segment', () => {
+    // Digits glued to letters (no dash) or followed by an extension are not ids.
+    expect(trailingNumericJobId('https://acme.com/jobs/swe7011263002')).toBe(
+      null,
+    );
+    expect(
+      trailingNumericJobId('https://acme.com/jobs/swe-7011263002.html'),
+    ).toBe(null);
+  });
+
+  it('rejects short numerics (pagination, years) below the 6-digit floor', () => {
+    expect(trailingNumericJobId('https://acme.com/jobs/page/2')).toBeNull();
+    expect(trailingNumericJobId('https://acme.com/openings-2027')).toBeNull();
+    expect(trailingNumericJobId('https://acme.com/jobs/intern-12345')).toBe(
+      null,
+    );
+  });
+
+  it('returns null for idless, root, and unparseable URLs', () => {
+    expect(
+      trailingNumericJobId('https://acme.com/careers/senior-baker'),
+    ).toBeNull();
+    expect(trailingNumericJobId('https://acme.com/')).toBeNull();
+    expect(trailingNumericJobId('not a url')).toBeNull();
+  });
+});
 
 describe('extractUrlsFromText', () => {
   it('pulls distinct http(s) urls, unwrapping angle brackets + markdown', () => {

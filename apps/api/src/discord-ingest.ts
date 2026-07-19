@@ -23,6 +23,7 @@ import {
   fetchPageHtml,
   isIngestableJobUrl,
   sniffGreenhouseJob,
+  trailingNumericJobId,
   unwrapRedirectShim,
 } from './link-extract.js';
 import type { Deps } from './types.js';
@@ -182,9 +183,11 @@ async function classifyAndIngest(
     // embedded on a custom domain (free — no extra requests), (2) probe the
     // fixed greenhouse boards API for a VERIFIED tenant when the URL pinned a
     // gh_jid without one (a few API GETs — covers JS-rendered pages the sniff
-    // cannot see through, e.g. akunacapital.com), (3) treat the page as a
-    // directory of job links, (4) record + park below. A sniff or probe hit
-    // ingests the canonical board URL so it dedupes with board-hosted pastes.
+    // cannot see through, e.g. akunacapital.com) OR when an unsupported URL's
+    // final path segment carries a numeric job id (databricks.com's slug-id
+    // URLs), (3) treat the page as a directory of job links, (4) record +
+    // park below. A sniff or probe hit ingests the canonical board URL so it
+    // dedupes with board-hosted pastes.
     if (depth === 0) {
       const page = await fetchPageHtml(resolved);
       if (page) {
@@ -211,6 +214,24 @@ async function classifyAndIngest(
         if (tenant !== null) {
           const canonical = `https://job-boards.greenhouse.io/${tenant}/jobs/${probeJobId}`;
           return await ingestSupported(deps, canonical, 'greenhouse', source);
+        }
+      }
+      // No gh_jid anywhere, but some greenhouse tenants render postings on
+      // their own domain with ONLY the numeric job id at the tail of the
+      // path (databricks.com/…/university-recruiting/<slug>-7011263002).
+      // When the resolved URL is not any supported platform and its final
+      // path segment carries such a candidate id, run the SAME verified
+      // tenant probe with it. Verified-only: a hit ingests the canonical
+      // board URL exactly like the gh_jid probe above; a false candidate
+      // costs a couple of 404 probes and falls through unchanged.
+      if (probeJobId === null && ref.platform === 'unknown') {
+        const candidateId = trailingNumericJobId(resolved);
+        if (candidateId !== null) {
+          const tenant = await deriveGreenhouseTenant(resolved, candidateId);
+          if (tenant !== null) {
+            const canonical = `https://job-boards.greenhouse.io/${tenant}/jobs/${candidateId}`;
+            return await ingestSupported(deps, canonical, 'greenhouse', source);
+          }
         }
       }
       if (page) {
