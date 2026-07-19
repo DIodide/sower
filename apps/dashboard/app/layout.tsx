@@ -1,15 +1,8 @@
 import type { Metadata } from 'next';
-import { Nunito } from 'next/font/google';
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { NavLinks } from './nav-links';
 import './globals.css';
-
-const nunito = Nunito({
-  subsets: ['latin'],
-  weight: ['400', '600', '700', '800'],
-  variable: '--font-sans',
-});
 
 export const metadata: Metadata = {
   title: 'sower',
@@ -21,10 +14,10 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" className={nunito.variable}>
+    <html lang="en">
       <body>
-        <div className="shell">
-          <header className="site-header">
+        <header className="site-header">
+          <div className="site-header-inner">
             <Link href="/" className="brand">
               <span className="brand-mark" aria-hidden>
                 🌱
@@ -32,9 +25,9 @@ export default function RootLayout({ children }: { children: ReactNode }) {
               sower
             </Link>
             <NavLinks />
-          </header>
-          <main>{children}</main>
-        </div>
+          </div>
+        </header>
+        <main className="shell">{children}</main>
       </body>
     </html>
   );

@@ -75,7 +75,7 @@ export async function PlatformsSection() {
           style={{
             display: 'grid',
             gridTemplateColumns: 'repeat(auto-fill, minmax(17rem, 1fr))',
-            gap: '1.25rem',
+            gap: '0.5rem',
           }}
         >
           {list.map((summary) => (
@@ -88,7 +88,7 @@ export async function PlatformsSection() {
               <div className="row" style={{ alignItems: 'baseline' }}>
                 <span
                   className="mono"
-                  style={{ fontSize: '1.0625rem', fontWeight: 800 }}
+                  style={{ fontSize: '0.9375rem', fontWeight: 600 }}
                 >
                   {summary.platform}
                 </span>

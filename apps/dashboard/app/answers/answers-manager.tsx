@@ -43,7 +43,7 @@ function CharCount({ length }: { length: number }) {
   return (
     <span
       className={over ? 'status-err mono' : 'hint faint mono'}
-      style={{ fontSize: '0.72rem' }}
+      style={{ fontSize: '0.6875rem' }}
     >
       {length.toLocaleString()} / {MAX_VALUE_LENGTH.toLocaleString()}
     </span>
@@ -602,12 +602,9 @@ export function AnswersManager({
           <section
             key={group.company || '__global__'}
             className="card"
-            style={{ marginTop: '1.25rem' }}
+            style={{ marginTop: '0.75rem' }}
           >
-            <h3
-              className="section-title"
-              style={{ margin: '0 0 0.25rem', fontSize: '1rem' }}
-            >
+            <h3 className="section-title" style={{ margin: '0 0 0.25rem' }}>
               {group.title}
               <span className="count">{group.entries.length}</span>
               {group.company === '' ? (

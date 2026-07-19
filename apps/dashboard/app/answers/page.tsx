@@ -37,7 +37,7 @@ export default async function AnswersPage() {
         Nothing is ever invented — questions without a saved or profile answer
         stay in <strong>Needs input</strong>.
       </p>
-      <details className="expand" style={{ margin: '-0.75rem 0 1.5rem' }}>
+      <details className="expand" style={{ margin: '-0.5rem 0 1rem' }}>
         <summary>How matching and company scopes work</summary>
         <div
           className="well"

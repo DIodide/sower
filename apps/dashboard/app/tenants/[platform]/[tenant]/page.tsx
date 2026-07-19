@@ -169,10 +169,7 @@ export default async function TenantPage({
                 )}
               </td>
               <td>
-                <Timestamp
-                  value={row.taskUpdatedAt ?? row.jobCreatedAt}
-                  inline
-                />
+                <Timestamp value={row.taskUpdatedAt ?? row.jobCreatedAt} />
               </td>
             </tr>
           ))}
@@ -204,7 +201,13 @@ export default async function TenantPage({
           <tbody>
             {questionList.map(({ question, present, required }) => (
               <tr key={question.id}>
-                <td className="mono">{question.id}</td>
+                <td
+                  className="mono truncate"
+                  style={{ maxWidth: '16rem' }}
+                  title={question.id}
+                >
+                  {question.id}
+                </td>
                 <td>
                   <ExpandableText text={question.label} max={90} />
                 </td>
@@ -255,7 +258,7 @@ export default async function TenantPage({
             {eventRows.map((event) => (
               <tr key={event.id}>
                 <td>
-                  <Timestamp value={event.createdAt} inline />
+                  <Timestamp value={event.createdAt} />
                 </td>
                 <td title={event.type}>{eventLabel(event.type)}</td>
                 <td style={{ whiteSpace: 'nowrap' }}>

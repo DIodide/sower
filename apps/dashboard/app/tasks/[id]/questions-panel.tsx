@@ -207,7 +207,7 @@ function MissingInput({
           maxWidth: '34rem',
           display: 'grid',
           gap: '0.375rem',
-          padding: '0.75rem 1rem',
+          padding: '0.5rem 0.625rem',
         }}
       >
         <legend className="field-label" style={{ padding: 0 }}>
@@ -294,7 +294,7 @@ function QuestionRow({
           ? {
               marginLeft: '0.75rem',
               paddingLeft: '0.75rem',
-              borderLeft: '2px solid var(--border, #d0d7de)',
+              borderLeft: '2px solid var(--line)',
             }
           : undefined
       }

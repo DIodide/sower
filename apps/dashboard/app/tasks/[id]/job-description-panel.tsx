@@ -43,8 +43,8 @@ export function JobDescriptionPanel(view: JobDescriptionView) {
           style={{
             whiteSpace: 'pre-wrap',
             overflowWrap: 'anywhere',
-            fontSize: '0.9rem',
-            lineHeight: 1.65,
+            fontSize: '0.875rem',
+            lineHeight: 1.5,
           }}
         >
           {view.content}

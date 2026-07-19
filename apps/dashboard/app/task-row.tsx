@@ -147,7 +147,9 @@ export function TaskRow({ row }: { row: TaskRowData }) {
       </span>
       <span className="tr-label">
         <span className={`dot dot--${row.tone} tr-dot-narrow`} aria-hidden />
-        <Link href={`/tasks/${row.id}`}>{row.label}</Link>
+        <Link href={`/tasks/${row.id}`} title={row.label}>
+          {row.label}
+        </Link>
       </span>
       <span className="tr-status">
         <span className={`dot dot--${row.tone}`} aria-hidden />

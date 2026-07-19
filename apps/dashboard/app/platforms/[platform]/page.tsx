@@ -228,7 +228,7 @@ export default async function PlatformPage({
                 <td className="num">{summary.jobIds.size}</td>
                 <td className="num">{summary.tasks}</td>
                 <td>
-                  <Timestamp value={summary.latest} inline />
+                  <Timestamp value={summary.latest} />
                 </td>
               </tr>
             ))}
@@ -260,7 +260,13 @@ export default async function PlatformPage({
           <tbody>
             {fieldList.map((field) => (
               <tr key={field.id}>
-                <td className="mono">{field.id}</td>
+                <td
+                  className="mono truncate"
+                  style={{ maxWidth: '16rem' }}
+                  title={field.id}
+                >
+                  {field.id}
+                </td>
                 <td>
                   <ExpandableText text={field.sampleLabel} max={80} />
                 </td>
@@ -307,7 +313,7 @@ export default async function PlatformPage({
                 </td>
                 <td className="num">{failure.count}</td>
                 <td>
-                  <Timestamp value={failure.latest} inline />
+                  <Timestamp value={failure.latest} />
                 </td>
               </tr>
             ))}

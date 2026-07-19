@@ -97,7 +97,7 @@ function FieldLabel({ children }: { children: ReactNode }) {
   return (
     <div
       className="hint faint"
-      style={{ fontSize: '0.72rem', fontWeight: 800 }}
+      style={{ fontSize: '0.6875rem', fontWeight: 600 }}
     >
       {children}
     </div>
@@ -201,8 +201,8 @@ function StepItem({
         <span
           className="mono faint"
           style={{
-            fontSize: '0.72rem',
-            fontWeight: 700,
+            fontSize: '0.6875rem',
+            fontWeight: 600,
             textTransform: 'uppercase',
             letterSpacing: '0.04em',
           }}
@@ -212,7 +212,7 @@ function StepItem({
         {step.tool ? (
           <span
             className="mono"
-            style={{ fontSize: '0.8125rem', fontWeight: 700 }}
+            style={{ fontSize: '0.8125rem', fontWeight: 600 }}
           >
             {step.tool}
           </span>
@@ -422,7 +422,7 @@ export function InvestigationPanel({
       {run.error ? (
         <div style={{ marginTop: '0.75rem' }}>
           <FieldLabel>Error</FieldLabel>
-          <div className="status-err" style={{ fontWeight: 600 }}>
+          <div className="status-err">
             <ExpandableText text={run.error} max={240} />
           </div>
         </div>

@@ -110,7 +110,10 @@ export async function IngestSection() {
               </span>
             </div>
             {!latest.ok && latest.error ? (
-              <p className="hint" style={{ color: 'var(--danger)', margin: 0 }}>
+              <p
+                className="hint"
+                style={{ color: 'var(--danger-fg)', margin: 0 }}
+              >
                 {latest.error}
               </p>
             ) : null}

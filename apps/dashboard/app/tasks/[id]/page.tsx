@@ -57,7 +57,7 @@ function MetaItem({ label, children }: { label: string; children: ReactNode }) {
     <div style={{ minWidth: 0 }}>
       <div
         className="hint faint"
-        style={{ fontSize: '0.72rem', fontWeight: 800 }}
+        style={{ fontSize: '0.6875rem', fontWeight: 600 }}
       >
         {label}
       </div>
@@ -477,8 +477,8 @@ export default async function TaskPage({
             <span
               style={{
                 color: 'var(--ink-muted)',
-                fontWeight: 600,
-                fontSize: '1.125rem',
+                fontWeight: 400,
+                fontSize: '1rem',
               }}
             >
               — {job?.title ?? 'untitled role'}
@@ -556,10 +556,10 @@ export default async function TaskPage({
           </MetaItem>
           <MetaItem label="Source">{job?.source ?? '—'}</MetaItem>
           <MetaItem label="Added">
-            <Timestamp value={task.createdAt} inline />
+            <Timestamp value={task.createdAt} />
           </MetaItem>
           <MetaItem label="Updated">
-            <Timestamp value={task.updatedAt} inline />
+            <Timestamp value={task.updatedAt} />
           </MetaItem>
           {job?.terms && job.terms.length > 0 ? (
             <MetaItem label="Terms">
@@ -582,11 +582,11 @@ export default async function TaskPage({
             <div style={{ gridColumn: '1 / -1', minWidth: 0 }}>
               <div
                 className="hint faint"
-                style={{ fontSize: '0.72rem', fontWeight: 800 }}
+                style={{ fontSize: '0.6875rem', fontWeight: 600 }}
               >
                 Last error
               </div>
-              <div className="status-err" style={{ fontWeight: 600 }}>
+              <div className="status-err">
                 <ExpandableText text={task.lastError} max={160} />
               </div>
             </div>
@@ -769,7 +769,7 @@ export default async function TaskPage({
                   <div className="row" style={{ alignItems: 'baseline' }}>
                     <span
                       title={event.type}
-                      style={{ fontSize: '0.875rem', fontWeight: 700 }}
+                      style={{ fontSize: '0.875rem', fontWeight: 600 }}
                     >
                       {eventLabel(event.type)}
                     </span>
@@ -825,8 +825,8 @@ export default async function TaskPage({
                     gridTemplateColumns: CALL_GRID_COLUMNS,
                     gap: '0.5rem',
                     padding: '0.375rem 0.5rem',
-                    fontSize: '0.72rem',
-                    fontWeight: 700,
+                    fontSize: '0.6875rem',
+                    fontWeight: 600,
                   }}
                 >
                   <span>seq</span>
@@ -840,9 +840,7 @@ export default async function TaskPage({
                 {callRows.map((call) => (
                   <details
                     key={call.id}
-                    style={{
-                      borderTop: '1px solid rgba(80, 92, 150, 0.1)',
-                    }}
+                    style={{ borderTop: '1px solid var(--line)' }}
                   >
                     <summary
                       style={{

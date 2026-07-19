@@ -372,7 +372,7 @@ export default async function Page({
               {platforms.length > 1 ? (
                 <>
                   <div className="filter-pop-label">Platform</div>
-                  <div className="chip-row" style={{ marginBottom: '0.75rem' }}>
+                  <div className="chip-row" style={{ marginBottom: '0.5rem' }}>
                     <Link
                       href={filterHref({
                         q: qFilter,
@@ -431,7 +431,7 @@ export default async function Page({
 
       {/* ---- the workspace ---- */}
       {rows.length === 0 ? (
-        <div className="card" style={{ marginTop: '1rem' }}>
+        <div className="card" style={{ marginTop: '0.5rem' }}>
           {hasFilters ? (
             <p className="hint" style={{ margin: 0 }}>
               No tasks match these filters. <Link href="/">Clear filters</Link>
@@ -469,7 +469,7 @@ export default async function Page({
           </section>
           <details
             className="panel"
-            style={{ marginTop: '2rem' }}
+            style={{ marginTop: '1.5rem' }}
             open={archiveOpen || undefined}
           >
             <summary>

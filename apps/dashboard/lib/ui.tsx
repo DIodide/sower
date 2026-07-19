@@ -45,7 +45,7 @@ export function Timestamp({
         <span className="ts-rel">{rel}</span>
         <span
           className="ts-abs faint"
-          style={{ display: 'block', fontSize: '0.72rem' }}
+          style={{ display: 'block', fontSize: '0.6875rem' }}
         >
           {abs}
         </span>
