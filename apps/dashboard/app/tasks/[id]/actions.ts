@@ -393,9 +393,9 @@ export async function saveAnswers(
  * revalidated — deliberately NOT the home list: the row owns its optimistic
  * note/priority/due-date state, and a list revalidation mid-edit would
  * re-sort rows under the user's hands. Order settles on the next natural
- * refresh. Note the api side: setting a priority also clears any manual
- * "Waiting on you" sort rank (choosing a priority means "sort me by
- * priority again").
+ * refresh. Note the api side: setting a priority RE-SLOTS a hand-ranked row
+ * inside the ranked block (bubbles up on raise, down on lower) so a manual
+ * order and a priority change compose — a raise never demotes the row.
  */
 export async function updateTaskMeta(
   taskId: string,

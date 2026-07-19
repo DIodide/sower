@@ -316,7 +316,12 @@ export function TaskRow({
         />
       </span>
       <span className="tr-note">
-        <InlineNote taskId={row.id} note={row.notes} />
+        {/* Same editability rule as the detail header: terminal tasks read-only. */}
+        <InlineNote
+          taskId={row.id}
+          note={row.notes}
+          readOnly={priorityLocked}
+        />
       </span>
       <span className="tr-when" title={row.updatedAbs}>
         {row.updatedRel}

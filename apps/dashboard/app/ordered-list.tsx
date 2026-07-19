@@ -245,6 +245,10 @@ export function OrderedList({ rows }: { rows: TaskRowData[] }) {
       timerRef.current = null;
     }
     pendingRef.current = null;
+    // Invalidate any reorder write already on the wire: its response must not
+    // be applied over the clear (the api's CASE guard keeps the cleared rank
+    // NULL server-side; this keeps the client from resurrecting the hint).
+    seqRef.current += 1;
     setClearing(true);
     clearManualOrder()
       .then((result) => {
