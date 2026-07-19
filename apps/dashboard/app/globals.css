@@ -970,7 +970,6 @@ details.expand > summary:hover {
   line-height: 1.45;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  overflow-wrap: anywhere;
   overflow-x: auto;
   max-height: 24rem;
   overflow-y: auto;
