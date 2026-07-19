@@ -859,6 +859,10 @@ input[type="file"]::file-selector-button {
 .timeline li {
   position: relative;
   padding: 0 0 0.75rem 1.375rem;
+  /* Long unbroken tokens (tracker/embed URLs in transcripts) must wrap
+     inside the item, never widen the page. */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .timeline li::before {
@@ -965,6 +969,7 @@ details.expand > summary:hover {
   font-size: 0.75rem;
   line-height: 1.45;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   overflow-wrap: anywhere;
   overflow-x: auto;
   max-height: 24rem;
@@ -2062,4 +2067,10 @@ details.show-more[open] > summary .show-more-open {
   html {
     scroll-behavior: auto;
   }
+}
+
+/* Truncated transcript previews are often a single long URL — wrap them. */
+.expand > summary {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
