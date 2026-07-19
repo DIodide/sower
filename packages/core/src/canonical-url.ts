@@ -44,3 +44,51 @@ export function canonicalizeUrl(url: string): string {
   const query = kept.size > 0 ? `?${kept.toString()}` : '';
   return `${parsed.protocol}//${host}${pathname}${query}`;
 }
+
+/**
+ * Params stripped from the STORED job URL (not just the canonical dedupe
+ * form): pure tracking/referral noise that should never be persisted or
+ * re-opened — e.g. `gh_src` is Greenhouse's referral-source tag (a pasted
+ * board link carried `gh_src=zero2sudo`, someone else's referral code).
+ * Conservative on purpose: only params that are never functional.
+ */
+const STORED_URL_TRACKING = new Set([
+  'gh_src',
+  'ref',
+  'src',
+  'fbclid',
+  'gclid',
+  'mc_cid',
+  'mc_eid',
+]);
+
+/**
+ * Removes tracking/referral params (utm_*, gh_src, ref, src, click ids) from
+ * a URL while leaving every other part untouched — unlike `canonicalizeUrl`
+ * it preserves path case, trailing slashes, fragments, and functional params.
+ * Safe for the URL that gets stored and re-opened. Returns the input
+ * unchanged if it does not parse.
+ */
+export function stripTrackingParams(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return url;
+  }
+  const toDelete: string[] = [];
+  for (const name of parsed.searchParams.keys()) {
+    const lower = name.toLowerCase();
+    if (
+      lower.startsWith(TRACKING_PARAM_PREFIX) ||
+      STORED_URL_TRACKING.has(lower)
+    ) {
+      toDelete.push(name);
+    }
+  }
+  if (toDelete.length === 0) return url;
+  for (const name of toDelete) {
+    parsed.searchParams.delete(name);
+  }
+  return parsed.toString();
+}

@@ -261,7 +261,7 @@ function NextStep({
   needsSession,
   session,
   tenant,
-  discardNote,
+  discard,
 }: {
   task: { id: string; state: string; lastError: string | null };
   requiredMissing: number;
@@ -272,8 +272,9 @@ function NextStep({
   needsSession?: boolean;
   session?: WorkdaySessionRow;
   tenant?: string | null;
-  /** The latest DISCARD event's human "why" note (DISCARDED tasks only). */
-  discardNote?: string | null;
+  /** The latest DISCARD event: was it the auto rule, and its "why" note
+   *  (DISCARDED tasks only). */
+  discard?: { auto: boolean; note: string | null } | null;
 }) {
   switch (task.state) {
     case 'NEEDS_INPUT': {
@@ -422,13 +423,30 @@ function NextStep({
         </div>
       );
     case 'DISCARDED':
+      // The auto rule (e.g. full-time postings while hunting internships)
+      // gets its own phrasing plus a Restore action — a human never chose
+      // this, so the banner invites overriding it.
+      if (discard?.auto) {
+        return (
+          <div className="banner banner--neutral">
+            <div style={{ flex: '1 1 20rem' }}>
+              <p style={{ marginBottom: '0.625rem' }}>
+                <strong>Auto discarded</strong>
+                {discard.note ? <> — {discard.note}</> : null}. Restore it if
+                this rule got it wrong.
+              </p>
+              <TaskActions taskId={task.id} mode="restore" />
+            </div>
+          </div>
+        );
+      }
       return (
         <div className="banner banner--neutral">
           <p>
             <strong>Discarded</strong>
-            {discardNote ? <> — {discardNote}</> : null}. This task was removed
-            from the queue — nothing will run for it anymore. The record and
-            history are kept below.
+            {discard?.note ? <> — {discard.note}</> : null}. This task was
+            removed from the queue — nothing will run for it anymore. The record
+            and history are kept below.
           </p>
         </div>
       );
@@ -526,6 +544,17 @@ export default async function TaskPage({
 
   const spec = task.jobSpec;
   const resolution = task.resolution;
+  // Location cell: "Boston, MA · Hybrid" — the workplace arrangement is
+  // appended only when the location string doesn't already say it (never
+  // "Remote (US) · Remote"). Either half can stand alone.
+  const location = spec?.location?.trim() || null;
+  const locationType = spec?.locationType?.trim() || null;
+  const locationDisplay = location
+    ? locationType &&
+      !location.toLowerCase().includes(locationType.toLowerCase())
+      ? `${location} · ${locationType}`
+      : location
+    : locationType;
   // Workday parks account-required until a browser session is captured; that
   // NEEDS_INPUT is a "capture a session" state, not an "answer questions" one.
   const needsSession =
@@ -583,20 +612,25 @@ export default async function TaskPage({
     (s.states as string[]).includes(task.state),
   );
 
-  // The latest DISCARD event's optional human note ("why"), surfaced in the
-  // Discarded banner. Events are ordered ascending, so scan from the end.
-  const discardNote =
+  // The latest DISCARD event, surfaced in the Discarded banner: data.reason
+  // 'auto' means the system's rule (not a human) removed it, and the optional
+  // note is the "why". Events are ordered ascending, so scan from the end.
+  const discard =
     task.state === 'DISCARDED'
       ? (() => {
           const event = [...eventRows]
             .reverse()
             .find((e) => e.type === 'DISCARD');
           const data = event?.data;
-          const note =
+          const record =
             data && typeof data === 'object' && !Array.isArray(data)
-              ? (data as Record<string, unknown>).note
+              ? (data as Record<string, unknown>)
               : undefined;
-          return typeof note === 'string' && note !== '' ? note : null;
+          const note = record?.note;
+          return {
+            auto: record?.reason === 'auto',
+            note: typeof note === 'string' && note !== '' ? note : null,
+          };
         })()
       : null;
 
@@ -701,6 +735,19 @@ export default async function TaskPage({
             )}
           </MetaItem>
           <MetaItem label="Source">{job?.source ?? '—'}</MetaItem>
+          {/* Job facts from the spec — absent fields render no cell at all. */}
+          {spec?.employmentType ? (
+            <MetaItem label="Type">{spec.employmentType}</MetaItem>
+          ) : null}
+          {locationDisplay ? (
+            <MetaItem label="Location">{locationDisplay}</MetaItem>
+          ) : null}
+          {spec?.department ? (
+            <MetaItem label="Department">{spec.department}</MetaItem>
+          ) : null}
+          {spec?.compensation ? (
+            <MetaItem label="Compensation">{spec.compensation}</MetaItem>
+          ) : null}
           <MetaItem label="Added">
             <Timestamp value={task.createdAt} />
           </MetaItem>
@@ -757,7 +804,7 @@ export default async function TaskPage({
         needsSession={needsSession}
         session={sessionRow}
         tenant={job?.tenant}
-        discardNote={discardNote}
+        discard={discard}
       />
 
       {/* ---- ingested screenshots (manual triage source) ---- */}
@@ -896,6 +943,9 @@ export default async function TaskPage({
           version={latestDescription.version}
           fetchedAt={latestDescription.fetchedAt}
           versionCount={descriptionRows.length}
+          // Waiting-on-you states: the description is read while answering,
+          // so it starts open instead of a fold away.
+          defaultOpen={task.state === 'NEEDS_INPUT' || task.state === 'REVIEW'}
         />
       ) : (
         <Empty>No job description captured for this posting yet.</Empty>

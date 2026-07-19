@@ -34,8 +34,15 @@ export interface TaskRowData {
   tone: Tone;
   /** Plain-words status ("Needs your answers"); the unsupported annotation
    *  ("unsupported site — form discovered") replaces it on unknown-platform
-   *  rows. */
+   *  rows, and auto-removed Archive rows read "Auto discarded". */
   phrase: string;
+  /** The latest DISCARD event's "why" note, rendered faintly after the
+   *  phrase (DISCARDED rows only). */
+  statusNote: string | null;
+  /** JobSpec.employmentType ("Intern", "Full time") — a faint "· type"
+   *  suffix on the status cell; null when unknown or already said by
+   *  statusNote. */
+  employmentType: string | null;
   /** Unsupported row with no agent currently running — offer Investigate. */
   canInvestigate: boolean;
   /** Precomputed on the server so hydration never disagrees on "now". */
@@ -127,6 +134,12 @@ export function TaskRow({ row }: { row: TaskRowData }) {
 
   if (hidden) return null;
 
+  // Full status wording for the truncation tooltip (the cell may ellipsize).
+  const statusTitle =
+    row.phrase +
+    (row.statusNote ? ` — ${row.statusNote}` : '') +
+    (row.employmentType ? ` · ${row.employmentType}` : '');
+
   return (
     <div className="grid-row">
       <span className="tr-check">
@@ -155,8 +168,14 @@ export function TaskRow({ row }: { row: TaskRowData }) {
       </span>
       <span className="tr-status">
         <span className={`dot dot--${row.tone}`} aria-hidden />
-        <span className="tr-phrase" title={row.phrase}>
+        <span className="tr-phrase" title={statusTitle}>
           {row.phrase}
+          {row.statusNote ? (
+            <span className="faint"> — {row.statusNote}</span>
+          ) : null}
+          {row.employmentType ? (
+            <span className="faint"> · {row.employmentType}</span>
+          ) : null}
         </span>
       </span>
       <span className="tr-note">

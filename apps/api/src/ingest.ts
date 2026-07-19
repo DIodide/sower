@@ -1,5 +1,5 @@
 import type { PlatformRef, TaskState } from '@sower/core';
-import { canonicalizeUrl } from '@sower/core';
+import { canonicalizeUrl, stripTrackingParams } from '@sower/core';
 import { applicationTasks, jobs } from '@sower/db';
 import { detectPlatform, getAdapter, resolveUrl } from '@sower/platforms';
 import { computeDedupeKey } from '@sower/sources';
@@ -113,6 +113,11 @@ export async function ingestJob(
   ) {
     resolvedUrl = await resolveUrl(input.url);
   }
+  // The STORED url must not carry tracking/referral params (a pasted board
+  // link tagged gh_src=zero2sudo would otherwise spread that referral every
+  // time the posting link is opened). Dedupe already ignores them via
+  // canonicalizeUrl; this cleans what we persist and re-open.
+  resolvedUrl = stripTrackingParams(resolvedUrl);
   const canonicalUrl = canonicalizeUrl(resolvedUrl);
   const ref = detectPlatform(canonicalUrl);
   const dedupeKey = computeDedupeKey(ref, canonicalUrl);

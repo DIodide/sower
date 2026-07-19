@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canonicalizeUrl } from './canonical-url.js';
+import { canonicalizeUrl, stripTrackingParams } from './canonical-url.js';
 
 describe('canonicalizeUrl', () => {
   it('lowercases the host', () => {
@@ -113,5 +113,29 @@ describe('canonicalizeUrl', () => {
   it('throws on invalid URLs', () => {
     expect(() => canonicalizeUrl('not a url')).toThrow(TypeError);
     expect(() => canonicalizeUrl('')).toThrow(TypeError);
+  });
+});
+
+describe('stripTrackingParams', () => {
+  it('strips gh_src (the zero2sudo referral case) but keeps functional params', () => {
+    expect(
+      stripTrackingParams(
+        'https://job-boards.greenhouse.io/thetradedesk/jobs/5033765007?gh_src=zero2sudo',
+      ),
+    ).toBe('https://job-boards.greenhouse.io/thetradedesk/jobs/5033765007');
+    expect(
+      stripTrackingParams(
+        'https://stripe.com/jobs/search?gh_jid=123&gh_src=zero2sudo',
+      ),
+    ).toBe('https://stripe.com/jobs/search?gh_jid=123');
+  });
+
+  it('strips utm_*/ref/click ids, preserves path case + fragments, tolerates junk', () => {
+    expect(
+      stripTrackingParams(
+        'https://X.example/Jobs/1?utm_source=a&ref=b&gclid=c&dept=Eng#apply',
+      ),
+    ).toBe('https://x.example/Jobs/1?dept=Eng#apply');
+    expect(stripTrackingParams('not a url')).toBe('not a url');
   });
 });

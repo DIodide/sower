@@ -6,12 +6,13 @@ import {
   approveTask,
   discardTask,
   requeueTask,
+  restoreTask,
   startSessionCapture,
   verifyDiscoveredForm,
 } from './actions';
 
 const LABELS: Record<
-  'requeue' | 'approve' | 'start' | 'verify' | 'discard',
+  'requeue' | 'approve' | 'start' | 'verify' | 'discard' | 'restore',
   { idle: string; className: string; title: string }
 > = {
   approve: {
@@ -43,6 +44,12 @@ const LABELS: Record<
     title:
       'Removes this task from the queue — nothing will run for it anymore (the record and history are kept)',
   },
+  restore: {
+    idle: 'Restore to queue',
+    className: 'btn',
+    title:
+      'Puts this task back in the queue (as needs-input) — the auto-discard rule never re-discards a restored task',
+  },
 };
 
 export function TaskActions({
@@ -50,7 +57,7 @@ export function TaskActions({
   mode,
 }: {
   taskId: string;
-  mode: 'requeue' | 'approve' | 'start' | 'verify' | 'discard';
+  mode: 'requeue' | 'approve' | 'start' | 'verify' | 'discard' | 'restore';
 }) {
   const [result, formAction, pending] = useActionState<
     ActionResult | null,
@@ -59,6 +66,7 @@ export function TaskActions({
     if (mode === 'approve') return approveTask(taskId);
     if (mode === 'start') return startSessionCapture(taskId);
     if (mode === 'verify') return verifyDiscoveredForm(taskId);
+    if (mode === 'restore') return restoreTask(taskId);
     if (mode === 'discard') {
       // The optional "why" typed next to the button — empty is fine.
       const note = formData.get('note');

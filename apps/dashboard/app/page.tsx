@@ -1,6 +1,7 @@
 import type { TaskState } from '@sower/core';
 import {
   applicationTasks,
+  events,
   type InvestigationRunStatus,
   investigationRuns,
   jobs,
@@ -301,21 +302,58 @@ export default async function Page({
   const unsupportedIds = taskRows
     .filter((r) => r.platform === 'unknown' && r.state === 'NEEDS_INPUT')
     .map((r) => r.id);
+  // Discarded rows on this page only: their latest DISCARD event tells
+  // whether the system's rule (data.reason 'auto') or a human removed them,
+  // plus the optional "why" note.
+  const discardedIds = taskRows
+    .filter((r) => r.state === 'DISCARDED')
+    .map((r) => r.id);
+  const [runRows, discardRows] = await Promise.all([
+    unsupportedIds.length > 0
+      ? db
+          .select({
+            taskId: investigationRuns.taskId,
+            status: investigationRuns.status,
+          })
+          .from(investigationRuns)
+          .where(inArray(investigationRuns.taskId, unsupportedIds))
+          .orderBy(desc(investigationRuns.startedAt))
+      : [],
+    discardedIds.length > 0
+      ? db
+          .select({ taskId: events.taskId, data: events.data })
+          .from(events)
+          .where(
+            and(
+              eq(events.type, 'DISCARD'),
+              inArray(events.taskId, discardedIds),
+            ),
+          )
+          .orderBy(desc(events.createdAt))
+      : [],
+  ]);
   const latestRuns = new Map<string, { status: InvestigationRunStatus }>();
-  if (unsupportedIds.length > 0) {
-    const runRows = await db
-      .select({
-        taskId: investigationRuns.taskId,
-        status: investigationRuns.status,
-      })
-      .from(investigationRuns)
-      .where(inArray(investigationRuns.taskId, unsupportedIds))
-      .orderBy(desc(investigationRuns.startedAt));
-    for (const run of runRows) {
-      if (!latestRuns.has(run.taskId)) {
-        latestRuns.set(run.taskId, { status: run.status });
-      }
+  for (const run of runRows) {
+    if (!latestRuns.has(run.taskId)) {
+      latestRuns.set(run.taskId, { status: run.status });
     }
+  }
+  // Newest-first, so the FIRST row per task is its latest DISCARD.
+  const latestDiscards = new Map<
+    string,
+    { auto: boolean; note: string | null }
+  >();
+  for (const row of discardRows) {
+    if (latestDiscards.has(row.taskId)) continue;
+    const data =
+      row.data && typeof row.data === 'object' && !Array.isArray(row.data)
+        ? (row.data as Record<string, unknown>)
+        : undefined;
+    const note = data?.note;
+    latestDiscards.set(row.taskId, {
+      auto: data?.reason === 'auto',
+      note: typeof note === 'string' && note !== '' ? note : null,
+    });
   }
 
   const rows: TaskRowData[] = taskRows.map((row) => {
@@ -331,6 +369,11 @@ export default async function Page({
       tone = status.tone ?? 'attention';
       canInvestigate = !status.running;
     }
+    const discard =
+      row.state === 'DISCARDED' ? latestDiscards.get(row.id) : undefined;
+    if (discard?.auto) phrase = 'Auto discarded';
+    const statusNote = discard?.note ?? null;
+    const employmentType = row.jobSpec?.employmentType?.trim() || null;
     return {
       id: row.id,
       state: row.state,
@@ -339,6 +382,14 @@ export default async function Page({
       notes: row.notes,
       tone,
       phrase,
+      statusNote,
+      // Faint "· Intern" type hint — skipped when the discard note already
+      // names it ("… Employment type: Full time · Full time" reads twice).
+      employmentType:
+        employmentType &&
+        !statusNote?.toLowerCase().includes(employmentType.toLowerCase())
+          ? employmentType
+          : null,
       canInvestigate,
       updatedRel: relativeTime(row.updatedAt),
       updatedAbs: formatLocal(row.updatedAt),

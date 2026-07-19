@@ -1,11 +1,16 @@
 // Read-only "job description" panel for the task detail page. Pure
 // presentation (no client directive): renders the latest job_descriptions
-// row's plain-text content inside a collapsed clay panel so it never pushes
-// the answer form below the fold.
+// row's content — agent-scraped markdown for unsupported links, plain text
+// (often markdown-ish) from adapter platforms — through the safe markdown
+// renderer (lib/markdown: React elements only, never raw HTML) inside a
+// collapsible clay panel. Collapsed by default so it never pushes the answer
+// form below the fold, except when the task is waiting on the user, who
+// reads the description while answering.
 import { formatLocal } from '../../../lib/format';
+import { Markdown } from '../../../lib/markdown';
 
 export interface JobDescriptionView {
-  /** Plain-text description (JobSpec.description) of the latest version. */
+  /** Latest stored description: markdown (agent) or plain text (adapter). */
   content: string;
   /** Version number of the latest stored description (starts at 1). */
   version: number;
@@ -13,6 +18,8 @@ export interface JobDescriptionView {
   fetchedAt: Date | string | null;
   /** Total number of stored versions for this job. */
   versionCount: number;
+  /** Render open on first paint (NEEDS_INPUT/REVIEW tasks). */
+  defaultOpen?: boolean;
 }
 
 /**
@@ -33,21 +40,13 @@ function caption(view: JobDescriptionView): string {
 
 export function JobDescriptionPanel(view: JobDescriptionView) {
   return (
-    <details className="panel">
+    <details className="panel" open={view.defaultOpen || undefined}>
       <summary>
         Job description <span className="hint">{caption(view)}</span>
       </summary>
       <div className="panel-body">
-        <div
-          className="scroll-cap"
-          style={{
-            whiteSpace: 'pre-wrap',
-            overflowWrap: 'anywhere',
-            fontSize: '0.875rem',
-            lineHeight: 1.5,
-          }}
-        >
-          {view.content}
+        <div className="scroll-cap">
+          <Markdown content={view.content} />
         </div>
       </div>
     </details>
