@@ -1,9 +1,21 @@
 // Manual-rank math for the dashboard's "Waiting on you" section, shared by
-// the reorder handler (drag-and-drop) and the meta handler (priority
-// re-slot). Ranked rows sort by sort_rank asc ahead of the unranked block
-// (priority desc / recency), so composing the two orders means a priority
-// change on a RANKED row must move it WITHIN the ranked block — never clear
-// its rank (which would drop it below every ranked row: the demotion bug).
+// the reorder handler (drag-and-drop) and mirrored by the dashboard page
+// query and its client comparator (apps/dashboard/lib/reorder.ts). The
+// display order (waitingOrderBy below) is:
+//
+//   priority desc                 — tiers: Highest → High → Normal → Low,
+//                                   ALWAYS the primary sort
+//   unranked before ranked        — within a tier: new/untriaged demands
+//                                   attention above the hand-placed block
+//   created_at desc               — orders the unranked block: new ingests
+//                                   surface at the top of their tier
+//   sort_rank asc                 — orders the ranked block: the user's order
+//
+// A rank is therefore only meaningful WITHIN a priority tier: a drag
+// computes midpoints against the destination tier's ranked rows (and a drop
+// straddling a tier boundary adopts the destination tier's priority), while
+// an explicit priority change simply clears the rank — the row re-enters
+// its new tier as its newest unranked (top-of-tier) item.
 
 import { applicationTasks } from '@sower/db';
 import { type SQL, sql } from 'drizzle-orm';
@@ -15,6 +27,31 @@ export const RANK_GAP = 1024;
 /** A midpoint closer than this to either neighbor is a collision — the
  *  affected ranks are resequenced to RANK_GAP-spaced integers first. */
 export const RANK_EPSILON = 1e-6;
+
+/**
+ * The waiting section's display order, in ORDER BY form. MUST stay in
+ * lock-step with the dashboard page query (apps/dashboard/app/page.tsx) and
+ * the client comparator (apps/dashboard/lib/reorder.ts compareWaiting) —
+ * the reorder handler reads the section through this exact order so the
+ * neighbor ids a drop reports mean the same positions the user saw.
+ */
+export function waitingOrderBy(): SQL[] {
+  return [
+    // Priority desc is ALWAYS primary: a Low row can never sort above a
+    // Normal row, whatever ranks say.
+    sql`${applicationTasks.priority} desc`,
+    // Unranked first within the tier (new/untriaged over hand-placed).
+    sql`case when ${applicationTasks.sortRank} is null then 0 else 1 end`,
+    // The ranked block by the user's order. Nulls never mix into this key —
+    // the case key above already split the groups — so no nulls clause.
+    sql`${applicationTasks.sortRank} asc`,
+    // Arrival time orders the unranked block, newest first. created_at is
+    // immutable, so background processing can never shuffle the block
+    // (updatedAt would). `nulls last`: a plain desc would sort a null
+    // created_at FIRST — an unknown arrival must read oldest, not newest.
+    sql`${applicationTasks.createdAt} desc nulls last`,
+  ];
+}
 
 /**
  * Rank for a row dropped between neighbors: the midpoint of the two, or one
@@ -44,57 +81,4 @@ export function ranksCollide(
     belowRank !== undefined &&
     Math.abs(aboveRank - belowRank) < 2 * RANK_EPSILON
   );
-}
-
-/**
- * B2 (option A): the slot a RANKED row re-occupies when its priority
- * changes. `others` is the section's other ranked rows in rank order
- * (top-down); the row bubbles in the direction of the change — UP past
- * ranked rows a raise now outranks, DOWN past ranked rows a lower no longer
- * outranks — and stops at the first row it doesn't, so equal priorities
- * keep their relative order. Returns the new insertion index into `others`
- * (0..others.length), or null when the row shouldn't move (the rank is then
- * left untouched).
- */
-export function reslotIndex(
-  others: readonly { sortRank: number; priority: number }[],
-  currentRank: number,
-  oldPriority: number,
-  newPriority: number,
-): number | null {
-  // The row's current slot: how many other ranked rows sit above it.
-  let index = 0;
-  while (index < others.length) {
-    const other = others[index];
-    if (other === undefined || other.sortRank >= currentRank) break;
-    index += 1;
-  }
-  let next = index;
-  if (newPriority > oldPriority) {
-    // Raise: bubble UP past rows the new priority outranks.
-    while (next > 0) {
-      const above = others[next - 1];
-      if (above === undefined || above.priority >= newPriority) break;
-      next -= 1;
-    }
-  } else if (newPriority < oldPriority) {
-    // Lower: bubble DOWN past rows that now outrank it.
-    while (next < others.length) {
-      const below = others[next];
-      if (below === undefined || below.priority <= newPriority) break;
-      next += 1;
-    }
-  }
-  return next === index ? null : next;
-}
-
-/**
- * SQL-conditional rank assignment: writes `rank` ONLY if the row still has a
- * manual rank when the UPDATE executes — the ranked/unranked decision lives
- * in the statement itself, not in an earlier read, so a rank cleared
- * concurrently (the section's "clear manual order", a racing debounce) stays
- * cleared instead of being resurrected by a stale re-slot.
- */
-export function rankedCaseSql(rank: number): SQL {
-  return sql`case when ${applicationTasks.sortRank} is null then null else ${rank} end`;
 }

@@ -128,11 +128,16 @@ export const applicationTasks = pgTable('application_tasks', {
   priority: integer('priority').$type<TaskPriority>().notNull().default(0),
   /**
    * Manual position within the dashboard's "Waiting on you" section, set by
-   * drag-and-drop (POST /tasks/:id/reorder). Nullable: unranked tasks fall
-   * back to priority desc / updatedAt desc AFTER every ranked row. Double
-   * precision so a drop between neighbors is a midpoint write; the api
-   * resequences to 1024-spaced integers when midpoints run out of room.
-   * Setting a priority clears the rank (the user's explicit rule).
+   * drag-and-drop (POST /tasks/:id/reorder). A rank only orders rows WITHIN
+   * a priority tier — the section sorts priority desc first, then inside
+   * each tier the UNRANKED rows (null here: new/untriaged, created_at desc,
+   * so a fresh ingest surfaces at the top of its tier) ahead of the ranked
+   * block (sort_rank asc — the hand-placed rows). Double precision so a
+   * drop between neighbors is a midpoint write; the api resequences the
+   * tier to 1024-spaced integers when midpoints run out of room. An
+   * explicit priority change clears the rank (the row re-enters its new
+   * tier at the top); a drag across a tier boundary adopts the destination
+   * tier's priority together with the new rank in one update.
    */
   sortRank: doublePrecision('sort_rank'),
   /**

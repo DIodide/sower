@@ -393,9 +393,10 @@ export async function saveAnswers(
  * revalidated — deliberately NOT the home list: the row owns its optimistic
  * note/priority/due-date state, and a list revalidation mid-edit would
  * re-sort rows under the user's hands. Order settles on the next natural
- * refresh. Note the api side: setting a priority RE-SLOTS a hand-ranked row
- * inside the ranked block (bubbles up on raise, down on lower) so a manual
- * order and a priority change compose — a raise never demotes the row.
+ * refresh. Note the api side: an actual priority change CLEARS the row's
+ * manual rank (ranks only order rows within a tier) — the row re-enters its
+ * new tier as its newest unranked item, i.e. at the TOP of that tier, and
+ * can never demote below it.
  */
 export async function updateTaskMeta(
   taskId: string,
@@ -433,10 +434,15 @@ export async function updateTaskMeta(
 
 /**
  * Move a "Waiting on you" row to a new manual position via the api service:
- * the client reports the row's new NEIGHBORS, the api computes the sort rank
- * (midpoint / end-gap, resequencing when needed). Deliberately no list
- * revalidation: the OrderedList owns the optimistic order and refreshes
- * explicitly once the write lands.
+ * the client reports the row's new NEIGHBORS, the api derives the
+ * destination tier from them (a drop across a tier boundary adopts that
+ * tier's priority — priority and rank land in one atomic update, and the
+ * response carries {priority} when it changed) and computes the sort rank
+ * within the tier (midpoint / end-gap, per-tier resequencing when needed).
+ * The OrderedList mirrors the tier rule (lib/reorder dropPriority) for its
+ * optimistic priority chip and the "Moved to High" toast. Deliberately no
+ * list revalidation: the OrderedList owns the optimistic order and
+ * refreshes explicitly once the write lands.
  */
 export async function reorderTask(
   taskId: string,
@@ -648,6 +654,9 @@ const apiResponseSchema = z.object({
     })
     .optional(),
   sortRank: z.number().optional(),
+  /** Reorder only: present when the drop crossed a tier boundary and the
+   *  row adopted the destination tier's priority. */
+  priority: z.number().optional(),
   error: z.string().optional(),
   message: z.string().optional(),
 });

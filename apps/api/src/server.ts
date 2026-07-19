@@ -17,16 +17,7 @@ import {
   type Job,
   jobs,
 } from '@sower/db';
-import {
-  and,
-  asc,
-  desc,
-  eq,
-  inArray,
-  isNotNull,
-  type SQL,
-  sql,
-} from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull } from 'drizzle-orm';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { registerAnswerLibraryRoutes } from './answer-library.js';
@@ -50,9 +41,8 @@ import {
 import {
   midpointRank,
   RANK_GAP,
-  rankedCaseSql,
   ranksCollide,
-  reslotIndex,
+  waitingOrderBy,
 } from './rank.js';
 import {
   claimSessionRequest,
@@ -727,8 +717,6 @@ export function buildServer(deps: Deps): FastifyInstance {
     const rows = await deps.db
       .select({
         id: applicationTasks.id,
-        state: applicationTasks.state,
-        sortRank: applicationTasks.sortRank,
         priority: applicationTasks.priority,
       })
       .from(applicationTasks)
@@ -741,7 +729,7 @@ export function buildServer(deps: Deps): FastifyInstance {
     const set: {
       notes?: string | null;
       priority?: TaskPriority;
-      sortRank?: number | null | SQL;
+      sortRank?: null;
       dueDate?: Date | null;
     } = {};
     if (body.data.notes !== undefined) {
@@ -749,69 +737,16 @@ export function buildServer(deps: Deps): FastifyInstance {
     }
     if (body.data.priority !== undefined) {
       set.priority = body.data.priority;
-      // Priority and manual rank COMPOSE (B2, option A): a hand-ranked row
-      // keeps a rank and RE-SLOTS within the ranked block — it bubbles up
-      // for a raise / down for a lower and stops at the first ranked row it
-      // doesn't outrank (equal priorities keep their relative order).
-      // Clearing the rank here was the demotion bug: with NULLS-LAST
-      // ordering a just-raised row fell BELOW every ranked row. An unranked
-      // row needs no rank handling at all — the priority sort moves it.
-      if (row.sortRank !== null && row.sortRank !== undefined) {
-        if (!WAITING_STATES.includes(row.state)) {
-          // A rank outside the section is legacy noise; clear it plainly.
-          set.sortRank = null;
-        } else {
-          // The section's OTHER ranked rows, top-down (the unranked block
-          // is irrelevant — it always sorts after every ranked row).
-          const section = await deps.db
-            .select({
-              id: applicationTasks.id,
-              sortRank: applicationTasks.sortRank,
-              priority: applicationTasks.priority,
-            })
-            .from(applicationTasks)
-            .where(inArray(applicationTasks.state, [...WAITING_STATES]))
-            .orderBy(sql`${applicationTasks.sortRank} asc nulls last`);
-          const others = section.filter(
-            (
-              r,
-            ): r is { id: string; sortRank: number; priority: TaskPriority } =>
-              r.id !== taskId && r.sortRank !== null,
-          );
-          const slot = reslotIndex(
-            others,
-            row.sortRank,
-            row.priority,
-            body.data.priority,
-          );
-          if (slot !== null) {
-            let above = others[slot - 1]?.sortRank;
-            let below = others[slot]?.sortRank;
-            if (ranksCollide(above, below)) {
-              // Too tight for a distinct midpoint: resequence the RANKED
-              // rows to RANK_GAP-spaced integers first (the unranked block
-              // keeps its pure priority/recency order), skipping the moved
-              // row — it gets the conditional write below.
-              for (const [i, other] of others.entries()) {
-                const next = (i + 1) * RANK_GAP;
-                if (next !== other.sortRank) {
-                  await deps.db
-                    .update(applicationTasks)
-                    .set({ sortRank: next })
-                    .where(eq(applicationTasks.id, other.id));
-                }
-              }
-              above = slot > 0 ? slot * RANK_GAP : undefined;
-              below = slot < others.length ? (slot + 1) * RANK_GAP : undefined;
-            }
-            // The rank update is conditional in the UPDATE itself (no
-            // read-then-write race): if a concurrent write cleared this
-            // row's rank between our read and this statement, it STAYS
-            // cleared — the debounced reorder/priority race converges
-            // instead of a stale read resurrecting a rank.
-            set.sortRank = rankedCaseSql(midpointRank(above, below));
-          }
-        }
+      // A rank is only meaningful WITHIN a priority tier (priority desc is
+      // always the section's primary sort), so an actual priority change
+      // clears the manual rank in the SAME atomic UPDATE: the row re-enters
+      // its new tier as its newest unranked — top-of-tier — item, exactly
+      // the stepper's intent, and it can never demote below the tier. A
+      // same-value write (the stepper's debounce settling where it started)
+      // leaves a hand-made rank alone. The clear also retires legacy ranks
+      // on rows that already left "Waiting on you".
+      if (body.data.priority !== row.priority) {
+        set.sortRank = null;
       }
     }
     if (body.data.dueDate !== undefined) {
@@ -833,14 +768,20 @@ export function buildServer(deps: Deps): FastifyInstance {
   });
 
   // Drag-and-drop reorder within the dashboard's "Waiting on you" section.
-  // The server owns the rank scheme: the moved task's sort_rank becomes the
-  // midpoint of its two neighbors' ranks (± RANK_GAP at the ends). Unranked
-  // neighbors get ranks lazily — when a reorder touches one (or a midpoint
-  // would collide within RANK_EPSILON), the whole section is resequenced to
-  // RANK_GAP-spaced integers in its CURRENT display order first, so the
-  // computed rank always lands exactly where the user dropped the row.
-  // 409 when the task isn't in a Waiting-on-you state — other sections have
-  // no manual order.
+  // The server owns the scheme. From the two neighbor ids it derives the
+  // DESTINATION TIER — the priority of the row the task was dropped
+  // directly below, or, at the very top of the list, of the row it now
+  // heads — and the task's sort_rank WITHIN that tier: the midpoint of its
+  // in-tier neighbors' ranks (± RANK_GAP at the tier's ends). An in-tier
+  // neighbor without a rank (a row placed by the arrival sort) gets one
+  // lazily: the destination tier — and ONLY that tier — is resequenced to
+  // RANK_GAP-spaced integers in its CURRENT display order first (the same
+  // happens when a midpoint would collide within RANK_EPSILON), so the
+  // computed rank always lands exactly where the user dropped the row. A
+  // drop that crosses a tier boundary adopts the destination tier: priority
+  // and rank land in ONE atomic UPDATE and the response reports {priority}
+  // so the client can confirm ("Moved to High"). 409 when the task isn't in
+  // a Waiting-on-you state — other sections have no manual order.
   app.post('/tasks/:id/reorder', async (request, reply) => {
     const params = taskParamsSchema.safeParse(request.params);
     if (!params.success) {
@@ -866,7 +807,10 @@ export function buildServer(deps: Deps): FastifyInstance {
         .send({ error: 'beforeTaskId/afterTaskId must be two OTHER tasks' });
     }
     const rows = await deps.db
-      .select({ state: applicationTasks.state })
+      .select({
+        state: applicationTasks.state,
+        priority: applicationTasks.priority,
+      })
       .from(applicationTasks)
       .where(eq(applicationTasks.id, taskId))
       .limit(1);
@@ -880,20 +824,19 @@ export function buildServer(deps: Deps): FastifyInstance {
       });
     }
     // The section in its CURRENT display order — exactly the ORDER BY the
-    // dashboard page uses: ranked rows first (sort_rank asc), then the
-    // unranked block by priority desc / updatedAt desc.
+    // dashboard page uses (waitingOrderBy): priority desc, then per tier
+    // the unranked block (created_at desc) ahead of the ranked block
+    // (sort_rank asc) — so the neighbor ids the client reports mean the
+    // same positions the user saw.
     const section = await deps.db
       .select({
         id: applicationTasks.id,
         sortRank: applicationTasks.sortRank,
+        priority: applicationTasks.priority,
       })
       .from(applicationTasks)
       .where(inArray(applicationTasks.state, [...WAITING_STATES]))
-      .orderBy(
-        sql`${applicationTasks.sortRank} asc nulls last`,
-        desc(applicationTasks.priority),
-        desc(applicationTasks.updatedAt),
-      );
+      .orderBy(...waitingOrderBy());
     const others = section.filter((r) => r.id !== taskId);
     const before =
       beforeTaskId !== undefined
@@ -912,19 +855,49 @@ export function buildServer(deps: Deps): FastifyInstance {
       });
     }
 
-    // Effective rank per row. A resequence is needed when a named neighbor
-    // has no rank yet (its position exists only via the priority sort) or
-    // when the neighbors' ranks are too close for a distinct midpoint.
+    // Destination tier: the tier of the neighbor the row was dropped
+    // DIRECTLY below — or, at the very top of the list, of the row it now
+    // heads. A drop between two same-tier rows stays in that tier; a drop
+    // straddling a tier boundary adopts the upper tier. The client mirrors
+    // this exact rule (lib/reorder dropPriority) for its optimistic
+    // priority and the "Moved to High" toast.
+    const anchor = before ?? after;
+    if (anchor === undefined) {
+      // Unreachable — the body schema requires a neighbor id and both were
+      // just resolved against the section — but keep the 400 over a throw.
+      return reply.code(400).send({ error: 'no neighbor to anchor the drop' });
+    }
+    const priority = anchor.priority;
+
+    // Rank math WITHIN the destination tier: ranks only order rows of the
+    // same priority, so only the tier's rows participate — a neighbor
+    // across the boundary contributed its tier above, never a rank.
+    const tierRows = others.filter((r) => r.priority === priority);
+    const beforeInTier =
+      before !== undefined && before.priority === priority ? before : undefined;
+    const afterInTier =
+      after !== undefined && after.priority === priority ? after : undefined;
+
+    // A resequence is needed when an in-tier neighbor has no rank yet (its
+    // position exists only via the arrival sort) or when the neighbors'
+    // ranks are too close for a distinct midpoint. Resequencing is PER
+    // TIER: the destination tier's rows get RANK_GAP-spaced integers in
+    // their CURRENT display order — which hand-places the tier's unranked
+    // block, so the drop lands exactly where the user put it — and other
+    // tiers' ranks are never touched.
     const needsResequence =
-      (before !== undefined && before.sortRank === null) ||
-      (after !== undefined && after.sortRank === null) ||
-      ranksCollide(before?.sortRank ?? undefined, after?.sortRank ?? undefined);
+      (beforeInTier !== undefined && beforeInTier.sortRank === null) ||
+      (afterInTier !== undefined && afterInTier.sortRank === null) ||
+      ranksCollide(
+        beforeInTier?.sortRank ?? undefined,
+        afterInTier?.sortRank ?? undefined,
+      );
     const rankOf = new Map<string, number>();
     if (needsResequence) {
-      others.forEach((r, i) => {
+      tierRows.forEach((r, i) => {
         rankOf.set(r.id, (i + 1) * RANK_GAP);
       });
-      for (const r of others) {
+      for (const r of tierRows) {
         const next = rankOf.get(r.id);
         if (next !== undefined && next !== r.sortRank) {
           await deps.db
@@ -934,20 +907,26 @@ export function buildServer(deps: Deps): FastifyInstance {
         }
       }
     } else {
-      for (const r of others) {
+      for (const r of tierRows) {
         if (r.sortRank !== null) rankOf.set(r.id, r.sortRank);
       }
     }
-    const beforeRank = before ? rankOf.get(before.id) : undefined;
-    const afterRank = after ? rankOf.get(after.id) : undefined;
+    const beforeRank = beforeInTier ? rankOf.get(beforeInTier.id) : undefined;
+    const afterRank = afterInTier ? rankOf.get(afterInTier.id) : undefined;
     const sortRank = midpointRank(beforeRank, afterRank);
-    // Like notes/priority, a reorder is an annotation: updatedAt is left
-    // alone so the unranked block's recency order never shifts under it.
+    // A cross-tier drop adopts the destination tier: priority and rank land
+    // in ONE UPDATE — there is no window where the row is ranked into a
+    // tier it isn't in. Like notes/priority, a reorder is an annotation:
+    // updatedAt is left alone (and the unranked blocks sort by created_at,
+    // which nothing can shift anyway).
+    const priorityChanged = priority !== row.priority;
     await deps.db
       .update(applicationTasks)
-      .set({ sortRank })
+      .set({ sortRank, ...(priorityChanged ? { priority } : {}) })
       .where(eq(applicationTasks.id, taskId));
-    return reply.code(200).send({ ok: true, sortRank });
+    return reply
+      .code(200)
+      .send({ ok: true, sortRank, ...(priorityChanged ? { priority } : {}) });
   });
 
   // Clear the "Waiting on you" section's manual order (the section header's

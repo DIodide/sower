@@ -5,20 +5,26 @@
 // list re-renders instantly, the rank write is debounced/coalesced to the api
 // (the midpoint math lives server-side — the client only reports the moved
 // row's new NEIGHBORS), and a failure reverts to the last server-confirmed
-// order with a toast. Every keyboard move is announced through an SR live
-// region ("Moved above <label>"). Server refreshes reset the order to the
-// server truth via the derive-state-from-changed-props pattern — EXCEPT
-// while a move is still unflushed or in flight (H3): resetting then would
-// yank the row back mid-drag and make the eventual write's neighbors lie;
-// the flush's own refresh re-delivers fresh rows once the write lands.
+// order with a toast. A move that crosses a priority-tier boundary adopts
+// the destination tier: the client derives it from the same neighbor rule
+// the api uses (lib/reorder dropPriority), updates the row's priority chip
+// optimistically, and toasts "Moved to High"; keyboard moves additionally
+// carry the tier in the SR announcement ("Moved above <label> — now High").
+// Server refreshes reset the order to the server truth via the
+// derive-state-from-changed-props pattern — EXCEPT while a move is still
+// unflushed or in flight (H3): resetting then would yank the row back
+// mid-drag and make the eventual write's neighbors lie; the flush's own
+// refresh re-delivers fresh rows once the write lands.
 //
 // When any row is hand-ranked, a one-line hint under the section heading
 // explains the hybrid order and offers "clear manual order" (H6) — one api
-// call nulls the section's ranks and the pure priority/recency sort returns.
+// call nulls the section's ranks and the pure priority/arrival sort returns.
 
+import { TASK_PRIORITY_LABELS, type TaskPriority } from '@sower/core';
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import {
+  dropPriority,
   moveToIndex,
   neighborIds,
   type ReorderNeighbors,
@@ -155,6 +161,36 @@ export function OrderedList({ rows }: { rows: TaskRowData[] }) {
     orderRef.current = next;
   };
 
+  /**
+   * Apply a finished move: when the row landed across a tier boundary it
+   * ADOPTS the destination tier (dropPriority — the exact neighbor rule the
+   * api derives server-side from the same ids), so the optimistic state
+   * updates its priority chip and a toast confirms "Moved to High". The row
+   * is also marked hand-ranked — that is what the write makes it. Returns
+   * the adopted tier, or null when the move stayed within one tier.
+   */
+  const settle = (
+    next: readonly TaskRowData[],
+    moved: TaskRowData,
+  ): TaskPriority | null => {
+    const index = next.findIndex((row) => row.id === moved.id);
+    const above = next[index - 1];
+    const below = next[index + 1];
+    const tier = dropPriority(above?.priority, below?.priority);
+    const adopted = tier !== undefined && tier !== moved.priority;
+    applyOrder(
+      adopted || !moved.ranked
+        ? next.map((row) =>
+            row.id === moved.id
+              ? { ...row, priority: tier ?? moved.priority, ranked: true }
+              : row,
+          )
+        : next,
+    );
+    if (adopted) ws.toast(`Moved to ${TASK_PRIORITY_LABELS[tier]}`);
+    return adopted ? tier : null;
+  };
+
   /** Keyboard: move the row at `index` one position up (-1) or down (1). */
   const moveBy = (index: number, direction: -1 | 1) => {
     const current = orderRef.current;
@@ -168,11 +204,13 @@ export function OrderedList({ rows }: { rows: TaskRowData[] }) {
       direction === -1 ? target : target + 1,
     );
     if (next === current) return;
-    applyOrder(next);
-    setAnnounce(
+    const tier = settle(next, moved);
+    const where =
       direction === -1
         ? `Moved above ${swapped.label}`
-        : `Moved below ${swapped.label}`,
+        : `Moved below ${swapped.label}`;
+    setAnnounce(
+      tier !== null ? `${where} — now ${TASK_PRIORITY_LABELS[tier]}` : where,
     );
     scheduleWrite(moved.id);
   };
@@ -215,9 +253,10 @@ export function OrderedList({ rows }: { rows: TaskRowData[] }) {
     if (from === -1) return;
     const next = moveToIndex(current, from, slot);
     if (next === current) return; // dropped where it already was
-    applyOrder(next);
     const moved = current[from];
-    if (moved) scheduleWrite(moved.id);
+    if (!moved) return;
+    settle(next, moved);
+    scheduleWrite(moved.id);
   };
 
   const onDragEnd = () => {
@@ -235,10 +274,11 @@ export function OrderedList({ rows }: { rows: TaskRowData[] }) {
     return null;
   };
 
-  // H6: return the whole section to the pure priority/recency sort. A
+  // H6: return the whole section to the pure priority/arrival sort. A
   // pending drag write is deliberately DROPPED — the user just asked for no
-  // manual order at all — and the server's conditional writes keep any
-  // still-in-flight one from resurrecting a cleared rank.
+  // manual order at all. A reorder write already on the wire may re-rank its
+  // one row (the api's documented clear/reorder race); the refresh below —
+  // and the seq bump — keep this client from ever showing a stale order.
   const clearOrder = () => {
     if (timerRef.current) {
       clearTimeout(timerRef.current);
@@ -281,7 +321,7 @@ export function OrderedList({ rows }: { rows: TaskRowData[] }) {
             className="order-clear"
             disabled={clearing}
             onClick={clearOrder}
-            title="Remove the hand-made order — every row sorts by priority and recency again"
+            title="Remove the hand-made order — every row sorts by priority and arrival again"
           >
             {clearing ? 'clearing…' : 'clear manual order'}
           </button>

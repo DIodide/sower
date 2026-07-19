@@ -35,6 +35,7 @@ import {
   stateMeta,
   type Tone,
 } from '../lib/format';
+import { compareWaiting } from '../lib/reorder';
 import { Empty, SectionHeading } from '../lib/ui';
 import { OrderedList } from './ordered-list';
 import { QuickAddBar } from './quick-add-bar';
@@ -224,6 +225,7 @@ export default async function Page({
     priority: applicationTasks.priority,
     notes: applicationTasks.notes,
     sortRank: applicationTasks.sortRank,
+    createdAt: applicationTasks.createdAt,
     updatedAt: applicationTasks.updatedAt,
     jobSpec: applicationTasks.jobSpec,
     dueDate: applicationTasks.dueDate,
@@ -236,9 +238,11 @@ export default async function Page({
 
   // Two row queries: the action bucket ("Waiting on you") is NEVER capped —
   // work waiting on the user must all be visible — while everything else
-  // shares the LIST_CAP. Waiting-on-you additionally honors the manual
-  // drag order: ranked rows first (sort_rank asc), then the unranked block
-  // by the usual priority/recency sort. Other sections never rank.
+  // shares the LIST_CAP. Waiting-on-you sorts priority desc FIRST (a Low
+  // row can never render above a Normal row), then within each tier the
+  // unranked block (new/untriaged, newest arrival first — a fresh ingest
+  // surfaces at the TOP of its tier) ahead of the hand-ranked block
+  // (sort_rank asc). Other sections never rank.
   const [platformRows, stateCounts, waitingRows, otherRows] = await Promise.all(
     [
       db
@@ -262,9 +266,19 @@ export default async function Page({
           ),
         )
         .orderBy(
-          sql`${applicationTasks.sortRank} asc nulls last`,
-          desc(applicationTasks.priority),
-          desc(applicationTasks.updatedAt),
+          // MUST mirror the api's waitingOrderBy (apps/api/src/rank.ts) and
+          // the client comparator (lib/reorder compareWaiting) — the three
+          // agree or drops land somewhere the user didn't choose.
+          sql`${applicationTasks.priority} desc`,
+          // Unranked first within the tier (the case key splits the groups,
+          // so the two keys below each only ever order one group)…
+          sql`case when ${applicationTasks.sortRank} is null then 0 else 1 end`,
+          // …ranked rows by the user's order…
+          sql`${applicationTasks.sortRank} asc`,
+          // …unranked rows by arrival, newest first. created_at is
+          // immutable — background processing can never shuffle the block.
+          // `nulls last`: plain desc would sort a null created_at FIRST.
+          sql`${applicationTasks.createdAt} desc nulls last`,
         ),
       db
         .select(taskSelection)
@@ -458,6 +472,7 @@ export default async function Page({
       // Hand-ranked "Waiting on you" rows keep a faintly-visible grip and
       // light the section's "Your order" hint.
       ranked: row.sortRank !== null,
+      createdAtMs: row.createdAt?.getTime() ?? 0,
       canInvestigate,
       canUnmark:
         row.state === 'SUBMITTED' &&
@@ -484,7 +499,17 @@ export default async function Page({
   };
 
   const waiting = inStates(WAITING_STATES);
-  const processing = inStates(PROCESSING_STATES);
+  // "New & processing" is about ARRIVALS: newest ingest first within each
+  // priority tier (created_at — the fetch's updatedAt order would shuffle
+  // rows every time the worker touched one). The shared comparator with the
+  // ranks masked off is exactly priority desc / arrival desc; ranks stay a
+  // Waiting-on-you concept.
+  const processing = inStates(PROCESSING_STATES).sort((a, b) =>
+    compareWaiting(
+      { priority: a.priority, sortRank: null, createdAtMs: a.createdAtMs },
+      { priority: b.priority, sortRank: null, createdAtMs: b.createdAtMs },
+    ),
+  );
   const sent = inStates(SENT_STATES);
   const placed = new Set([...waiting, ...processing, ...sent].map((r) => r.id));
   // Archive is the catch-all: FAILED / DUPLICATE / DISCARDED plus any

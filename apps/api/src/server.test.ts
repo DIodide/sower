@@ -6,11 +6,9 @@ import {
   jobDescriptions,
   jobs,
 } from '@sower/db';
-import { SQL } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
 import { ingestJob } from './ingest.js';
-import { rankedCaseSql } from './rank.js';
 import { buildServer } from './server.js';
 import type { Deps } from './types.js';
 
@@ -2771,27 +2769,12 @@ describe('buildServer', () => {
     }
 
     /** Fake db whose first select finds the task; writes are recorded.
-     *  `sortRank` mimics the task's current manual "Waiting on you" rank
-     *  (null = unranked, the common case); `section` is the second select a
-     *  ranked priority-change performs (the section rows, rank order);
-     *  `state`/`priority` complete the task row. */
-    function metaDb(
-      writes: DbWrite[],
-      sortRank: number | null = null,
-      options: {
-        state?: string;
-        priority?: number;
-        section?: { id: string; sortRank: number | null; priority: number }[];
-      } = {},
-    ) {
-      const row = {
-        id: TASK_ID,
-        state: options.state ?? 'NEEDS_INPUT',
-        sortRank,
-        priority: options.priority ?? 0,
-      };
+     *  `priority` is the row's CURRENT priority — the handler compares it
+     *  against the body to decide whether a priority write is an actual
+     *  change (which clears the manual rank) or a same-value settle. */
+    function metaDb(writes: DbWrite[], priority = 0) {
       return createFakeDb({
-        selectResults: options.section ? [[row], options.section] : [[row]],
+        selectResults: [[{ id: TASK_ID, priority }]],
         writes,
       });
     }
@@ -2881,183 +2864,63 @@ describe('buildServer', () => {
       expect(set.priority).toBe(2);
     });
 
-    // B2 (option A): priority and manual rank COMPOSE — a ranked row
-    // re-slots WITHIN the ranked block instead of losing its rank.
-    const RANKED_A = 'a1b2c3d4-e5f6-4788-99aa-bbccddeeff00';
-    const RANKED_B = '00112233-4455-4677-8899-aabbccddeeff';
-
-    it('THE DEMOTION CASE: raising a ranked row re-slots it ABOVE the rows it now outranks (never to the bottom)', async () => {
-      const writes: DbWrite[] = [];
-      // The moved row is ranked LAST (3072) behind two normal-priority rows.
-      const { deps } = createDeps(
-        metaDb(writes, 3072, {
-          section: [
-            { id: RANKED_A, sortRank: 1024, priority: 0 },
-            { id: RANKED_B, sortRank: 2048, priority: 0 },
-            { id: TASK_ID, sortRank: 3072, priority: 0 },
-          ],
-        }),
-      );
-      const app = buildServer(deps);
-
-      const res = await inject(app, { priority: 2 });
-
-      expect(res.statusCode).toBe(200);
-      const updates = writes.filter((w) => w.method === 'update');
-      expect(updates).toHaveLength(1);
-      // Rank 0 = one RANK_GAP above the section's top row: the raise moved
-      // the row UP. The write is the IS-NULL-guarded conditional (see
-      // rank.test.ts), never a plain clear.
-      expect(updates[0]?.arg).toEqual({
-        priority: 2,
-        sortRank: rankedCaseSql(0),
-      });
-    });
-
-    it('lowering a ranked row re-slots it DOWN below the rows that now outrank it', async () => {
-      const writes: DbWrite[] = [];
-      // The moved row is ranked FIRST (512) at priority Highest.
-      const { deps } = createDeps(
-        metaDb(writes, 512, {
-          priority: 2,
-          section: [
-            { id: TASK_ID, sortRank: 512, priority: 2 },
-            { id: RANKED_A, sortRank: 2048, priority: 1 },
-            { id: RANKED_B, sortRank: 3072, priority: 0 },
-          ],
-        }),
-      );
-      const app = buildServer(deps);
-
-      const res = await inject(app, { priority: 0 });
-
-      expect(res.statusCode).toBe(200);
-      const updates = writes.filter((w) => w.method === 'update');
-      expect(updates).toHaveLength(1);
-      // Midpoint of A(2048) and B(3072): below the High row, above the
-      // equal-priority Normal row (relative order kept among equals).
-      expect(updates[0]?.arg).toEqual({
-        priority: 0,
-        sortRank: rankedCaseSql(2560),
-      });
-    });
-
-    it('the re-slot write is SQL-conditional, so a rank cleared concurrently stays cleared (the debounce race converges)', async () => {
-      const writes: DbWrite[] = [];
-      const { deps } = createDeps(
-        metaDb(writes, 3072, {
-          section: [
-            { id: RANKED_A, sortRank: 1024, priority: 0 },
-            { id: TASK_ID, sortRank: 3072, priority: 0 },
-          ],
-        }),
-      );
-      const app = buildServer(deps);
-
-      const res = await inject(app, { priority: 2 });
-
-      expect(res.statusCode).toBe(200);
-      const set = writes.find((w) => w.method === 'update')?.arg as Record<
-        string,
-        unknown
-      >;
-      // Not a number, not null: the drizzle SQL CASE guard — the ranked/
-      // unranked decision executes inside the UPDATE, so a concurrent
-      // "clear manual order" (or racing debounced write) that nulled the
-      // rank between our read and this write wins. rank.test.ts pins the
-      // exact 'case when … is null then null else …' text.
-      expect(set.sortRank).toBeInstanceOf(SQL);
-      expect(set.sortRank).toEqual(rankedCaseSql(0));
-    });
-
-    it('a priority change that needs no move keeps the rank untouched (no sortRank write)', async () => {
-      const writes: DbWrite[] = [];
-      // A Highest row already sits directly above; a raise to High stops.
-      const { deps } = createDeps(
-        metaDb(writes, 2048, {
-          section: [
-            { id: RANKED_A, sortRank: 1024, priority: 2 },
-            { id: TASK_ID, sortRank: 2048, priority: 0 },
-          ],
-        }),
-      );
-      const app = buildServer(deps);
-
-      const res = await inject(app, { priority: 1 });
-
-      expect(res.statusCode).toBe(200);
-      const set = writes.find((w) => w.method === 'update')?.arg as Record<
-        string,
-        unknown
-      >;
-      expect(set.priority).toBe(1);
-      expect('sortRank' in set).toBe(false);
-    });
-
-    it('resequences too-close ranked neighbors before re-slotting between them', async () => {
-      const writes: DbWrite[] = [];
-      const { deps } = createDeps(
-        metaDb(writes, 2000, {
-          section: [
-            { id: RANKED_A, sortRank: 1000, priority: 2 },
-            { id: RANKED_B, sortRank: 1000 + 1e-9, priority: 0 },
-            { id: TASK_ID, sortRank: 2000, priority: 0 },
-          ],
-        }),
-      );
-      const app = buildServer(deps);
-
-      // Raise to High: past B (Normal), stops below A (Highest) — but the
-      // A/B gap is too tight for a midpoint.
-      const res = await inject(app, { priority: 1 });
-
-      expect(res.statusCode).toBe(200);
-      const updates = writes
-        .filter((w) => w.method === 'update' && w.table === applicationTasks)
-        .map((w) => w.arg);
-      // Ranked rows resequenced to 1024/2048 (the moved row skipped), then
-      // the conditional midpoint write.
-      expect(updates).toEqual([
-        { sortRank: 1024 },
-        { sortRank: 2048 },
-        { priority: 1, sortRank: rankedCaseSql(1536) },
-      ]);
-    });
-
-    it('a ranked row OUTSIDE "Waiting on you" has its legacy rank cleared plainly', async () => {
-      const writes: DbWrite[] = [];
-      const { deps } = createDeps(metaDb(writes, 2048, { state: 'FAILED' }));
-      const app = buildServer(deps);
-
-      const res = await inject(app, { priority: 1 });
-
-      expect(res.statusCode).toBe(200);
-      const updates = writes.filter((w) => w.method === 'update');
-      expect(updates).toHaveLength(1);
-      expect(updates[0]?.arg).toEqual({ priority: 1, sortRank: null });
-    });
-
-    it('a notes-only update leaves an existing sort rank alone', async () => {
-      const writes: DbWrite[] = [];
-      const { deps } = createDeps(metaDb(writes, 2048));
-      const app = buildServer(deps);
-
-      const res = await inject(app, { notes: 'still hand-ordered' });
-
-      expect(res.statusCode).toBe(200);
-      const set = writes.find((w) => w.method === 'update')?.arg as Record<
-        string,
-        unknown
-      >;
-      expect('sortRank' in set).toBe(false);
-    });
-
-    it('setting a priority on an unranked task writes no sortRank key', async () => {
+    // Rank is only meaningful WITHIN a priority tier: an explicit priority
+    // change clears the manual rank — the row re-enters its new tier as its
+    // newest unranked (top-of-tier) item, and can never demote below it.
+    it('STEPPER PRIORITY CHANGE CLEARS THE RANK: priority and the null rank land in ONE atomic update', async () => {
       const writes: DbWrite[] = [];
       const { deps } = createDeps(metaDb(writes));
       const app = buildServer(deps);
 
+      const res = await inject(app, { priority: 2 });
+
+      expect(res.statusCode).toBe(200);
+      const updates = writes.filter((w) => w.method === 'update');
+      expect(updates).toHaveLength(1);
+      // One UPDATE carries both: no window where the row keeps a rank into
+      // a tier it just left (and no read of the old rank to race with a
+      // concurrent reorder — null simply wins).
+      expect(updates[0]?.arg).toEqual({ priority: 2, sortRank: null });
+    });
+
+    it('a same-value priority write (the stepper settling where it started) leaves the rank alone', async () => {
+      const writes: DbWrite[] = [];
+      // Row already at High; the debounced absolute write repeats it.
+      const { deps } = createDeps(metaDb(writes, 1));
+      const app = buildServer(deps);
+
+      const res = await inject(app, { priority: 1 });
+
+      expect(res.statusCode).toBe(200);
+      const set = writes.find((w) => w.method === 'update')?.arg as Record<
+        string,
+        unknown
+      >;
+      // An up-then-down toggle nets to no change — it must not destroy a
+      // hand-made rank as a side effect.
+      expect(set.priority).toBe(1);
+      expect('sortRank' in set).toBe(false);
+    });
+
+    it('lowering priority clears the rank too (the row heads its NEW tier, never sinks below it)', async () => {
+      const writes: DbWrite[] = [];
+      const { deps } = createDeps(metaDb(writes, 2));
+      const app = buildServer(deps);
+
       const res = await inject(app, { priority: -1 });
+
+      expect(res.statusCode).toBe(200);
+      const updates = writes.filter((w) => w.method === 'update');
+      expect(updates).toHaveLength(1);
+      expect(updates[0]?.arg).toEqual({ priority: -1, sortRank: null });
+    });
+
+    it('a notes-only update leaves an existing sort rank alone', async () => {
+      const writes: DbWrite[] = [];
+      const { deps } = createDeps(metaDb(writes));
+      const app = buildServer(deps);
+
+      const res = await inject(app, { notes: 'still hand-ordered' });
 
       expect(res.statusCode).toBe(200);
       const set = writes.find((w) => w.method === 'update')?.arg as Record<
@@ -3200,15 +3063,25 @@ describe('buildServer', () => {
       });
     }
 
-    /** Fake db: first select = the task's state, second = the section in its
-     *  current display order (ranked first, then unranked). */
+    /** Fake db: first select = the task row (state + current priority),
+     *  second = the section in its current display order (priority desc;
+     *  within a tier unranked-by-arrival first, then ranked). Section rows
+     *  default to priority 0 — the single-tier case. */
     function reorderDb(
       writes: DbWrite[],
-      section: { id: string; sortRank: number | null }[],
-      state = 'NEEDS_INPUT',
+      section: { id: string; sortRank: number | null; priority?: number }[],
+      options: { state?: string; priority?: number } = {},
     ) {
       return createFakeDb({
-        selectResults: [[{ state }], section],
+        selectResults: [
+          [
+            {
+              state: options.state ?? 'NEEDS_INPUT',
+              priority: options.priority ?? 0,
+            },
+          ],
+          section.map((r) => ({ priority: 0, ...r })),
+        ],
         writes,
       });
     }
@@ -3233,9 +3106,13 @@ describe('buildServer', () => {
       const res = await inject(app, { beforeTaskId: ID_A, afterTaskId: ID_B });
 
       expect(res.statusCode).toBe(200);
+      // No {priority} in the response: a within-tier drop never changes it.
       expect(res.json()).toEqual({ ok: true, sortRank: 1536 });
-      // Exactly one write: the moved task; the ranked neighbors are reused.
-      expect(rankWrites(writes)).toEqual([1536]);
+      // Exactly one write: the moved task; the ranked neighbors are reused —
+      // and the write carries no priority key (nothing to adopt).
+      const updates = writes.filter((w) => w.method === 'update');
+      expect(updates).toHaveLength(1);
+      expect(updates[0]?.arg).toEqual({ sortRank: 1536 });
     });
 
     it('drops at the bottom end: beforeTaskId only, rank + 1024', async () => {
@@ -3271,14 +3148,18 @@ describe('buildServer', () => {
       expect(rankWrites(writes)).toEqual([0]);
     });
 
-    it('assigns ranks lazily when a neighbor is unranked: the section is resequenced first', async () => {
+    it('assigns ranks lazily when a neighbor is unranked: the tier is resequenced first', async () => {
       const writes: DbWrite[] = [];
-      // A is ranked; B and C exist only via the priority sort (unranked).
+      // B and C exist only via the arrival sort (unranked, so they display
+      // FIRST in the tier); A is ranked below them. All one tier: the whole
+      // tier gets RANK_GAP-spaced integers in its current display order —
+      // which hand-places the unranked block, so the drop lands exactly
+      // where the user put it.
       const db = reorderDb(writes, [
-        { id: ID_A, sortRank: 1024 },
         { id: ID_B, sortRank: null },
         { id: ID_C, sortRank: null },
         { id: TASK_ID, sortRank: null },
+        { id: ID_A, sortRank: 1024 },
       ]);
       const { deps } = createDeps(db);
       const app = buildServer(deps);
@@ -3287,10 +3168,10 @@ describe('buildServer', () => {
       const res = await inject(app, { beforeTaskId: ID_B, afterTaskId: ID_C });
 
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ ok: true, sortRank: 2560 });
+      expect(res.json()).toEqual({ ok: true, sortRank: 1536 });
       // Resequence writes 1024-spaced integers in the current visual order
-      // (A already holds 1024, so it is NOT rewritten), then the midpoint.
-      expect(rankWrites(writes)).toEqual([2048, 3072, 2560]);
+      // (B 1024, C 2048, A 3072 — every value changed), then the midpoint.
+      expect(rankWrites(writes)).toEqual([1024, 2048, 3072, 1536]);
     });
 
     it('resequences when the neighbors are too close for a distinct midpoint', async () => {
@@ -3310,10 +3191,90 @@ describe('buildServer', () => {
       expect(rankWrites(writes)).toEqual([1024, 2048, 1536]);
     });
 
+    it('CROSS-TIER DROP at a boundary: adopts the tier of the row it was dropped directly below — priority + rank in ONE atomic update, {priority} in the response', async () => {
+      const writes: DbWrite[] = [];
+      // Display: A (High, ranked, last row of its tier) then B (Normal,
+      // unranked). The Normal task is dropped into the boundary gap.
+      const db = reorderDb(writes, [
+        { id: ID_A, sortRank: 1024, priority: 1 },
+        { id: ID_B, sortRank: null, priority: 0 },
+        { id: TASK_ID, sortRank: null, priority: 0 },
+      ]);
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, { beforeTaskId: ID_A, afterTaskId: ID_B });
+
+      expect(res.statusCode).toBe(200);
+      // The row was dropped directly below A → it joins A's tier (High) at
+      // the tier's bottom (A.rank + RANK_GAP). B, across the boundary,
+      // contributes no rank — and its unranked-ness triggers NO resequence.
+      expect(res.json()).toEqual({ ok: true, sortRank: 2048, priority: 1 });
+      const updates = writes.filter((w) => w.method === 'update');
+      expect(updates).toHaveLength(1);
+      // ONE UPDATE carries both keys: no window where the row is ranked
+      // into a tier it isn't in.
+      expect(updates[0]?.arg).toEqual({ sortRank: 2048, priority: 1 });
+    });
+
+    it('a drop at the very top of the list adopts the tier it now heads (ranking that tier lazily)', async () => {
+      const writes: DbWrite[] = [];
+      // Display: A (Highest, unranked) then B (Highest, ranked); the moved
+      // task is Normal, further down.
+      const db = reorderDb(writes, [
+        { id: ID_A, sortRank: null, priority: 2 },
+        { id: ID_B, sortRank: 512, priority: 2 },
+        { id: TASK_ID, sortRank: null, priority: 0 },
+      ]);
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, { afterTaskId: ID_A });
+
+      expect(res.statusCode).toBe(200);
+      // No row above → the tier of the row it was dropped above (Highest).
+      // A is unranked, so the destination tier resequences (A 1024, B 2048)
+      // and the moved row lands one gap above A: rank 0.
+      expect(res.json()).toEqual({ ok: true, sortRank: 0, priority: 2 });
+      const updates = writes
+        .filter((w) => w.method === 'update')
+        .map((w) => w.arg);
+      expect(updates).toEqual([
+        { sortRank: 1024 },
+        { sortRank: 2048 },
+        { sortRank: 0, priority: 2 },
+      ]);
+    });
+
+    it('resequencing is PER TIER: a lazy re-rank in the drop tier never touches another tier', async () => {
+      const writes: DbWrite[] = [];
+      // C is a ranked Highest row; A and B are unranked Normal rows. The
+      // Normal task drops between A and B — only the Normal tier (A, B)
+      // resequences; C keeps its 512 untouched.
+      const db = reorderDb(writes, [
+        { id: ID_C, sortRank: 512, priority: 2 },
+        { id: ID_A, sortRank: null, priority: 0 },
+        { id: ID_B, sortRank: null, priority: 0 },
+        { id: TASK_ID, sortRank: null, priority: 0 },
+      ]);
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await inject(app, { beforeTaskId: ID_A, afterTaskId: ID_B });
+
+      expect(res.statusCode).toBe(200);
+      // Within-tier drop: no {priority} in the response or the write.
+      expect(res.json()).toEqual({ ok: true, sortRank: 1536 });
+      // Exactly three writes — A 1024, B 2048, midpoint — and none for C
+      // (512 is not a RANK_GAP multiple, so a section-wide resequence would
+      // have rewritten it).
+      expect(rankWrites(writes)).toEqual([1024, 2048, 1536]);
+    });
+
     it('responds 409 for a task outside "Waiting on you" (no manual order there)', async () => {
       for (const state of ['QUEUED', 'SUBMITTED', 'DISCARDED', 'FAILED']) {
         const writes: DbWrite[] = [];
-        const db = reorderDb(writes, [], state);
+        const db = reorderDb(writes, [], { state });
         const { deps } = createDeps(db);
         const app = buildServer(deps);
 

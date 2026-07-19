@@ -69,6 +69,9 @@ export interface TaskRowData {
   /** This row holds a manual "Waiting on you" drag rank — its grip stays
    *  faintly visible as the cue that a hand-made order exists. */
   ranked: boolean;
+  /** Arrival time (created_at, epoch ms) — the sort key the unranked block
+   *  and "New & processing" order by (see lib/reorder compareWaiting). */
+  createdAtMs: number;
   /** Unsupported row with no agent currently running — offer Investigate. */
   canInvestigate: boolean;
   /** SUBMITTED via an out-of-band "Mark applied" (not a real sower submit) —
