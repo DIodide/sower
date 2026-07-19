@@ -71,6 +71,17 @@ const envSchema = z
     /** Channel the Discord ingest poll reads job links from (opt-in). */
     DISCORD_INGEST_CHANNEL_ID: z.string().optional(),
     /**
+     * Channel deadline alerts post to (#alerts). Like the ingest channel,
+     * unset keeps the feature fully dormant: POST /alerts/deadlines is a
+     * no-op until infra wires the id.
+     */
+    DISCORD_ALERTS_CHANNEL_ID: z.string().optional(),
+    /**
+     * Discord user id to <@id>-mention on deadline alerts (the human being
+     * pinged). Optional — when unset the alert posts without a mention.
+     */
+    DISCORD_ALERT_MENTION_USER_ID: z.string().optional(),
+    /**
      * Public base URL of the sower-dashboard Cloud Run service (e.g.
      * https://sower-dashboard-....run.app). Used to render task links in
      * Discord ingest replies; when unset the replies degrade gracefully to

@@ -50,11 +50,29 @@ import {
   type TranscriptStep,
   truncateOutput,
 } from './agent-runner.js';
+import { extractListingLinks, LISTING_LINKS_MIN } from './listing-links.js';
 import {
+  type AnchorCandidate,
+  collectAnchors,
   scoreApplyControlText,
   serializeToMarkdown,
 } from './page-functions.js';
 import { assertSafeFetchTarget, isSafeRequestTarget } from './ssrf.js';
+
+/**
+ * Structured classification of what the investigated page IS. The
+ * interpretation agent sets it via the JSON contract; programmatic signals
+ * override it — an HTTP-blocked navigation forces 'blocked', and a
+ * qualifying listing-link extraction forces 'listing' (the links are hard
+ * evidence, the agent's word is not).
+ */
+export type PageKind =
+  | 'application'
+  | 'posting'
+  | 'listing'
+  | 'login'
+  | 'blocked'
+  | 'other';
 
 export interface DiscoveredForm {
   formFound: boolean;
@@ -82,6 +100,16 @@ export interface DiscoveredForm {
    * URL wins over an iframe src when both qualify.
    */
   handoffUrl?: string;
+  /** What the page IS (application/posting/listing/login/blocked/other). */
+  pageKind?: PageKind;
+  /**
+   * Candidate individual-job links extracted from the RENDERED DOM when the
+   * page turned out to be a jobs LISTING rather than a single posting (the
+   * JS-rendered SPA case raw-HTML directory expansion cannot see). Present
+   * only on formFound:false results with at least LISTING_LINKS_MIN (3)
+   * qualifying links; capped at 50. See listing-links.ts for the filter.
+   */
+  listingLinks?: string[];
   questions: Question[];
   confidence: 'high' | 'medium' | 'low';
   /** Incl. "form is JS-rendered/behind login/blocked by site" when relevant. */
@@ -144,6 +172,8 @@ const APPLY_SELECTOR = '[data-sower-apply="1"]';
 /** details → interstitial → form: at most two Apply-style click hops. */
 const MAX_APPLY_HOPS = 2;
 const MAX_IFRAME_SCANS = 8;
+/** Raw anchors collected from the rendered DOM before Node-side filtering. */
+const MAX_ANCHOR_CANDIDATES = 300;
 const DEFAULT_INTERPRET_MAX_TURNS = 6;
 const MAX_EXTRACTION_JSON_CHARS = 24_000;
 const MAX_DESCRIPTION_MARKDOWN_CHARS = 20_000;
@@ -581,8 +611,25 @@ function metadataExpression(): string {
   return `/* sower:metadata */((__name) => (${extractJobMetadata.toString()})((${serializeToMarkdown.toString()}), ${MAX_DESCRIPTION_MARKDOWN_CHARS}))((t) => t)`;
 }
 
+function anchorsExpression(): string {
+  return `/* sower:anchors */((__name) => (${collectAnchors.toString()})(document.body || document.documentElement, ${MAX_ANCHOR_CANDIDATES}))((t) => t)`;
+}
+
 async function runExtraction(target: Page | Frame): Promise<RawExtraction> {
   return (await target.evaluate(extractionExpression())) as RawExtraction;
+}
+
+/** Anchors from the rendered DOM; tolerant of a malformed evaluate result. */
+async function runAnchorCollection(page: Page): Promise<AnchorCandidate[]> {
+  const value = (await page.evaluate(anchorsExpression())) as unknown;
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (item): item is AnchorCandidate =>
+      item !== null &&
+      typeof item === 'object' &&
+      typeof (item as AnchorCandidate).href === 'string' &&
+      typeof (item as AnchorCandidate).text === 'string',
+  );
 }
 
 async function runMetadataExtraction(
@@ -891,8 +938,15 @@ type RenderResult =
       iframeNotes: string[];
       /** Cleaned supported-ATS posting URL (final page or iframe src). */
       handoffUrl?: string;
+      /** Candidate job links from the rendered DOM (no-form pages only). */
+      listingLinks: string[];
     }
-  | { ok: false; notes: string };
+  | {
+      ok: false;
+      notes: string;
+      /** The site HTTP-blocked the navigation (pageKind 'blocked'). */
+      blocked?: boolean;
+    };
 
 /**
  * Phase 1 — render + extract (programmatic Playwright, no agent). Navigates
@@ -950,6 +1004,7 @@ async function renderAndExtract(
           nav.kind === 'blocked'
             ? blockedNotes(nav.status)
             : `could not load page: ${nav.message}`,
+        blocked: nav.kind === 'blocked',
       };
     }
     let page = nav.page;
@@ -1156,6 +1211,36 @@ async function renderAndExtract(
       }
     }
 
+    // Listing-link extraction: a page that STILL shows no form may be a jobs
+    // LISTING (a JS-rendered SPA search page — the raw-HTML directory
+    // expansion at ingest sees no anchors on those, but the rendered DOM has
+    // them). Collect anchors and keep the ones that look like individual job
+    // postings; the caller decides whether enough of them make this a
+    // listing. Failure is non-fatal — the no-form outcome stands either way.
+    let listingLinks: string[] = [];
+    if (!best.looksLikeApplicationForm) {
+      step({
+        kind: 'tool_use',
+        tool: 'browser.extract',
+        input: { url: page.url(), target: 'listing-links' },
+      });
+      try {
+        const anchors = await runAnchorCollection(page);
+        listingLinks = extractListingLinks(anchors, page.url());
+        step({
+          kind: 'tool_result',
+          tool: 'browser.extract',
+          output: `${listingLinks.length} candidate job link${listingLinks.length === 1 ? '' : 's'} among ${anchors.length} rendered anchors`,
+        });
+      } catch (error) {
+        step({
+          kind: 'tool_result',
+          tool: 'browser.extract',
+          output: `listing-link extraction failed: ${errorMessage(error)}`,
+        });
+      }
+    }
+
     if (handoffUrl !== undefined) {
       step({
         kind: 'system',
@@ -1179,6 +1264,7 @@ async function renderAndExtract(
       metadata,
       iframeNotes,
       handoffUrl,
+      listingLinks,
     };
   } catch (error) {
     // Browser-phase runtime failure (page crash, evaluate on a closed page,
@@ -1217,6 +1303,11 @@ const questionListSchema = z
 
 const interpretedFormSchema = z.object({
   formFound: z.boolean(),
+  // Tolerant: an agent that omits or malforms pageKind still parses.
+  pageKind: z
+    .enum(['application', 'posting', 'listing', 'login', 'blocked', 'other'])
+    .nullish()
+    .catch(undefined),
   company: z.string().nullish(),
   title: z.string().nullish(),
   questions: questionListSchema,
@@ -1256,9 +1347,10 @@ function buildInterpretationPrompt(
     '- options: keep the extracted options as {label, value} (raw value when present, else the label). Drop placeholder options like "Select…".',
     '- company and title: infer the employer and the role title from pageTitle / headingText / the job description excerpt / the page text.',
     '- formFound: true only when the controls form a plausible job application form. If the fields are only login/search/newsletter or there are none, set formFound false with questions [] and explain in notes (e.g. "behind login", "captcha", "no form rendered").',
+    '- pageKind: classify what the page IS — "application" (a job application form), "posting" (a single job posting without a reachable form), "listing" (a job listing/search/directory page, not an individual job), "login" (a sign-in wall), "other" (none of these).',
     '- confidence: "high" when labels and types were clear, "medium" if some mappings were guesses, "low" otherwise.',
     '',
-    'When done, output ONLY a fenced ```json code block matching: {formFound, company, title, questions, confidence, notes}.',
+    'When done, output ONLY a fenced ```json code block matching: {formFound, pageKind, company, title, questions, confidence, notes}.',
   ];
   if (hint) lines.push('', `Caller hint: ${hint}`);
   lines.push('', '--- RAW EXTRACTION (JSON) ---', rawJson);
@@ -1397,10 +1489,27 @@ async function interpretExtraction(args: {
     descriptionMarkdown,
     deadline,
     handoffUrl: args.handoffUrl,
+    pageKind: parsed.pageKind ?? undefined,
     questions,
     confidence: parsed.confidence,
     notes: appendProgrammaticNotes(parsed.notes, args),
   };
+}
+
+/**
+ * Programmatic 'listing' override on a no-form result: ≥LISTING_LINKS_MIN
+ * links extracted from the rendered DOM are hard evidence the page is a
+ * jobs listing — they beat the agent's own pageKind. Below the threshold
+ * the result is returned unchanged (2 links do not make a listing).
+ */
+function withListing(
+  result: DiscoveredForm,
+  listingLinks: string[],
+): DiscoveredForm {
+  if (result.formFound || listingLinks.length < LISTING_LINKS_MIN) {
+    return result;
+  }
+  return { ...result, pageKind: 'listing', listingLinks };
 }
 
 /**
@@ -1409,6 +1518,10 @@ async function interpretExtraction(args: {
  * title/company/description-as-markdown programmatically, extract the form
  * controls (clicking through up to two Apply hops and scanning iframes),
  * then have a text-only agent normalize them into canonical Question[].
+ * A page with NO form still yields structure: pageKind classifies it
+ * (blocked/listing set programmatically, the rest via the agent's JSON),
+ * and a listing page carries the individual job links extracted from its
+ * RENDERED DOM (listingLinks) so the caller can ingest them.
  * Never throws for "couldn't find it" (login wall, captcha, bot-blocked
  * site, no form, SPA that never renders one) — those return formFound:false
  * with explanatory notes and the full transcript; a bot-blocked site is
@@ -1456,6 +1569,8 @@ export async function discoverForm(input: {
         questions: [],
         confidence: 'low',
         notes: rendered.notes,
+        // HTTP-blocked is a programmatic signal — the agent never ran.
+        ...(rendered.blocked ? { pageKind: 'blocked' as const } : {}),
       },
       transcript,
     };
@@ -1468,23 +1583,26 @@ export async function discoverForm(input: {
     const descriptionMarkdown =
       rendered.metadata?.descriptionMarkdown || undefined;
     return {
-      result: {
-        formFound: false,
-        applyUrl: rendered.applyUrl,
-        company: rendered.metadata?.company || undefined,
-        title: rendered.metadata?.title || undefined,
-        descriptionMarkdown,
-        deadline: descriptionMarkdown
-          ? (extractDeadline(descriptionMarkdown) ?? undefined)
-          : undefined,
-        handoffUrl: rendered.handoffUrl,
-        questions: [],
-        confidence: 'low',
-        notes: appendProgrammaticNotes(noFormNotes(rendered.extraction), {
-          metadata: rendered.metadata,
-          iframeNotes: rendered.iframeNotes,
-        }),
-      },
+      result: withListing(
+        {
+          formFound: false,
+          applyUrl: rendered.applyUrl,
+          company: rendered.metadata?.company || undefined,
+          title: rendered.metadata?.title || undefined,
+          descriptionMarkdown,
+          deadline: descriptionMarkdown
+            ? (extractDeadline(descriptionMarkdown) ?? undefined)
+            : undefined,
+          handoffUrl: rendered.handoffUrl,
+          questions: [],
+          confidence: 'low',
+          notes: appendProgrammaticNotes(noFormNotes(rendered.extraction), {
+            metadata: rendered.metadata,
+            iframeNotes: rendered.iframeNotes,
+          }),
+        },
+        rendered.listingLinks,
+      ),
       transcript,
     };
   }
@@ -1499,5 +1617,5 @@ export async function discoverForm(input: {
     maxTurns: input.maxTurns,
     transcript,
   });
-  return { result, transcript };
+  return { result: withListing(result, rendered.listingLinks), transcript };
 }

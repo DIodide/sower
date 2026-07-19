@@ -285,6 +285,9 @@ importers:
       '@sower/core':
         specifier: workspace:*
         version: link:../core
+      '@sower/platforms':
+        specifier: workspace:*
+        version: link:../platforms
       playwright:
         specifier: ^1.49.0
         version: 1.61.1

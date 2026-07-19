@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { JobMetadata, RawExtraction } from './discover-form.js';
 import { detectHandoffUrl } from './discover-form.js';
 import { discoverForm } from './index.js';
+import type { AnchorCandidate } from './page-functions.js';
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: vi.fn(),
@@ -45,10 +46,11 @@ const DEFAULT_METADATA: JobMetadata = {
 
 /**
  * A scripted Playwright double: `evaluate` answers the metadata expression
- * with `metadata`, click-fallback expressions with undefined, and extraction
- * expressions with the queued extractions in order; `goto` returns `statuses`
- * per call (default 200); each `click` advances the page URL to the next
- * entry in `urls`; `frames` become child frames alongside a main frame.
+ * with `metadata`, the anchors expression with `anchors` (default []),
+ * click-fallback expressions with undefined, and extraction expressions with
+ * the queued extractions in order; `goto` returns `statuses` per call
+ * (default 200); each `click` advances the page URL to the next entry in
+ * `urls`; `frames` become child frames alongside a main frame.
  */
 function fakePlaywright(opts: {
   extractions: RawExtraction[];
@@ -57,6 +59,7 @@ function fakePlaywright(opts: {
   statuses?: number[];
   metadata?: JobMetadata | null;
   frames?: FakeFrameSpec[];
+  anchors?: AnchorCandidate[];
 }) {
   const urls = opts.urls ?? ['https://jobs.example.com/posting/123'];
   let currentUrl = urls[0];
@@ -94,6 +97,9 @@ function fakePlaywright(opts: {
     evaluate: vi.fn(async (expr: string) => {
       if (typeof expr === 'string' && expr.includes('sower:metadata')) {
         return opts.metadata === undefined ? DEFAULT_METADATA : opts.metadata;
+      }
+      if (typeof expr === 'string' && expr.includes('sower:anchors')) {
+        return opts.anchors ?? [];
       }
       if (typeof expr === 'string' && expr.includes('.click()')) {
         return undefined;
@@ -191,6 +197,7 @@ const EMPTY_EXTRACTION: RawExtraction = {
 
 const INTERPRETED = {
   formFound: true,
+  pageKind: 'application',
   company: 'Example Co',
   title: 'Software Engineer Intern',
   questions: [
@@ -269,6 +276,8 @@ describe('discoverForm', () => {
     expect(result.company).toBe('Example Co');
     expect(result.title).toBe('Software Engineer Intern');
     expect(result.confidence).toBe('high');
+    // The agent's structured page classification passes through the contract.
+    expect(result.pageKind).toBe('application');
     expect(result.questions).toHaveLength(7);
     expect(result.questions[0]).toEqual({
       id: 'first_name',
@@ -446,6 +455,8 @@ describe('discoverForm', () => {
 
     expect(result.formFound).toBe(false);
     expect(result.confidence).toBe('low');
+    // Programmatic pageKind: the HTTP status is the signal, never the agent.
+    expect(result.pageKind).toBe('blocked');
     expect(result.notes).toMatch(
       /the site blocked automated access \(HTTP 403\)/,
     );
@@ -534,10 +545,180 @@ describe('discoverForm', () => {
     );
     // The agent is never invoked when there is nothing to interpret.
     expect(queryMock).not.toHaveBeenCalled();
-    // Two extract pairs: job-metadata + form controls.
+    // Three extract pairs: job-metadata + form controls + listing links.
     expect(transcript.filter((s) => s.tool === 'browser.extract')).toHaveLength(
-      4,
+      6,
     );
+  });
+
+  it('extracts listing links from the RENDERED DOM of a formless SPA listing page (≥3 ⇒ pageKind listing)', async () => {
+    // The databricks case: a JS-rendered listings page whose raw HTML had no
+    // anchors, but whose rendered DOM carries job cards (gh_jid links) plus
+    // nav/pagination noise the filter must drop.
+    const listingUrl =
+      'https://www.databricks.com/company/careers/open-positions';
+    fakePlaywright({
+      extractions: [EMPTY_EXTRACTION],
+      urls: [listingUrl],
+      anchors: [
+        {
+          href: `${listingUrl}?gh_jid=6866484002`,
+          text: 'Software Engineering Intern',
+        },
+        {
+          href: `${listingUrl}?gh_jid=6866484003`,
+          text: 'Data Science Intern',
+        },
+        {
+          href: 'https://boards.greenhouse.io/databricks/jobs/6866484004',
+          text: 'PM Intern',
+        },
+        { href: `${listingUrl}?page=2`, text: 'Next' },
+        { href: 'https://twitter.com/databricks', text: 'Twitter' },
+      ],
+    });
+
+    const { result, transcript } = await discoverForm({ url: listingUrl });
+
+    expect(result.formFound).toBe(false);
+    expect(result.pageKind).toBe('listing');
+    expect(result.listingLinks).toEqual([
+      `${listingUrl}?gh_jid=6866484002`,
+      `${listingUrl}?gh_jid=6866484003`,
+      'https://boards.greenhouse.io/databricks/jobs/6866484004',
+    ]);
+    // The transcript step notes the extracted-link count.
+    const listingStep = transcript.find(
+      (s) =>
+        s.kind === 'tool_result' &&
+        s.tool === 'browser.extract' &&
+        s.output?.includes('candidate job link'),
+    );
+    expect(listingStep?.output).toContain('3 candidate job links');
+    // Rendered-DOM anchors succeed where raw HTML failed — no agent needed.
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
+  it('below the 3-link threshold the page is NOT a listing (no listingLinks, no pageKind override)', async () => {
+    fakePlaywright({
+      extractions: [EMPTY_EXTRACTION],
+      anchors: [
+        {
+          href: 'https://boards.greenhouse.io/acme/jobs/1',
+          text: 'SWE Intern',
+        },
+        {
+          href: 'https://boards.greenhouse.io/acme/jobs/2',
+          text: 'PM Intern',
+        },
+      ],
+    });
+
+    const { result, transcript } = await discoverForm({
+      url: 'https://jobs.example.com/posting/123',
+    });
+
+    expect(result.formFound).toBe(false);
+    expect(result.listingLinks).toBeUndefined();
+    expect(result.pageKind).toBeUndefined();
+    // The extraction still ran and reported honestly.
+    const listingStep = transcript.find(
+      (s) =>
+        s.kind === 'tool_result' &&
+        s.tool === 'browser.extract' &&
+        s.output?.includes('candidate job link'),
+    );
+    expect(listingStep?.output).toContain('2 candidate job links');
+  });
+
+  it('a listing-classified agent result gains the extracted links (controls present, no form)', async () => {
+    // A listing page with a search box + filter select: enough controls to
+    // run the agent, which says formFound:false / pageKind listing — and the
+    // programmatic link extraction attaches the links.
+    const searchExtraction: RawExtraction = {
+      ...EMPTY_EXTRACTION,
+      controls: [
+        {
+          label: 'Search jobs',
+          name: 'q',
+          inputType: 'search',
+          required: false,
+        },
+        {
+          label: 'Department',
+          name: 'dept',
+          inputType: 'select',
+          required: false,
+          options: [{ label: 'Engineering', value: 'eng' }],
+        },
+      ],
+      formCount: 1,
+    };
+    fakePlaywright({
+      extractions: [searchExtraction],
+      urls: ['https://example.com/careers'],
+      anchors: [
+        { href: 'https://example.com/careers/jobs/swe-1', text: 'SWE Intern' },
+        { href: 'https://example.com/careers/jobs/pm-2', text: 'PM Intern' },
+        { href: 'https://example.com/careers/jobs/ds-3', text: 'DS Intern' },
+      ],
+    });
+    queryMock.mockReturnValue(
+      fakeStream([
+        {
+          type: 'result',
+          subtype: 'success',
+          result: `\`\`\`json\n${JSON.stringify({
+            formFound: false,
+            pageKind: 'listing',
+            questions: [],
+            confidence: 'high',
+            notes: 'this is a job listing/search page, not an application form',
+          })}\n\`\`\``,
+        },
+      ]),
+    );
+
+    const { result } = await discoverForm({
+      url: 'https://example.com/careers',
+    });
+
+    expect(result.formFound).toBe(false);
+    expect(result.pageKind).toBe('listing');
+    expect(result.listingLinks).toHaveLength(3);
+    // The prompt teaches the pageKind field of the JSON contract.
+    const call = queryMock.mock.calls[0]?.[0] as { prompt: string };
+    expect(call.prompt).toContain('pageKind');
+  });
+
+  it('never attaches listingLinks to a formFound result', async () => {
+    // A page whose landing extraction found no form (so anchors were
+    // collected) but whose Apply hop revealed one: the discovered form wins
+    // and the links are dropped — a form page is not a listing.
+    fakePlaywright({
+      extractions: [
+        { ...EMPTY_EXTRACTION, applyCandidate: 'Apply now' },
+        APPLICATION_EXTRACTION,
+      ],
+      urls: [
+        'https://jobs.example.com/posting/123',
+        'https://jobs.example.com/posting/123/apply',
+      ],
+      anchors: [
+        { href: 'https://boards.greenhouse.io/acme/jobs/1', text: 'SWE' },
+        { href: 'https://boards.greenhouse.io/acme/jobs/2', text: 'PM' },
+        { href: 'https://boards.greenhouse.io/acme/jobs/3', text: 'DS' },
+      ],
+    });
+    queryMock.mockReturnValue(fakeStream(AGENT_MESSAGES));
+
+    const { result } = await discoverForm({
+      url: 'https://jobs.example.com/posting/123',
+    });
+
+    expect(result.formFound).toBe(true);
+    expect(result.listingLinks).toBeUndefined();
+    expect(result.pageKind).toBe('application');
   });
 
   it('clicks an Apply control when the landing page has no form, then extracts the revealed form', async () => {

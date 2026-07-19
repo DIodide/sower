@@ -329,6 +329,9 @@ const EVENT_LABELS: Record<string, string> = {
   INVESTIGATION_DONE: 'Browser agent finished investigating',
   INVESTIGATION_FOUND: 'Browser agent found the job posting',
   HANDOFF: 'Apply flow reached a supported platform — real task created',
+  LISTING_EXPANDED:
+    'Listing page expanded — individual jobs added to the queue',
+  DEADLINE_ALERT: 'Deadline alert sent',
 };
 
 /**

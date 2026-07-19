@@ -34,7 +34,13 @@ export {
   discoverForm,
   type FormDiscoveryOutcome,
   type JobMetadata,
+  type PageKind,
 } from './discover-form.js';
+export {
+  extractListingLinks,
+  LISTING_LINKS_MIN,
+  MAX_LISTING_LINKS,
+} from './listing-links.js';
 
 export interface InvestigationResult {
   /** true ONLY if a real application URL was located. */

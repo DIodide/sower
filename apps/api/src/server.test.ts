@@ -1675,6 +1675,229 @@ describe('buildServer', () => {
         ).toBe(false);
       });
 
+      describe('listing expansion (not_found + listingLinks)', () => {
+        it('classifies + ingests each link at child depth, records ONE LISTING_EXPANDED event, and reports counts', async () => {
+          // A supported child and an unknown one — the databricks shape:
+          // custom-domain greenhouse links plus the odd unclassifiable link.
+          platformState.byUrl['https://gh/child1'] = {
+            platform: 'greenhouse',
+            tenant: 'acme',
+            externalId: '77',
+          };
+          platformState.byUrl['https://weird/child2'] = {
+            platform: 'unknown',
+            tenant: null,
+            externalId: null,
+          };
+          const writes: DbWrite[] = [];
+          const db = createFakeDb({
+            selectResults: [
+              [{ id: 'run-1' }], // latest run
+              [joinRow], // task+job join
+              [], // child1 ingest dup check: fresh
+              [], // child2 ingest dup check: fresh
+            ],
+            insertResults: [
+              [], // FORM_NOT_FOUND event
+              [{ id: 'job-c1' }], // child1 job
+              [{ id: 'task-c1' }], // child1 task
+              [], // child1 PARSE_OK event
+              [], // child1 ENQUEUE event
+              [{ id: 'job-c2' }], // child2 job
+              [{ id: 'task-c2' }], // child2 task
+              [], // child2 PARSE_OK event
+              [], // child2 PARK event
+              [], // LISTING_EXPANDED event
+            ],
+            writes,
+          });
+          const { deps, enqueueProcess } = createDeps(db);
+          const app = buildServer(deps);
+
+          const res = await inject(app, {
+            kind: 'form',
+            result: {
+              ...formNotFound,
+              pageKind: 'listing',
+              listingLinks: ['https://gh/child1', 'https://weird/child2'],
+            },
+            transcript: formTranscript,
+          });
+
+          expect(res.statusCode).toBe(200);
+          expect(res.json()).toEqual({
+            ok: true,
+            listing: {
+              count: 2,
+              ingested: 1,
+              duplicates: 0,
+              unsupported: 1,
+              errors: 0,
+            },
+          });
+
+          // Every child job carries the listing-expansion provenance.
+          const jobInserts = writes
+            .filter((w) => w.method === 'insert' && w.table === jobs)
+            .map((w) => w.arg as Record<string, unknown>);
+          expect(jobInserts).toHaveLength(2);
+          for (const insert of jobInserts) {
+            expect(insert.source).toBe('listing-expansion');
+          }
+          // The supported child enqueued; the unknown child parked.
+          expect(enqueueProcess).toHaveBeenCalledTimes(1);
+          expect(enqueueProcess).toHaveBeenCalledWith('task-c1');
+
+          // Depth-1 no-fanout: children NEVER trigger the investigator Job
+          // (a 50-link listing must not spawn 50 browser Jobs).
+          expect(investigateState.calls).toEqual([]);
+
+          // ONE LISTING_EXPANDED event on the ORIGINAL task, with the funnel.
+          const listingEvents = writes
+            .filter((w) => w.method === 'insert' && w.table === events)
+            .map((w) => w.arg as Record<string, unknown>)
+            .filter((arg) => arg.type === 'LISTING_EXPANDED');
+          expect(listingEvents).toHaveLength(1);
+          expect(listingEvents[0]).toEqual({
+            taskId: TASK_ID,
+            type: 'LISTING_EXPANDED',
+            data: {
+              count: 2,
+              ingested: 1,
+              duplicates: 0,
+              unsupported: 1,
+              errors: 0,
+            },
+          });
+
+          // The run stays an honest not_found and the reply refreshes.
+          const runUpdate = writes.find(
+            (w) => w.method === 'update' && w.table === investigationRuns,
+          );
+          expect(runUpdate?.arg).toMatchObject({
+            kind: 'form',
+            status: 'not_found',
+            error: null,
+          });
+          expect(refreshState.calls).toEqual([TASK_ID]);
+        });
+
+        it('counts an already-known link as a duplicate (nothing re-ingested)', async () => {
+          platformState.byUrl['https://gh/dup'] = {
+            platform: 'greenhouse',
+            tenant: 'acme',
+            externalId: '88',
+          };
+          const writes: DbWrite[] = [];
+          const db = createFakeDb({
+            selectResults: [
+              [{ id: 'run-1' }],
+              [joinRow],
+              // dup check: already ingested
+              [
+                {
+                  id: 'job-dup',
+                  source: 'discord',
+                  createdAt: new Date('2026-07-01T00:00:00Z'),
+                },
+              ],
+              [{ id: 'task-orig' }], // the existing job's earliest task
+            ],
+            insertResults: [[]], // FORM_NOT_FOUND event
+            writes,
+          });
+          const { deps, enqueueProcess } = createDeps(db);
+          const app = buildServer(deps);
+
+          const res = await inject(app, {
+            kind: 'form',
+            result: {
+              ...formNotFound,
+              pageKind: 'listing',
+              listingLinks: ['https://gh/dup'],
+            },
+            transcript: formTranscript,
+          });
+
+          expect(res.statusCode).toBe(200);
+          expect(res.json()).toEqual({
+            ok: true,
+            listing: {
+              count: 1,
+              ingested: 0,
+              duplicates: 1,
+              unsupported: 0,
+              errors: 0,
+            },
+          });
+          expect(enqueueProcess).not.toHaveBeenCalled();
+          expect(
+            writes.some((w) => w.method === 'insert' && w.table === jobs),
+          ).toBe(false);
+          const listingEvent = writes
+            .filter((w) => w.method === 'insert' && w.table === events)
+            .map((w) => w.arg as Record<string, unknown>)
+            .find((arg) => arg.type === 'LISTING_EXPANDED');
+          expect(listingEvent?.data).toEqual({
+            count: 1,
+            ingested: 0,
+            duplicates: 1,
+            unsupported: 0,
+            errors: 0,
+          });
+        });
+
+        it('never expands on a formFound result even when listingLinks are present', async () => {
+          const writes: DbWrite[] = [];
+          const db = createFakeDb({
+            selectResults: [[{ id: 'run-1' }], [joinRow]],
+            insertResults: [[]], // FORM_DISCOVERED event
+            writes,
+          });
+          const { deps, enqueueProcess } = createDeps(db);
+          const app = buildServer(deps);
+
+          const res = await inject(app, {
+            kind: 'form',
+            result: {
+              ...discoveredForm,
+              listingLinks: ['https://gh/child1', 'https://gh/child2'],
+            },
+            transcript: formTranscript,
+          });
+
+          expect(res.statusCode).toBe(200);
+          expect(res.json()).toEqual({ ok: true });
+          expect(enqueueProcess).not.toHaveBeenCalled();
+          expect(
+            writes.some((w) => w.method === 'insert' && w.table === jobs),
+          ).toBe(false);
+          expect(
+            writes
+              .filter((w) => w.method === 'insert' && w.table === events)
+              .map((w) => w.arg as Record<string, unknown>)
+              .some((arg) => arg.type === 'LISTING_EXPANDED'),
+          ).toBe(false);
+        });
+
+        it('rejects more than 50 listingLinks and over-long urls (400)', async () => {
+          const { deps } = createDeps(createFakeDb());
+          const app = buildServer(deps);
+          for (const listingLinks of [
+            Array.from({ length: 51 }, (_, i) => `https://jobs.example/${i}`),
+            [`https://jobs.example/${'x'.repeat(2000)}`],
+          ]) {
+            const res = await inject(app, {
+              kind: 'form',
+              result: { ...formNotFound, listingLinks },
+              transcript: [],
+            });
+            expect(res.statusCode).toBe(400);
+            expect(res.json()).toMatchObject({ error: 'invalid body' });
+          }
+        });
+      });
+
       it('formFound with a missing task row: still persists the run, as an error', async () => {
         const writes: DbWrite[] = [];
         const db = createFakeDb({
@@ -1760,6 +1983,93 @@ describe('buildServer', () => {
         expect(res.statusCode).toBe(400);
         expect(res.json()).toMatchObject({ error: 'invalid body' });
       }
+    });
+  });
+
+  describe('POST /alerts/deadlines', () => {
+    it('responds 401 without an api key (guarded like every route)', async () => {
+      const { deps } = createDeps(createFakeDb());
+      const app = buildServer(deps);
+      const res = await app.inject({
+        method: 'POST',
+        url: '/alerts/deadlines',
+      });
+      expect(res.statusCode).toBe(401);
+      expect(res.json()).toEqual({ error: 'unauthorized' });
+    });
+
+    it('no-ops {enabled:false} until Discord + the alerts channel are configured', async () => {
+      const { deps } = createDeps(createFakeDb());
+      const app = buildServer(deps);
+      const res = await app.inject({
+        method: 'POST',
+        url: '/alerts/deadlines',
+        headers: { 'x-api-key': 'test-key' },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        enabled: false,
+        due: 0,
+        alerted: 0,
+        skipped: 0,
+      });
+    });
+
+    it('alerts a due-today task when configured and records the DEADLINE_ALERT event', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [
+          [
+            {
+              taskId: '7d8e9f10-1112-4314-a516-b71819c2d2e2',
+              state: 'NEEDS_INPUT',
+              // "now" always falls on today's ET date, whatever the clock.
+              dueDate: new Date(),
+              deadline: null,
+              company: 'Acme',
+              title: 'SWE Intern',
+              url: 'https://job.example/x',
+            },
+          ],
+          [], // no prior DEADLINE_ALERT events
+        ],
+        writes,
+      });
+      const { deps } = createDeps(db);
+      deps.config = {
+        ...config,
+        DISCORD_BOT_TOKEN: 'token',
+        DISCORD_ENABLED: true,
+        DISCORD_ALERTS_CHANNEL_ID: 'chan-alerts',
+      };
+      const postChannelMessage = vi.fn(async () => ({ id: 'm1' }));
+      deps.notify = { postChannelMessage } as unknown as NonNullable<
+        Deps['notify']
+      >;
+      const app = buildServer(deps);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/alerts/deadlines',
+        headers: { 'x-api-key': 'test-key' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        enabled: true,
+        due: 1,
+        alerted: 1,
+        skipped: 0,
+      });
+      expect(postChannelMessage).toHaveBeenCalledTimes(1);
+      const alertEvent = writes
+        .filter((w) => w.method === 'insert' && w.table === events)
+        .map((w) => w.arg as Record<string, unknown>)
+        .find((arg) => arg.type === 'DEADLINE_ALERT');
+      expect(alertEvent).toMatchObject({
+        taskId: '7d8e9f10-1112-4314-a516-b71819c2d2e2',
+        data: { channel: 'discord' },
+      });
     });
   });
 

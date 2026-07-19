@@ -323,6 +323,24 @@ export interface DiscoveredForm {
    * result endpoint can ingest it as a real supported task.
    */
   handoffUrl?: string;
+  /**
+   * Structured page classification (agent-set via the JSON contract;
+   * programmatic signals override: HTTP-blocked ⇒ 'blocked', a qualifying
+   * listing-link extraction ⇒ 'listing').
+   */
+  pageKind?:
+    | 'application'
+    | 'posting'
+    | 'listing'
+    | 'login'
+    | 'blocked'
+    | 'other';
+  /**
+   * Individual job links extracted from the RENDERED DOM of a jobs LISTING
+   * page (formFound:false only; ≥3 links required by the producer, ≤50).
+   * The result endpoint classifies + ingests each at child depth.
+   */
+  listingLinks?: string[];
   questions: Question[];
   confidence: 'high' | 'medium' | 'low';
   /** Incl. "form is JS-rendered/behind login/not found" when relevant. */

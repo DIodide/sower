@@ -216,12 +216,7 @@ async function classifyAndIngest(
       if (page) {
         const links = extractJobLinks(page.html, page.url);
         if (links.length > 0) {
-          const children: UrlOutcome[] = [];
-          for (const link of links.slice(0, MAX_DIRECTORY_LINKS)) {
-            children.push(
-              await classifyAndIngest(deps, link, depth + 1, source),
-            );
-          }
+          const children = await classifyMany(deps, links, source, depth + 1);
           return { url: resolved, kind: 'directory', children };
         }
       }
@@ -262,6 +257,28 @@ async function classifyAndIngest(
       error: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+/**
+ * Classify + ingest a batch of URLs at a fixed depth, capped at
+ * MAX_DIRECTORY_LINKS. Extracted from the directory-expansion loop; also the
+ * LISTING-EXPANSION entry point — the investigation-result endpoint feeds the
+ * job links the browser agent extracted from a rendered listings page through
+ * here at CHILD depth (the default, 1). Depth 1 means: no page fetch, no
+ * nested directory expansion, and no per-link investigation fan-out — a
+ * 50-link listing must never spawn 50 browser Jobs.
+ */
+export async function classifyMany(
+  deps: Deps,
+  urls: string[],
+  source: string,
+  depth = 1,
+): Promise<UrlOutcome[]> {
+  const outcomes: UrlOutcome[] = [];
+  for (const url of urls.slice(0, MAX_DIRECTORY_LINKS)) {
+    outcomes.push(await classifyAndIngest(deps, url, depth, source));
+  }
+  return outcomes;
 }
 
 function summarize(
@@ -425,13 +442,15 @@ const MAX_URL_LABEL_CHARS = 48;
 /**
  * Escape markdown-breaking characters (brackets, backticks, emphasis, …) so a
  * job title can never corrupt the `[label](url)` link it is embedded in.
+ * Exported for deadline alerts, whose labels embed in links the same way.
  */
-function escapeLabel(text: string): string {
+export function escapeLabel(text: string): string {
   return text.replace(/[\\`*_~[\]()]/g, '\\$&');
 }
 
-/** Scheme + leading `www.` stripped, trailing slash dropped, ~48-char cap. */
-function shortenUrlForLabel(url: string): string {
+/** Scheme + leading `www.` stripped, trailing slash dropped, ~48-char cap.
+ *  Exported for deadline alerts (the same label-of-last-resort rule). */
+export function shortenUrlForLabel(url: string): string {
   const stripped = url
     .replace(/^https?:\/\//i, '')
     .replace(/^www\./i, '')

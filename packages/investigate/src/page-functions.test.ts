@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  collectAnchors,
   type MarkdownishNode,
   scoreApplyControlText,
   serializeToMarkdown,
@@ -234,5 +235,91 @@ describe('serializeToMarkdown', () => {
     );
     expect(markdown).toBe('short');
     expect(truncated).toBe(false);
+  });
+});
+
+describe('collectAnchors', () => {
+  const anchor = (href: string, label: string) =>
+    el('a', [text(label)], { href });
+
+  it('collects content anchors and skips nav/header/footer/aside and cookie-banner chrome', () => {
+    // An SPA-ish listing page: job cards in main, chrome links around them.
+    const root = el('div', [
+      el('nav', [anchor('https://example.com/about', 'About')]),
+      el('header', [anchor('https://example.com', 'MegaCorp Careers')]),
+      el('div', [
+        el('div', [
+          anchor(
+            'https://example.com/careers/jobs/swe-intern-1234',
+            'Software Engineer Intern',
+          ),
+        ]),
+        el('div', [
+          anchor(
+            'https://example.com/careers/jobs/pm-intern-5678',
+            'Product Manager Intern',
+          ),
+        ]),
+      ]),
+      el('div', [anchor('https://example.com/privacy', 'cookie policy')], {
+        class: 'cookie-banner',
+      }),
+      el('div', [anchor('https://example.com/menu', 'Menu')], {
+        role: 'navigation',
+      }),
+      el('footer', [anchor('https://example.com/legal', 'Legal')]),
+    ]);
+    expect(collectAnchors(root, 100)).toEqual([
+      {
+        href: 'https://example.com/careers/jobs/swe-intern-1234',
+        text: 'Software Engineer Intern',
+      },
+      {
+        href: 'https://example.com/careers/jobs/pm-intern-5678',
+        text: 'Product Manager Intern',
+      },
+    ]);
+  });
+
+  it('skips hidden anchors and non-http(s) hrefs', () => {
+    const hidden = anchor('https://example.com/jobs/1', 'Hidden job');
+    hidden.checkVisibility = () => false;
+    const root = el('div', [
+      hidden,
+      el('a', [text('apply')], { href: 'javascript:void(0)' }),
+      el('a', [text('mail us')], { href: 'mailto:jobs@example.com' }),
+      el('a', [text('no href')]),
+      anchor('https://example.com/jobs/2', 'Visible job'),
+    ]);
+    expect(collectAnchors(root, 100)).toEqual([
+      { href: 'https://example.com/jobs/2', text: 'Visible job' },
+    ]);
+  });
+
+  it('normalizes whitespace in nested anchor text (job-card markup)', () => {
+    const card = el(
+      'a',
+      [
+        el('h3', [text('  Software Engineer\n  Intern ')]),
+        el('span', [text(' New York ')]),
+      ],
+      { href: 'https://example.com/jobs/3' },
+    );
+    expect(collectAnchors(el('div', [card]), 100)).toEqual([
+      {
+        href: 'https://example.com/jobs/3',
+        text: 'Software Engineer Intern New York',
+      },
+    ]);
+  });
+
+  it('caps the collection at maxAnchors', () => {
+    const root = el(
+      'div',
+      Array.from({ length: 20 }, (_, i) =>
+        anchor(`https://example.com/jobs/${i}`, `Job ${i}`),
+      ),
+    );
+    expect(collectAnchors(root, 5)).toHaveLength(5);
   });
 });

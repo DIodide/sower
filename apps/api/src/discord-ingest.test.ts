@@ -3,6 +3,7 @@ import type { Config } from './config.js';
 import type { MessageIngestSummary, UrlOutcome } from './discord-ingest.js';
 import {
   announcedTaskIds,
+  classifyMany,
   formatEasternDate,
   ingestMessageLinks,
   reactionFor,
@@ -617,6 +618,48 @@ describe('ingestMessageLinks', () => {
       kind: 'unsupported',
       taskId: 'task-1',
     });
+  });
+});
+
+describe('classifyMany', () => {
+  it('classifies at CHILD depth: no page fetch, no directory expansion, no investigation fan-out; source threaded', async () => {
+    const { fetchPageHtml } = await import('./link-extract.js');
+    vi.mocked(fetchPageHtml).mockClear();
+    platformState.byUrl['https://gh/2'] = {
+      platform: 'greenhouse',
+      tenant: 'a',
+      externalId: '2',
+    };
+    // Directory fixtures exist for this URL — at child depth they must be
+    // ignored (no nested expansion), so it records+parks instead.
+    dirState.byUrl['https://dir/inner'] = ['https://gh/3'];
+
+    const outcomes = await classifyMany(
+      {} as Deps,
+      ['https://gh/2', 'https://dir/inner', 'https://weird/x'],
+      'listing-expansion',
+    );
+
+    expect(outcomes.map((o) => o.kind)).toEqual([
+      'ingested',
+      'unsupported',
+      'unsupported',
+    ]);
+    expect(ingestState.sources).toEqual([
+      'listing-expansion',
+      'listing-expansion',
+      'listing-expansion',
+    ]);
+    // No investigator Job for ANY child, and the page was never fetched.
+    expect(triggerState.calls).toEqual([]);
+    expect(vi.mocked(fetchPageHtml)).not.toHaveBeenCalled();
+  });
+
+  it('caps the batch at 50 links', async () => {
+    const urls = Array.from({ length: 60 }, (_, i) => `https://weird/job-${i}`);
+    const outcomes = await classifyMany({} as Deps, urls, 'listing-expansion');
+    expect(outcomes).toHaveLength(50);
+    expect(ingestState.calls).toHaveLength(50);
   });
 });
 

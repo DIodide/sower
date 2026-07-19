@@ -331,6 +331,7 @@ function ScreenshotResultSummary({
 /** Result summary of a form-discovery run (DiscoveredForm). */
 function FormResultSummary({ result }: { result: DiscoveredForm }) {
   const questionCount = result.questions?.length ?? 0;
+  const listingCount = result.listingLinks?.length ?? 0;
   return (
     <div style={RESULT_GRID_STYLE}>
       <Field label="Form found">
@@ -338,6 +339,20 @@ function FormResultSummary({ result }: { result: DiscoveredForm }) {
           {result.formFound ? 'yes' : 'no'}
         </Badge>
       </Field>
+      {/* Structured page classification — a 'listing' here means the run
+          extracted individual job links instead of a form. */}
+      {result.pageKind ? (
+        <Field label="Page kind">
+          <Badge tone={result.pageKind === 'listing' ? 'attention' : 'neutral'}>
+            {result.pageKind}
+          </Badge>
+        </Field>
+      ) : null}
+      {listingCount > 0 ? (
+        <Field label="Job links extracted">
+          <span className="num">{listingCount}</span>
+        </Field>
+      ) : null}
       {result.applyUrl ? (
         <Field label="Form URL">
           <a

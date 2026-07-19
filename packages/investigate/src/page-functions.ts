@@ -69,6 +69,105 @@ export interface MarkdownishNode {
   checkVisibility?(): boolean;
 }
 
+/** One anchor collected from the rendered DOM (href absolute, text inline). */
+export interface AnchorCandidate {
+  href: string;
+  text: string;
+}
+
+/**
+ * Collect candidate anchors from a rendered DOM subtree, skipping page
+ * chrome: nav/header/footer/aside containers (and their landmark roles),
+ * script/style/form/dialog subtrees, cookie/consent banners, and hidden
+ * elements. Returns at most `maxAnchors` `{href, text}` pairs in document
+ * order — only http(s) hrefs (a real DOM anchor's `href` property is already
+ * RESOLVED absolute). Self-contained (serialized into the page via
+ * toString, see discover-form.ts) and structural-node testable like
+ * serializeToMarkdown; the ATS/job-detail filtering happens Node-side in
+ * listing-links.ts, where detectPlatform is available.
+ */
+export function collectAnchors(
+  rootNode: MarkdownishNode,
+  maxAnchors: number,
+): AnchorCandidate[] {
+  const TEXT_NODE = 3;
+  const ELEMENT_NODE = 1;
+  const SKIP_TAGS = new Set([
+    'SCRIPT',
+    'STYLE',
+    'NOSCRIPT',
+    'TEMPLATE',
+    'NAV',
+    'HEADER',
+    'FOOTER',
+    'ASIDE',
+    'FORM',
+    'DIALOG',
+    'SELECT',
+    'SVG',
+  ]);
+  const SKIP_ROLES = new Set([
+    'navigation',
+    'banner',
+    'contentinfo',
+    'complementary',
+    'dialog',
+    'alertdialog',
+    'search',
+  ]);
+
+  const out: AnchorCandidate[] = [];
+
+  const kids = (node: MarkdownishNode): MarkdownishNode[] => {
+    const list = node.childNodes;
+    const children: MarkdownishNode[] = [];
+    if (!list) return children;
+    for (let i = 0; i < list.length; i += 1) {
+      const child = list[i];
+      if (child) children.push(child);
+    }
+    return children;
+  };
+
+  const skipped = (node: MarkdownishNode): boolean => {
+    if (SKIP_TAGS.has((node.tagName ?? '').toUpperCase())) return true;
+    const role = node.getAttribute ? (node.getAttribute('role') ?? '') : '';
+    if (SKIP_ROLES.has(role.toLowerCase())) return true;
+    const className = typeof node.className === 'string' ? node.className : '';
+    const id = typeof node.id === 'string' ? node.id : '';
+    if (/(cookie|consent|gdpr)/i.test(`${className} ${id}`)) return true;
+    if (typeof node.checkVisibility === 'function' && !node.checkVisibility()) {
+      return true;
+    }
+    return false;
+  };
+
+  const textOf = (node: MarkdownishNode): string => {
+    if (node.nodeType === TEXT_NODE) return node.textContent ?? '';
+    if (node.nodeType !== ELEMENT_NODE) return '';
+    return kids(node).map(textOf).join(' ');
+  };
+
+  const walk = (node: MarkdownishNode): void => {
+    if (out.length >= maxAnchors) return;
+    if (node.nodeType !== ELEMENT_NODE || skipped(node)) return;
+    if ((node.tagName ?? '').toUpperCase() === 'A') {
+      const href = typeof node.href === 'string' ? node.href : '';
+      if (/^https?:\/\//i.test(href)) {
+        out.push({ href, text: textOf(node).replace(/\s+/g, ' ').trim() });
+      }
+      return; // anchors never nest
+    }
+    for (const child of kids(node)) {
+      walk(child);
+      if (out.length >= maxAnchors) return;
+    }
+  };
+
+  walk(rootNode);
+  return out;
+}
+
 /**
  * Serialize a DOM subtree to markdown: h1–h6 → #s, p → paragraphs, ul/ol/li
  * → -/1. (nested lists indented), strong/b → **, em/i → *, a → [text](href)

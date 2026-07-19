@@ -1,7 +1,9 @@
 import type { TaskState } from '@sower/core';
 import {
   applicationTasks,
+  type DiscoveredForm,
   events,
+  type InvestigationResult,
   type InvestigationRunStatus,
   investigationRuns,
   jobs,
@@ -110,6 +112,31 @@ function filterHref(filters: {
  * task's spec is authoritative for "discovered"; the latest run covers the
  * in-flight and no-result cases. (Moved from the old Queue page.)
  */
+/**
+ * The number of listing links the latest form run extracted, or 0. The two
+ * run kinds share one jsonb column — discriminate on DiscoveredForm's
+ * `formFound` so a screenshot result can never masquerade as a listing.
+ */
+function listingLinkCount(
+  result: InvestigationResult | DiscoveredForm | null | undefined,
+): number {
+  if (!result || !('formFound' in result)) return 0;
+  return result.listingLinks?.length ?? 0;
+}
+
+/** LISTING_EXPANDED event data → the number of NEW tasks the expansion
+ *  added to the queue (queued + recorded-unsupported; duplicates aren't new). */
+function listingAddedCount(data: unknown): number {
+  const record =
+    data && typeof data === 'object' && !Array.isArray(data)
+      ? (data as Record<string, unknown>)
+      : undefined;
+  const ingested = typeof record?.ingested === 'number' ? record.ingested : 0;
+  const unsupported =
+    typeof record?.unsupported === 'number' ? record.unsupported : 0;
+  return ingested + unsupported;
+}
+
 function investigationStatus(
   run: { status: InvestigationRunStatus } | undefined,
   jobSpec: { discoveredByAgent?: boolean; formVerified?: boolean } | null,
@@ -356,16 +383,31 @@ export default async function Page({
   const submittedIds = taskRows
     .filter((r) => r.state === 'SUBMITTED')
     .map((r) => r.id);
-  const [runRows, discardRows, submitRows] = await Promise.all([
+  const [runRows, listingRows, discardRows, submitRows] = await Promise.all([
     unsupportedIds.length > 0
       ? db
           .select({
             taskId: investigationRuns.taskId,
             status: investigationRuns.status,
+            result: investigationRuns.result,
           })
           .from(investigationRuns)
           .where(inArray(investigationRuns.taskId, unsupportedIds))
           .orderBy(desc(investigationRuns.startedAt))
+      : [],
+    // LISTING_EXPANDED events for unsupported rows: together with the latest
+    // run's listingLinks they flip the annotation to "listing — N jobs added".
+    unsupportedIds.length > 0
+      ? db
+          .select({ taskId: events.taskId, data: events.data })
+          .from(events)
+          .where(
+            and(
+              eq(events.type, 'LISTING_EXPANDED'),
+              inArray(events.taskId, unsupportedIds),
+            ),
+          )
+          .orderBy(desc(events.createdAt))
       : [],
     discardedIds.length > 0
       ? db
@@ -392,10 +434,23 @@ export default async function Page({
           .orderBy(desc(events.createdAt))
       : [],
   ]);
-  const latestRuns = new Map<string, { status: InvestigationRunStatus }>();
+  const latestRuns = new Map<
+    string,
+    {
+      status: InvestigationRunStatus;
+      result: InvestigationResult | DiscoveredForm | null;
+    }
+  >();
   for (const run of runRows) {
     if (!latestRuns.has(run.taskId)) {
-      latestRuns.set(run.taskId, { status: run.status });
+      latestRuns.set(run.taskId, { status: run.status, result: run.result });
+    }
+  }
+  // Newest-first, so the FIRST row per task is its latest LISTING_EXPANDED.
+  const latestListingAdds = new Map<string, number>();
+  for (const row of listingRows) {
+    if (!latestListingAdds.has(row.taskId)) {
+      latestListingAdds.set(row.taskId, listingAddedCount(row.data));
     }
   }
   // Newest-first, so the FIRST row per task is its latest SUBMITTED entry.
@@ -431,10 +486,24 @@ export default async function Page({
     let tone: Tone = meta.tone;
     let canInvestigate = false;
     if (unsupported) {
-      const status = investigationStatus(latestRuns.get(row.id), row.jobSpec);
-      phrase = `unsupported site — ${status.label}`;
-      tone = status.tone ?? 'attention';
-      canInvestigate = !status.running;
+      const run = latestRuns.get(row.id);
+      const listingAdded = latestListingAdds.get(row.id);
+      // A listing page whose links were already expanded: the honest
+      // annotation is what happened to the jobs, not "unsupported" — and
+      // re-investigating would only re-find the same listing (demoted).
+      if (
+        run !== undefined &&
+        listingLinkCount(run.result) > 0 &&
+        listingAdded !== undefined
+      ) {
+        phrase = `listing — ${listingAdded} job${listingAdded === 1 ? '' : 's'} added`;
+        tone = 'neutral';
+      } else {
+        const status = investigationStatus(run, row.jobSpec);
+        phrase = `unsupported site — ${status.label}`;
+        tone = status.tone ?? 'attention';
+        canInvestigate = !status.running;
+      }
     }
     const discard =
       row.state === 'DISCARDED' ? latestDiscards.get(row.id) : undefined;

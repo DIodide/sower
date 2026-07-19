@@ -21,8 +21,10 @@ import { and, asc, desc, eq, inArray, isNotNull } from 'drizzle-orm';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { registerAnswerLibraryRoutes } from './answer-library.js';
+import { runDeadlineAlerts } from './deadline-alerts.js';
 import { markApprovalCardSubmitted, registerDiscordRoutes } from './discord.js';
 import {
+  classifyMany,
   ingestMessageLinks,
   runDiscordIngestPoll,
   type UrlOutcome,
@@ -319,6 +321,14 @@ const discoveredFormSchema = z.object({
   // NOT .url(): a malformed value must not cost us the transcript; ingestJob
   // failing on it lands in the run's error column instead.
   handoffUrl: z.string().max(2000).optional(),
+  // Structured page classification from @sower/investigate: agent-set via the
+  // JSON contract, programmatically overridden for blocked/listing pages.
+  pageKind: z
+    .enum(['application', 'posting', 'listing', 'login', 'blocked', 'other'])
+    .optional(),
+  // Individual job links the agent extracted from a rendered LISTING page
+  // (the producer only sends ≥3; the cap mirrors MAX_DIRECTORY_LINKS).
+  listingLinks: z.array(z.string().max(2000)).max(50).optional(),
   questions: z.array(discoveredQuestionSchema),
   confidence: z.enum(['high', 'medium', 'low']),
   notes: z.string(),
@@ -1199,6 +1209,15 @@ export function buildServer(deps: Deps): FastifyInstance {
       let handoff:
         | { taskId?: string; jobId: string; duplicate: boolean }
         | undefined;
+      let listing:
+        | {
+            count: number;
+            ingested: number;
+            duplicates: number;
+            unsupported: number;
+            errors: number;
+          }
+        | undefined;
 
       // The task+job row is needed on EVERY outcome: the scraped metadata
       // (title/company/JD markdown/deadline) persists regardless of whether
@@ -1326,6 +1345,54 @@ export function buildServer(deps: Deps): FastifyInstance {
             formError = error instanceof Error ? error.message : String(error);
           }
         }
+
+        // Listing expansion: the browser agent rendered a jobs LISTING page
+        // (the databricks JS-rendered SPA case — raw-HTML directory expansion
+        // saw no anchors at ingest) and extracted its individual job links.
+        // Classify + ingest EACH at CHILD depth (no investigation fan-out, no
+        // nested directory expansion) so the jobs land in the queue instead
+        // of being dropped. Custom-domain greenhouse children (gh_jid) flow
+        // through ingestJob's verified tenant probe to full parses. The
+        // original task stays parked; its timeline records ONE
+        // LISTING_EXPANDED event with the funnel counts.
+        if (
+          !result.formFound &&
+          result.listingLinks &&
+          result.listingLinks.length > 0
+        ) {
+          try {
+            const outcomes = await classifyMany(
+              deps,
+              result.listingLinks,
+              'listing-expansion',
+              1,
+            );
+            listing = {
+              count: outcomes.length,
+              ingested: 0,
+              duplicates: 0,
+              unsupported: 0,
+              errors: 0,
+            };
+            for (const outcome of outcomes) {
+              if (outcome.kind === 'ingested') listing.ingested += 1;
+              else if (outcome.kind === 'duplicate') listing.duplicates += 1;
+              else if (outcome.kind === 'unsupported') listing.unsupported += 1;
+              else if (outcome.kind === 'error') listing.errors += 1;
+            }
+            await deps.db.insert(events).values({
+              taskId,
+              type: 'LISTING_EXPANDED',
+              data: listing,
+            });
+          } catch (error) {
+            // An expansion hiccup must not force a Cloud Run Job retry:
+            // record it on the run (per-link errors are already tolerated
+            // inside classifyMany — this catches only batch-level failures).
+            status = 'error';
+            formError = error instanceof Error ? error.message : String(error);
+          }
+        }
       }
 
       if (runId !== undefined) {
@@ -1343,13 +1410,16 @@ export function buildServer(deps: Deps): FastifyInstance {
       }
 
       // Edit the #ingest reply that announced this task so it reflects the
-      // outcome (form discovered / no form found). Never throws — a Discord
-      // failure must not change the 200 the investigator Job relies on.
+      // outcome (form discovered / no form found / listing expanded). Never
+      // throws — a Discord failure must not change the 200 the investigator
+      // Job relies on.
       await refreshIngestReply(deps, taskId);
 
-      return reply
-        .code(200)
-        .send(handoff !== undefined ? { ok: true, handoff } : { ok: true });
+      return reply.code(200).send({
+        ok: true,
+        ...(handoff !== undefined ? { handoff } : {}),
+        ...(listing !== undefined ? { listing } : {}),
+      });
     }
 
     const { result, transcript } = body.data;
@@ -1622,6 +1692,14 @@ export function buildServer(deps: Deps): FastifyInstance {
   // there, react + reply. No-op when Discord / the ingest channel is unset.
   app.post('/sources/discord/poll', async () => {
     return runDiscordIngestPoll(deps);
+  });
+
+  // Midnight-ET deadline alerts: ping the #alerts channel for every task
+  // whose effective deadline falls TODAY (America/New_York). Cloud Scheduler
+  // POSTs this at 00:00 ET; a manual POST is safe (per-task-per-day dedupe).
+  // No-op {enabled:false} until DISCORD_ALERTS_CHANNEL_ID is wired.
+  app.post('/alerts/deadlines', async () => {
+    return runDeadlineAlerts(deps);
   });
 
   // --- Workday session bridge (dashboard <-> local headful capture agent) ---

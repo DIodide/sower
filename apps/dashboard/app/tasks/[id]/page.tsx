@@ -294,6 +294,7 @@ function NextStep({
   canUnmark,
   unsupported,
   investigationRunning,
+  listing,
 }: {
   task: { id: string; state: string; lastError: string | null };
   requiredMissing: number;
@@ -315,6 +316,9 @@ function NextStep({
   unsupported?: boolean;
   /** The latest investigation run is still going. */
   investigationRunning?: boolean;
+  /** The page turned out to be a jobs LISTING whose links were expanded
+   *  into individual queue tasks (N added) — Investigate is demoted. */
+  listing?: { added: number } | null;
 }) {
   switch (task.state) {
     case 'NEEDS_INPUT': {
@@ -374,6 +378,23 @@ function NextStep({
       // "re-run once your profile covers it" would both be lies — there is
       // no form to fill. The honest asks: run the browser agent, or discard.
       if (unsupported) {
+        // The page was a jobs LISTING and its links were already expanded
+        // into individual tasks: the honest next step is those tasks, not
+        // another investigation (which would only re-find the listing).
+        if (listing) {
+          return (
+            <div className="banner banner--neutral">
+              <p>
+                <strong>This is a listings page</strong> — {listing.added}{' '}
+                individual job{listing.added === 1 ? ' was' : 's were'} added to
+                your queue.{' '}
+                <Link href="/">See them on the applications list</Link>. There
+                is no single application to fill on this page itself — discard
+                it once you no longer need the reference.
+              </p>
+            </div>
+          );
+        }
         if (investigationRunning) {
           return (
             <div className="banner banner--progress">
@@ -727,6 +748,28 @@ export default async function TaskPage({
         })()
       : null;
 
+  // Listing expansion: the latest form run classified this unsupported page
+  // as a LISTING (its result carries the extracted listingLinks) and the
+  // links were ingested (ONE LISTING_EXPANDED event with the funnel counts).
+  // N = the new tasks the expansion added (queued + recorded-unsupported).
+  const listingExpansion = (() => {
+    if (!unsupported || !investigation?.result) return null;
+    const result = investigation.result;
+    if (!('formFound' in result) || !result.listingLinks?.length) return null;
+    const event = [...eventRows]
+      .reverse()
+      .find((e) => e.type === 'LISTING_EXPANDED');
+    if (!event) return null;
+    const data =
+      event.data && typeof event.data === 'object' && !Array.isArray(event.data)
+        ? (event.data as Record<string, unknown>)
+        : undefined;
+    const ingested = typeof data?.ingested === 'number' ? data.ingested : 0;
+    const unsupportedCount =
+      typeof data?.unsupported === 'number' ? data.unsupported : 0;
+    return { added: ingested + unsupportedCount };
+  })();
+
   // "Un-mark applied" gate: SUBMITTED tasks whose latest SUBMITTED-entering
   // event is the out-of-band MARK_SUBMITTED — a real SUBMIT_OK can't be
   // taken back (the api enforces the same rule with a 409). Events are
@@ -811,6 +854,7 @@ export default async function TaskPage({
         canUnmark={canUnmark}
         unsupported={unsupported}
         investigationRunning={investigation?.status === 'running'}
+        listing={listingExpansion}
       />
 
       {/* ---- job & task metadata ---- */}
