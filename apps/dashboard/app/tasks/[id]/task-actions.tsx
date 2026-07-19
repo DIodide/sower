@@ -55,11 +55,15 @@ export function TaskActions({
   const [result, formAction, pending] = useActionState<
     ActionResult | null,
     FormData
-  >(async () => {
+  >(async (_prev, formData) => {
     if (mode === 'approve') return approveTask(taskId);
     if (mode === 'start') return startSessionCapture(taskId);
     if (mode === 'verify') return verifyDiscoveredForm(taskId);
-    if (mode === 'discard') return discardTask(taskId);
+    if (mode === 'discard') {
+      // The optional "why" typed next to the button — empty is fine.
+      const note = formData.get('note');
+      return discardTask(taskId, typeof note === 'string' ? note : undefined);
+    }
     return requeueTask(taskId);
   }, null);
 
@@ -75,6 +79,18 @@ export function TaskActions({
         >
           {pending ? 'Working…' : label.idle}
         </button>
+        {mode === 'discard' ? (
+          <input
+            type="text"
+            name="note"
+            className="field discard-note"
+            placeholder="why? (optional — saved with the discard)"
+            aria-label="Discard note (optional)"
+            title="Saved with the discard so future-you knows why"
+            maxLength={2000}
+            disabled={pending}
+          />
+        ) : null}
       </div>
       {result ? (
         <p

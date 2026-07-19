@@ -17,6 +17,7 @@ import { notFound } from 'next/navigation';
 import type { ReactNode } from 'react';
 import { getDb } from '../../../lib/db';
 import { eventLabel, formatLocal, type Tone } from '../../../lib/format';
+import { PriorityControl } from '../../../lib/priority-control';
 import {
   Empty,
   ExpandableText,
@@ -184,6 +185,7 @@ function NextStep({
   needsSession,
   session,
   tenant,
+  discardNote,
 }: {
   task: { id: string; state: string; lastError: string | null };
   requiredMissing: number;
@@ -192,6 +194,8 @@ function NextStep({
   needsSession?: boolean;
   session?: WorkdaySessionRow;
   tenant?: string | null;
+  /** The latest DISCARD event's human "why" note (DISCARDED tasks only). */
+  discardNote?: string | null;
 }) {
   switch (task.state) {
     case 'NEEDS_INPUT': {
@@ -338,9 +342,10 @@ function NextStep({
       return (
         <div className="banner banner--neutral">
           <p>
-            <strong>Discarded.</strong> This task was removed from the queue —
-            nothing will run for it anymore. The record and history are kept
-            below.
+            <strong>Discarded</strong>
+            {discardNote ? <> — {discardNote}</> : null}. This task was removed
+            from the queue — nothing will run for it anymore. The record and
+            history are kept below.
           </p>
         </div>
       );
@@ -471,6 +476,23 @@ export default async function TaskPage({
     (s.states as string[]).includes(task.state),
   );
 
+  // The latest DISCARD event's optional human note ("why"), surfaced in the
+  // Discarded banner. Events are ordered ascending, so scan from the end.
+  const discardNote =
+    task.state === 'DISCARDED'
+      ? (() => {
+          const event = [...eventRows]
+            .reverse()
+            .find((e) => e.type === 'DISCARD');
+          const data = event?.data;
+          const note =
+            data && typeof data === 'object' && !Array.isArray(data)
+              ? (data as Record<string, unknown>).note
+              : undefined;
+          return typeof note === 'string' && note !== '' ? note : null;
+        })()
+      : null;
+
   return (
     <div>
       <p style={{ margin: '0 0 1rem' }}>
@@ -495,6 +517,13 @@ export default async function TaskPage({
             </span>
           </h1>
           <StateBadge state={task.state} />
+          <PriorityControl
+            taskId={task.id}
+            priority={task.priority}
+            disabled={['SUBMITTED', 'CONFIRMED', 'DISCARDED'].includes(
+              task.state,
+            )}
+          />
           {task.attempt > 0 ? (
             <span className="q-meta">attempt {task.attempt}</span>
           ) : null}
@@ -620,6 +649,7 @@ export default async function TaskPage({
         needsSession={needsSession}
         session={sessionRow}
         tenant={job?.tenant}
+        discardNote={discardNote}
       />
 
       {/* ---- ingested screenshots (manual triage source) ---- */}

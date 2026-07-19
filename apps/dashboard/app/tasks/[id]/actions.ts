@@ -414,13 +414,30 @@ export async function verifyDiscoveredForm(
 
 /**
  * Discard a task via the api service: a human removes it from the queue
- * (terminal DISCARDED state; refused for SUBMITTED/CONFIRMED). Revalidates
- * the task page plus the queue and home lists the row disappears from.
+ * (terminal DISCARDED state; refused for SUBMITTED/CONFIRMED). An optional
+ * short note ("why") travels with it and is stored on the DISCARD event —
+ * absent or blank means exactly the note-less discard the rows use.
+ * Revalidates the task page plus the queue and home lists the row
+ * disappears from.
  */
-export async function discardTask(taskId: string): Promise<ActionResult> {
+export async function discardTask(
+  taskId: string,
+  note?: string,
+): Promise<ActionResult> {
   const idParse = uuidSchema.safeParse(taskId);
   if (!idParse.success) return { ok: false, message: 'invalid task id.' };
-  const result = await callApi(idParse.data, 'discard');
+  const trimmed = typeof note === 'string' ? note.trim() : '';
+  if (trimmed.length > 2000) {
+    return {
+      ok: false,
+      message: 'discard note is too long (max 2,000 characters).',
+    };
+  }
+  const result = await callApi(
+    idParse.data,
+    'discard',
+    trimmed === '' ? undefined : { note: trimmed },
+  );
   revalidatePath(`/tasks/${idParse.data}`);
   revalidatePath('/');
   return result;

@@ -690,6 +690,14 @@ select.field {
   margin-bottom: 0.25rem;
 }
 
+/* the optional "why" typed next to Discard — compact, never dominates */
+.discard-note {
+  width: auto;
+  flex: 1 1 12rem;
+  max-width: 20rem;
+  font-size: 0.8125rem;
+}
+
 input[type="checkbox"],
 input[type="radio"] {
   accent-color: var(--accent);
@@ -1171,13 +1179,13 @@ details.filter-pop > summary::-webkit-details-marker {
   border: 1px solid var(--line);
 }
 
-/* Rigid columns are tiny (check, pri, updated) or content-sized (actions);
+/* Rigid columns are tiny (check, updated) or content-sized (pri, actions);
    the three text columns are minmax(0, fr) so they truncate instead of
    forcing horizontal overflow at any viewport ≥1024px. */
 .grid-row {
   display: grid;
   grid-template-columns:
-    1rem 1rem minmax(0, 1.8fr) minmax(0, 1.2fr)
+    1rem max-content minmax(0, 1.8fr) minmax(0, 1.2fr)
     minmax(0, 1fr) 4rem max-content;
   gap: 0.5rem;
   align-items: center;
@@ -1299,39 +1307,71 @@ details.filter-pop > summary::-webkit-details-marker {
   background: var(--ink-faint);
 }
 
-/* priority cycler — a small pip; the label lives in the tooltip */
-.pri {
-  display: inline-block;
-  width: 0.75rem;
-  height: 0.75rem;
+/* priority control — ▼/▲ steppers flanking a micro level indicator
+   (High/Low labels; Normal is a quiet dash). Flat and hairline like every
+   other small control. */
+.pri-ctl {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.125rem;
+}
+
+.pri-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.125rem;
+  min-height: 1.125rem;
+  padding: 0.0625rem 0.1875rem;
   border: 1px solid transparent;
-  border-radius: 50%;
-  padding: 0;
+  border-radius: var(--r-ctl);
+  background: none;
+  font-size: 0.5625rem;
+  line-height: 1;
+  color: var(--ink-faint);
   cursor: pointer;
   transition:
     background 120ms ease,
-    border-color 120ms ease;
+    border-color 120ms ease,
+    color 120ms ease;
 }
 
-.pri--high {
-  background: var(--attention-edge);
-  border-color: #b9880f;
-}
-
-.pri--normal {
-  background: #c9cdd8;
-  border-color: #b3b9c6;
-}
-
-.pri--low {
-  background: transparent;
+.pri-step:hover:not(:disabled) {
+  background: var(--well);
   border-color: var(--line-strong);
+  color: var(--ink);
 }
 
-/* sent/discarded rows: the pip stays (state is still legible) but goes inert */
-.pri:disabled {
+/* at the end of the range (or on a sent/discarded task) a step goes inert */
+.pri-step:disabled {
+  opacity: 0.35;
   cursor: default;
-  opacity: 0.45;
+}
+
+.pri-level {
+  min-width: 2rem;
+  text-align: center;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--ink-faint);
+}
+
+.pri-level--high {
+  color: var(--attention-fg);
+}
+
+.pri-level--normal {
+  font-weight: 400;
+}
+
+/* sent/discarded rows: the level stays legible but reads as inactive */
+.pri-ctl--locked .pri-level {
+  opacity: 0.6;
+}
+
+.pri-err {
+  font-size: 0.6875rem;
 }
 
 /* inline note */
@@ -1536,6 +1576,13 @@ details.show-more[open] > summary {
 
   .tr-pri {
     grid-area: pri;
+  }
+
+  /* touch-friendly steppers: ~28px hit areas via padding, row stays compact */
+  .pri-step {
+    min-width: 1.75rem;
+    min-height: 1.75rem;
+    font-size: 0.625rem;
   }
 
   .tr-label {

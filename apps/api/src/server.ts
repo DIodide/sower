@@ -150,6 +150,14 @@ const bulkDiscardBodySchema = z.object({
   taskIds: z.array(z.string().uuid()).min(1).max(100),
 });
 
+// Optional single-discard body: a human note ("why") stored on the DISCARD
+// event. No body / empty-after-trim = exactly the note-less discard.
+const discardBodySchema = z
+  .object({
+    note: z.string().trim().max(2000).optional(),
+  })
+  .optional();
+
 const tenantParamsSchema = z.object({
   tenant: z.string().min(1).max(120),
 });
@@ -412,7 +420,8 @@ export function buildServer(deps: Deps): FastifyInstance {
   // Discard a task: a human removes it from the queue (terminal DISCARDED
   // state). Allowed from every non-terminal state EXCEPT SUBMITTED/CONFIRMED —
   // an application already sent can't be "removed from the queue". Idempotent:
-  // re-discarding a DISCARDED task is a 200 no-op.
+  // re-discarding a DISCARDED task is a 200 no-op. The optional body note
+  // ("why") is stored on the DISCARD event's data.
   app.post('/tasks/:id/discard', async (request, reply) => {
     const parsed = taskParamsSchema.safeParse(request.params);
     if (!parsed.success) {
@@ -420,6 +429,13 @@ export function buildServer(deps: Deps): FastifyInstance {
         .code(400)
         .send({ error: 'invalid task id', issues: parsed.error.issues });
     }
+    const body = discardBodySchema.safeParse(request.body ?? undefined);
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid body', issues: body.error.issues });
+    }
+    const note = body.data?.note;
     const taskId = parsed.data.id;
     const rows = await deps.db
       .select({ state: applicationTasks.state })
@@ -443,6 +459,8 @@ export function buildServer(deps: Deps): FastifyInstance {
     }
     await transitionTask(deps.db, taskId, row.state, 'DISCARD', {
       reason: 'manual',
+      // Omit the key entirely when absent/blank — event data stays minimal.
+      ...(note ? { note } : {}),
     });
     // Best-effort: the reply line for this task flips to "discarded".
     await refreshIngestReply(deps, taskId);

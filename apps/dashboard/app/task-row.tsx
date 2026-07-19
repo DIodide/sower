@@ -1,25 +1,26 @@
 'use client';
 
-// One Applications-workspace row: priority cycler, label link, plain-words
-// status (tone dot + phrase), inline note, relative time, and actions.
-// Recovery actions (Retry/Investigate/Restore) are always visible; only the
-// destructive Discard (with an undo toast) and the bulk-select checkbox are
+// One Applications-workspace row: priority stepper (▼/▲, see
+// lib/priority-control), label link, plain-words status (tone dot + phrase),
+// inline note, relative time, and actions. Recovery actions
+// (Retry/Investigate/Restore) are always visible; only the destructive
+// Discard (with an undo toast) and the bulk-select checkbox are
 // hover/focus-revealed. Rendered as cells of the page's CSS grid list —
 // never a <table>.
 
-import { TASK_PRIORITY_LABELS, type TaskPriority } from '@sower/core';
+import type { TaskPriority } from '@sower/core';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import type { Tone } from '../lib/format';
 import { InlineNote } from '../lib/inline-note';
+import { PriorityControl } from '../lib/priority-control';
 import {
   type ActionResult,
   discardTask,
   investigateTask,
   requeueTask,
   restoreTask,
-  updateTaskMeta,
 } from './tasks/[id]/actions';
 import { useWorkspace } from './workspace';
 
@@ -42,19 +43,6 @@ export interface TaskRowData {
   updatedAbs: string;
 }
 
-/** Click cycle goes UP first: Normal → High → Low → Normal. */
-const NEXT_PRIORITY: Record<TaskPriority, TaskPriority> = {
-  0: 1,
-  1: -1,
-  [-1]: 0,
-};
-
-const PRIORITY_CLASS: Record<TaskPriority, string> = {
-  1: 'pri--high',
-  0: 'pri--normal',
-  [-1]: 'pri--low',
-};
-
 /** States the api refuses to discard (terminal, or already left the queue). */
 const UNDISCARDABLE = new Set([
   'SUBMITTED',
@@ -63,89 +51,20 @@ const UNDISCARDABLE = new Set([
   'DUPLICATE',
 ]);
 
-/** States where a priority no longer means anything — the pip goes inert. */
+/** States where a priority no longer means anything — the control goes inert. */
 const PRIORITY_LOCKED = new Set(['SUBMITTED', 'CONFIRMED', 'DISCARDED']);
-
-/** Rapid pip clicks coalesce into one absolute write of the latest value. */
-const PRIORITY_DEBOUNCE_MS = 400;
 
 export function TaskRow({ row }: { row: TaskRowData }) {
   const ws = useWorkspace();
   const router = useRouter();
   const [hidden, setHidden] = useState(false);
   const [busy, setBusy] = useState(false);
-  // SR-only live announcement ("Priority set to High").
-  const [announce, setAnnounce] = useState('');
-
-  // Optimistic priority, reset whenever the server sends a fresh value.
-  const [priority, setPriority] = useState(row.priority);
-  const [priorityProp, setPriorityProp] = useState(row.priority);
-  // Last server-confirmed value — the only rollback target.
-  const priBaseRef = useRef(row.priority);
-  if (row.priority !== priorityProp) {
-    setPriorityProp(row.priority);
-    setPriority(row.priority);
-    priBaseRef.current = row.priority;
-  }
-  // Monotonic choice counter: a result only applies if no newer choice (or
-  // newer write) happened since it was issued — stale failures are ignored.
-  const priSeqRef = useRef(0);
-  const priTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // The not-yet-written value, flushed (not dropped) on unmount.
-  const priPendingRef = useRef<TaskPriority | null>(null);
-
-  useEffect(
-    () => () => {
-      if (priTimerRef.current) {
-        clearTimeout(priTimerRef.current);
-        priTimerRef.current = null;
-        const pending = priPendingRef.current;
-        if (pending !== null) {
-          // Unmounting mid-debounce must not lose the chosen priority.
-          void updateTaskMeta(row.id, { priority: pending }).catch(() => {});
-        }
-      }
-    },
-    [row.id],
-  );
 
   // The in-flight discard, awaited by Undo so restore can't race it.
   const discardRef = useRef<Promise<ActionResult> | null>(null);
 
   const selectable = !UNDISCARDABLE.has(row.state);
   const priorityLocked = PRIORITY_LOCKED.has(row.state);
-
-  const cyclePriority = () => {
-    const next = NEXT_PRIORITY[priority];
-    const seq = ++priSeqRef.current;
-    setPriority(next);
-    setAnnounce(`Priority set to ${TASK_PRIORITY_LABELS[next]}`);
-    priPendingRef.current = next;
-    if (priTimerRef.current) clearTimeout(priTimerRef.current);
-    priTimerRef.current = setTimeout(() => {
-      priTimerRef.current = null;
-      priPendingRef.current = null;
-      updateTaskMeta(row.id, { priority: next })
-        .then((result) => {
-          if (seq !== priSeqRef.current) return; // a newer choice owns the pip
-          if (result.ok) {
-            priBaseRef.current = next;
-          } else {
-            setPriority(priBaseRef.current);
-            ws.toast(`Priority not saved — ${result.message}`, {
-              kind: 'error',
-            });
-          }
-        })
-        .catch(() => {
-          if (seq !== priSeqRef.current) return;
-          setPriority(priBaseRef.current);
-          ws.toast('Priority not saved — could not reach the server.', {
-            kind: 'error',
-          });
-        });
-    }, PRIORITY_DEBOUNCE_MS);
-  };
 
   const discard = (viaKeyboard: boolean) => {
     setHidden(true);
@@ -208,8 +127,6 @@ export function TaskRow({ row }: { row: TaskRowData }) {
 
   if (hidden) return null;
 
-  const priorityLabel = TASK_PRIORITY_LABELS[priority];
-
   return (
     <div className="grid-row">
       <span className="tr-check">
@@ -223,25 +140,12 @@ export function TaskRow({ row }: { row: TaskRowData }) {
         ) : null}
       </span>
       <span className="tr-pri">
-        <button
-          type="button"
-          className={`pri ${PRIORITY_CLASS[priority]}`}
+        <PriorityControl
+          taskId={row.id}
+          priority={row.priority}
           disabled={priorityLocked}
-          onClick={cyclePriority}
-          aria-label={
-            priorityLocked
-              ? `Priority: ${priorityLabel}`
-              : `Priority: ${priorityLabel} — click to change`
-          }
-          title={
-            priorityLocked
-              ? `Priority: ${priorityLabel}`
-              : `Priority: ${priorityLabel} — click to change`
-          }
+          onError={(message) => ws.toast(message, { kind: 'error' })}
         />
-        <span aria-live="polite" className="sr-only">
-          {announce}
-        </span>
       </span>
       <span className="tr-label">
         <span className={`dot dot--${row.tone} tr-dot-narrow`} aria-hidden />

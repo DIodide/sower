@@ -1299,6 +1299,82 @@ describe('buildServer', () => {
       expect(refreshState.calls).toEqual([TASK_ID]);
     });
 
+    it('stores a trimmed note in the DISCARD event data when one is sent', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[{ state: 'NEEDS_INPUT' }]],
+        insertResults: [[]], // DISCARD event
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/tasks/${TASK_ID}/discard`,
+        headers: { 'x-api-key': 'test-key' },
+        payload: { note: '  role is on-site only  ' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ ok: true });
+      const discardEvent = writes
+        .filter((w) => w.method === 'insert' && w.table === events)
+        .map((w) => w.arg as Record<string, unknown>)
+        .find((arg) => arg.type === 'DISCARD');
+      expect(discardEvent?.data).toEqual({
+        reason: 'manual',
+        note: 'role is on-site only',
+      });
+    });
+
+    it('treats a whitespace-only note as absent (no note key in the event)', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[{ state: 'NEEDS_INPUT' }]],
+        insertResults: [[]], // DISCARD event
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/tasks/${TASK_ID}/discard`,
+        headers: { 'x-api-key': 'test-key' },
+        payload: { note: '   ' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const discardEvent = writes
+        .filter((w) => w.method === 'insert' && w.table === events)
+        .map((w) => w.arg as Record<string, unknown>)
+        .find((arg) => arg.type === 'DISCARD');
+      expect(discardEvent?.data).toEqual({ reason: 'manual' });
+    });
+
+    it('rejects an over-long note (400, nothing written)', async () => {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[{ state: 'NEEDS_INPUT' }]],
+        writes,
+      });
+      const { deps } = createDeps(db);
+      const app = buildServer(deps);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/tasks/${TASK_ID}/discard`,
+        headers: { 'x-api-key': 'test-key' },
+        payload: { note: 'x'.repeat(2001) },
+      });
+
+      expect(res.statusCode).toBe(400);
+      expect(res.json()).toMatchObject({ error: 'invalid body' });
+      expect(writes).toEqual([]);
+      expect(refreshState.calls).toEqual([]);
+    });
+
     it('is idempotent: an already-DISCARDED task is a 200 no-op (but still refreshes)', async () => {
       const writes: DbWrite[] = [];
       const db = createFakeDb({
