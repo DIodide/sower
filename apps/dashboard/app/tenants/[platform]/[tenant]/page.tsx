@@ -4,6 +4,7 @@ import { and, asc, desc, eq, isNotNull } from 'drizzle-orm';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { getDb } from '../../../../lib/db';
+import { eventLabel } from '../../../../lib/format';
 import {
   Empty,
   ExpandableText,
@@ -256,7 +257,7 @@ export default async function TenantPage({
                 <td>
                   <Timestamp value={event.createdAt} inline />
                 </td>
-                <td className="mono">{event.type}</td>
+                <td title={event.type}>{eventLabel(event.type)}</td>
                 <td style={{ whiteSpace: 'nowrap' }}>
                   {event.fromState ? (
                     <StateBadge state={event.fromState} />

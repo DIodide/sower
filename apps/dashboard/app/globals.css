@@ -90,7 +90,6 @@ body {
       transparent 60%
     ),
     var(--bg);
-  background-attachment: fixed;
   color: var(--ink);
   font-family: var(--font-sans), "Nunito", ui-sans-serif, system-ui, sans-serif;
   font-size: 16px;
@@ -109,8 +108,16 @@ body::before {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 0.35 0 0 0 0 0.38 0 0 0 0 0.55 0 0 0 0.05 0'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
+/* fixed backgrounds repaint on every scroll frame on touch devices —
+   only pin the gradient where a real pointer (desktop) is driving */
+@media (hover: hover) and (pointer: fine) {
+  body {
+    background-attachment: fixed;
+  }
+}
+
 main,
-header.site {
+.site-header {
   position: relative;
   z-index: 1;
 }
@@ -231,6 +238,21 @@ pre,
   color: var(--accent-deep);
   background: linear-gradient(165deg, var(--surface-hi), var(--surface));
   box-shadow: var(--clay-sm);
+}
+
+/* System: pushed right and muted — reachable, but visibly secondary */
+.site-nav a.nav-secondary {
+  margin-left: 1.25rem;
+  color: var(--ink-faint);
+  font-weight: 600;
+}
+
+.site-nav a.nav-secondary:hover {
+  color: var(--ink-muted);
+}
+
+.site-nav a.nav-secondary[aria-current="page"] {
+  color: var(--ink-muted);
 }
 
 /* ------------------------------------------------------------------- cards */
@@ -1026,6 +1048,516 @@ details.expand > summary:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ------------------------------------------------- applications workspace */
+
+/* quick-add bar */
+.quick-add {
+  margin-bottom: 1.25rem;
+}
+
+.quick-add-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+.quick-add-input {
+  flex: 1 1 auto;
+  border: none;
+  border-radius: var(--r-sm);
+  background: var(--well);
+  box-shadow: var(--clay-well);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  padding: 0.55rem 0.8rem;
+  resize: none;
+  transition: box-shadow 150ms ease;
+}
+
+.quick-add-input::placeholder {
+  color: var(--ink-faint);
+}
+
+.quick-add-input:focus {
+  outline: none;
+  box-shadow:
+    var(--clay-well),
+    0 0 0 3px rgba(91, 110, 225, 0.35);
+}
+
+.quick-add-foot {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 0.375rem;
+  min-height: 1.1rem;
+}
+
+.quick-add-foot [role="status"] {
+  font-size: 0.8125rem;
+}
+
+.quick-add-manual-link {
+  margin-left: auto;
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+
+.quick-add-manual-link:hover {
+  color: var(--accent-deep);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.quick-add-manual {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.625rem;
+}
+
+.quick-add-manual .field {
+  flex: 1 1 10rem;
+  width: auto;
+}
+
+/* filter strip: search left, chips right, one row (wraps when cramped) */
+.filter-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin: 0 0 0.75rem;
+}
+
+.filter-search {
+  flex: 1 1 14rem;
+  max-width: 22rem;
+}
+
+.filter-chips {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.filter-pop {
+  position: relative;
+}
+
+details.filter-pop > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+details.filter-pop > summary::-webkit-details-marker {
+  display: none;
+}
+
+.filter-pop[open] > summary {
+  color: var(--accent-deep);
+  background: var(--well);
+  box-shadow: var(--clay-pressed);
+}
+
+.filter-pop-body {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.5rem);
+  z-index: 30;
+  min-width: min(20rem, 88vw);
+  padding: 0.875rem 1rem;
+  border-radius: var(--r-md);
+  background: linear-gradient(165deg, var(--surface-hi), var(--surface));
+  box-shadow:
+    0 14px 30px rgba(var(--shade), 0.28),
+    var(--clay-sm);
+}
+
+.filter-pop-label {
+  font-size: 0.72rem;
+  font-weight: 800;
+  color: var(--ink-faint);
+  margin-bottom: 0.375rem;
+}
+
+/* the grid list (never a <table>) */
+.row-list {
+  background: linear-gradient(165deg, var(--surface-hi), var(--surface));
+  border-radius: var(--r-lg);
+  box-shadow: var(--clay);
+  padding: 0.375rem 0.875rem;
+}
+
+.grid-row {
+  display: grid;
+  grid-template-columns:
+    1.1rem 1.4rem minmax(11rem, 1.4fr) minmax(9.5rem, 1.1fr)
+    minmax(7rem, 1.2fr) 4rem max-content;
+  gap: 0.625rem;
+  align-items: center;
+  padding: 0.55rem 0.25rem;
+  border-top: var(--border-soft);
+  transition: background 120ms ease;
+}
+
+.row-list > .grid-row:first-child {
+  border-top: none;
+}
+
+.grid-row:hover {
+  background: rgba(var(--shade), 0.05);
+}
+
+.grid-row > * {
+  min-width: 0;
+}
+
+.tr-check {
+  display: inline-flex;
+  visibility: hidden;
+}
+
+.grid-row:hover .tr-check,
+.grid-row:focus-within .tr-check,
+.has-selection .tr-check {
+  visibility: visible;
+}
+
+.tr-label {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-weight: 800;
+  font-size: 0.9rem;
+}
+
+.tr-label a {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tr-dot-narrow {
+  display: none;
+}
+
+.tr-status {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.8125rem;
+  color: var(--ink-muted);
+}
+
+.tr-phrase {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tr-when {
+  font-size: 0.8125rem;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+
+.tr-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  justify-self: end;
+  visibility: hidden;
+}
+
+.grid-row:hover .tr-actions,
+.grid-row:focus-within .tr-actions {
+  visibility: visible;
+}
+
+/* status dot */
+.dot {
+  flex: none;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.dot--attention {
+  background: #d9a41c;
+  box-shadow: 0 0 0 3px rgba(217, 164, 28, 0.18);
+}
+
+.dot--progress {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(91, 110, 225, 0.16);
+}
+
+.dot--success {
+  background: var(--success-deep);
+  box-shadow: 0 0 0 3px rgba(47, 139, 87, 0.16);
+}
+
+.dot--danger {
+  background: var(--danger-fg);
+  box-shadow: 0 0 0 3px rgba(168, 58, 63, 0.15);
+}
+
+.dot--neutral {
+  background: var(--ink-faint);
+  box-shadow: 0 0 0 3px rgba(var(--shade), 0.12);
+}
+
+/* priority cycler — a pressable clay pip; the label lives in the tooltip */
+.pri {
+  display: inline-block;
+  width: 1.05rem;
+  height: 1.05rem;
+  border: none;
+  border-radius: 50%;
+  padding: 0;
+  cursor: pointer;
+  transition:
+    transform 150ms ease,
+    box-shadow 150ms ease,
+    background 150ms ease;
+}
+
+.pri:hover {
+  transform: translateY(-1px);
+}
+
+.pri:active {
+  transform: translateY(1px);
+}
+
+.pri--high {
+  background: linear-gradient(160deg, #f2ca57, #dda616);
+  box-shadow:
+    0 0 0 3px rgba(217, 164, 28, 0.25),
+    var(--clay-sm);
+}
+
+.pri--normal {
+  background: var(--well);
+  box-shadow: var(--clay-well);
+}
+
+.pri--low {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px rgba(var(--shade), 0.2);
+  opacity: 0.55;
+}
+
+/* inline note */
+.note-wrap {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.note-btn {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: 0.8125rem;
+  color: var(--ink-faint);
+  text-align: left;
+  cursor: text;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.note-ghost {
+  opacity: 0;
+  font-style: italic;
+  transition: opacity 120ms ease;
+}
+
+.grid-row:hover .note-ghost,
+.grid-row:focus-within .note-ghost,
+.note-ghost:focus-visible {
+  opacity: 1;
+}
+
+.note-edit {
+  width: 100%;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-family: inherit;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--ink);
+  resize: none;
+}
+
+.note-edit:focus {
+  outline: none;
+}
+
+.note-saved {
+  flex: none;
+  font-size: 0.72rem;
+  font-weight: 800;
+  color: var(--success-fg);
+}
+
+.note-err {
+  font-size: 0.72rem;
+}
+
+/* "show all N" expander inside the Sent list */
+details.show-more > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  padding: 0.55rem 0.25rem;
+  border-top: var(--border-soft);
+  font-size: 0.8125rem;
+  font-weight: 700;
+  color: var(--ink-muted);
+}
+
+details.show-more > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.show-more > summary:hover {
+  color: var(--accent-deep);
+}
+
+details.show-more[open] > summary {
+  display: none;
+}
+
+/* sticky select bar + undo toast, docked bottom-center above everything */
+.bottom-dock {
+  position: fixed;
+  left: 50%;
+  bottom: 1.25rem;
+  transform: translateX(-50%);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.625rem;
+  pointer-events: none;
+  max-width: calc(100vw - 2rem);
+}
+
+.toast,
+.select-bar {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.55rem 1.125rem;
+  border-radius: 999px;
+  background: linear-gradient(165deg, var(--surface-hi), var(--surface));
+  box-shadow:
+    0 12px 28px rgba(var(--shade), 0.32),
+    inset 0 2px 5px rgba(255, 255, 255, 0.6),
+    inset 0 -3px 6px rgba(var(--shade), 0.08);
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+/* touch: no hover to reveal with — actions, checkboxes, ghosts stay visible */
+@media (hover: none) {
+  .tr-check,
+  .tr-actions {
+    visibility: visible;
+  }
+
+  .note-ghost {
+    opacity: 1;
+  }
+}
+
+/* narrow: the grid collapses to two-line cards; nothing scrolls sideways */
+@media (max-width: 700px) {
+  .grid-row {
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "pri label label check"
+      "status status note actions";
+    row-gap: 0.25rem;
+    padding: 0.625rem 0.25rem;
+  }
+
+  .tr-pri {
+    grid-area: pri;
+  }
+
+  .tr-label {
+    grid-area: label;
+  }
+
+  .tr-check {
+    grid-area: check;
+    visibility: visible;
+    justify-self: end;
+  }
+
+  .tr-status {
+    grid-area: status;
+  }
+
+  /* line 1 carries the status dot next to the label; line 2 keeps the phrase */
+  .tr-dot-narrow {
+    display: inline-block;
+  }
+
+  .tr-status > .dot {
+    display: none;
+  }
+
+  .tr-note {
+    grid-area: note;
+  }
+
+  .tr-actions {
+    grid-area: actions;
+    visibility: visible;
+    justify-self: end;
+  }
+
+  .tr-when {
+    display: none;
+  }
+
+  .filter-search {
+    max-width: none;
+  }
+
+  .filter-chips {
+    margin-left: 0;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

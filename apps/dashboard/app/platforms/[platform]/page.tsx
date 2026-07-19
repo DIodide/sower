@@ -166,7 +166,7 @@ export default async function PlatformPage({
   return (
     <div>
       <p style={{ margin: '0 0 1rem' }}>
-        <Link href="/platforms" className="hint">
+        <Link href="/system#platforms" className="hint">
           ← All platforms
         </Link>
       </p>

@@ -130,7 +130,6 @@ export async function pasteIngest(text: string): Promise<ActionResult> {
   }
 
   revalidatePath('/');
-  revalidatePath('/queue');
 
   if (summary.urls === 0) {
     return {
@@ -192,7 +191,6 @@ export async function manualAdd(input: {
   }
 
   revalidatePath('/');
-  revalidatePath('/queue');
   return {
     ok: true,
     message: `added ${parsed.data.company} — parked as needs-input${result.taskId ? '' : ' (task id unavailable)'}.`,

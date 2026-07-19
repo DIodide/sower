@@ -16,7 +16,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import type { ReactNode } from 'react';
 import { getDb } from '../../../lib/db';
-import { formatLocal, type Tone } from '../../../lib/format';
+import { eventLabel, formatLocal, type Tone } from '../../../lib/format';
 import {
   Empty,
   ExpandableText,
@@ -768,10 +768,10 @@ export default async function TaskPage({
                 <li key={event.id}>
                   <div className="row" style={{ alignItems: 'baseline' }}>
                     <span
-                      className="mono"
-                      style={{ fontSize: '0.8125rem', fontWeight: 700 }}
+                      title={event.type}
+                      style={{ fontSize: '0.875rem', fontWeight: 700 }}
                     >
-                      {event.type}
+                      {eventLabel(event.type)}
                     </span>
                     {event.fromState || event.toState ? (
                       <span

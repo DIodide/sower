@@ -15,16 +15,19 @@ export function StateBadge({ state }: { state: string }) {
 }
 
 /**
- * A readable timestamp: relative time up top ("3m ago") for a quick scan, exact
- * local time below ("Jul 13, 3:47 PM EDT") for precision. `inline` renders them
- * on one line ("3m ago · Jul 13, 3:47 PM EDT"). Renders "—" for a null value.
+ * A readable timestamp. Default (tables/lists): single-line relative time
+ * ("3h ago") with the exact local time in the tooltip. `inline` renders both
+ * on one line ("3m ago · Jul 13, 3:47 PM EDT") and `stacked` puts the exact
+ * time on a second line — both for detail pages. Renders "—" for null.
  */
 export function Timestamp({
   value,
   inline = false,
+  stacked = false,
 }: {
   value: Date | string | null | undefined;
   inline?: boolean;
+  stacked?: boolean;
 }) {
   if (!value) return <span className="faint">—</span>;
   const abs = formatLocal(value);
@@ -36,15 +39,22 @@ export function Timestamp({
       </span>
     );
   }
+  if (stacked) {
+    return (
+      <span className="ts" title={abs} style={{ whiteSpace: 'nowrap' }}>
+        <span className="ts-rel">{rel}</span>
+        <span
+          className="ts-abs faint"
+          style={{ display: 'block', fontSize: '0.72rem' }}
+        >
+          {abs}
+        </span>
+      </span>
+    );
+  }
   return (
     <span className="ts" title={abs} style={{ whiteSpace: 'nowrap' }}>
-      <span className="ts-rel">{rel}</span>
-      <span
-        className="ts-abs faint"
-        style={{ display: 'block', fontSize: '0.72rem' }}
-      >
-        {abs}
-      </span>
+      {rel}
     </span>
   );
 }

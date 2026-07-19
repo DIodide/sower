@@ -349,7 +349,6 @@ export async function updateTaskMeta(
   }
   const result = await callApi(idParse.data, 'meta', metaParse.data);
   revalidatePath(`/tasks/${idParse.data}`);
-  revalidatePath('/queue');
   revalidatePath('/');
   return result;
 }
@@ -416,7 +415,21 @@ export async function discardTask(taskId: string): Promise<ActionResult> {
   if (!idParse.success) return { ok: false, message: 'invalid task id.' };
   const result = await callApi(idParse.data, 'discard');
   revalidatePath(`/tasks/${idParse.data}`);
-  revalidatePath('/queue');
+  revalidatePath('/');
+  return result;
+}
+
+/**
+ * Restore a DISCARDED task via the api service (the Archive's Restore and the
+ * discard toast's Undo). Lands back in NEEDS_INPUT; restoring a task that is
+ * already NEEDS_INPUT is a no-op on the api side, so a double-clicked undo
+ * never errors.
+ */
+export async function restoreTask(taskId: string): Promise<ActionResult> {
+  const idParse = uuidSchema.safeParse(taskId);
+  if (!idParse.success) return { ok: false, message: 'invalid task id.' };
+  const result = await callApi(idParse.data, 'restore');
+  revalidatePath(`/tasks/${idParse.data}`);
   revalidatePath('/');
   return result;
 }
@@ -432,7 +445,7 @@ export async function investigateTask(taskId: string): Promise<ActionResult> {
   if (!idParse.success) return { ok: false, message: 'invalid task id.' };
   const result = await callApi(idParse.data, 'investigate');
   revalidatePath(`/tasks/${idParse.data}`);
-  revalidatePath('/queue');
+  revalidatePath('/');
   return result;
 }
 
@@ -489,6 +502,7 @@ async function callApi(
     | 'start'
     | 'verify-form'
     | 'discard'
+    | 'restore'
     | 'investigate'
     | 'meta',
   jsonBody?: Record<string, unknown>,
@@ -574,6 +588,13 @@ async function callApi(
     return {
       ok: true,
       message: 'task discarded — removed from the queue.',
+    };
+  }
+
+  if (action === 'restore') {
+    return {
+      ok: true,
+      message: 'task restored — back in the queue as needs-input.',
     };
   }
 

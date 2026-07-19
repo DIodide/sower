@@ -302,6 +302,7 @@ function QuestionRow({
       <div className="q-label-row">
         <label
           className="q-label"
+          title={`${view.id} · ${view.type}`}
           htmlFor={
             interactive &&
             view.status === 'missing' &&
@@ -325,9 +326,6 @@ function QuestionRow({
             <Badge tone="neutral">optional</Badge>
           )
         ) : null}
-        <span className="q-meta">
-          {view.id} · {view.type}
-        </span>
       </div>
       {view.help ? (
         <p
