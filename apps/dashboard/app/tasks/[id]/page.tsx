@@ -539,9 +539,13 @@ function NextStep({
                     The individual jobs are in <Link href="/">your queue</Link>.{' '}
                   </>
                 ) : null}
-                Restore it if this rule got it wrong.
+                Restore it if this rule got it wrong — or re-ingest it to give
+                it another go from scratch.
               </p>
-              <TaskActions taskId={task.id} mode="restore" />
+              <div className="row" style={{ alignItems: 'flex-start' }}>
+                <TaskActions taskId={task.id} mode="restore" />
+                <TaskActions taskId={task.id} mode="reingest" />
+              </div>
             </div>
           </div>
         );
@@ -553,9 +557,13 @@ function NextStep({
               <strong>Discarded</strong>
               {discard?.note ? <> — {discard.note}</> : null}. Moved to the
               Archive; the record and history are kept below. Restore it to pick
-              this application back up.
+              this application back up — or re-ingest it to give it another go
+              from scratch.
             </p>
-            <TaskActions taskId={task.id} mode="restore" />
+            <div className="row" style={{ alignItems: 'flex-start' }}>
+              <TaskActions taskId={task.id} mode="restore" />
+              <TaskActions taskId={task.id} mode="reingest" />
+            </div>
           </div>
         </div>
       );
@@ -1004,9 +1012,11 @@ export default async function TaskPage({
           ) : null}
         </div>
 
-        {/* ---- action row: mark applied + discard (hidden once sent or
-             already discarded; DUPLICATE keeps only discard). Both note
-             inputs reveal after the first click (two-step confirm). ---- */}
+        {/* ---- action row: mark applied + discard + re-ingest (hidden once
+             sent or already discarded — the DISCARDED banner carries its own
+             Re-ingest next to Restore; DUPLICATE keeps discard + re-ingest).
+             Both note inputs reveal after the first click (two-step
+             confirm). ---- */}
         {!['SUBMITTED', 'CONFIRMED', 'DISCARDED'].includes(task.state) ? (
           <>
             <hr className="divider-soft" />
@@ -1015,6 +1025,7 @@ export default async function TaskPage({
                 <TaskActions taskId={task.id} mode="mark-applied" />
               ) : null}
               <TaskActions taskId={task.id} mode="discard" />
+              <TaskActions taskId={task.id} mode="reingest" />
             </div>
           </>
         ) : null}

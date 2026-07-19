@@ -2,10 +2,11 @@
 
 // The interactive right pane of a resume: flat tabs for "Ask Claude"
 // (natural-language change request → agent run), "Edit source" (the raw .tex
-// with dirty-tracking + beforeunload guard), and "History" (the last runs
-// with expandable transcripts). One run is polled at a time; Send/Save stay
-// disabled until it settles, and a successful run router.refresh()es so the
-// PDF preview, source, and history all converge on the server's truth.
+// with dirty-tracking + beforeunload guard), "History" (the last runs with
+// expandable transcripts), and "Share" (public …/r/<token> links). One run is
+// polled at a time; Send/Save stay disabled until it settles, and a
+// successful run router.refresh()es so the PDF preview, source, and history
+// all converge on the server's truth.
 
 import { useRouter } from 'next/navigation';
 import { useEffect, useRef, useState, useTransition } from 'react';
@@ -21,6 +22,7 @@ import {
   shortSha,
 } from './run-format';
 import { LiveRunView, TranscriptSteps, useRunPoll } from './run-view';
+import { SharePanel } from './share-panel';
 
 /** The resume row, serialized by the page for this client component. */
 export interface ResumeClientView {
@@ -30,12 +32,13 @@ export interface ResumeClientView {
   texSource: string | null;
 }
 
-type TabId = 'ask' | 'edit' | 'history';
+type TabId = 'ask' | 'edit' | 'history' | 'share';
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'ask', label: 'Ask Claude' },
   { id: 'edit', label: 'Edit source' },
   { id: 'history', label: 'History' },
+  { id: 'share', label: 'Share' },
 ];
 
 /** Where the currently-polled run should render its live view. */
@@ -126,12 +129,16 @@ export function ResumeTabs({
   resume,
   history,
   initialRun,
+  viewingOldVersion = false,
 }: {
   resume: ResumeClientView;
   /** The resume's last runs (incl. repo-wide syncs), newest first. */
   history: RunSnapshot[];
   /** The latest run when it was still 'running' at render time. */
   initialRun: RunSnapshot | null;
+  /** The PDF pane is showing a PRIOR version — the Edit tab warns that
+   *  edits always apply to the latest. */
+  viewingOldVersion?: boolean;
 }) {
   const router = useRouter();
   const [tab, setTab] = useState<TabId>('ask');
@@ -328,6 +335,12 @@ export function ResumeTabs({
         aria-labelledby={`tab-${resume.id}-edit`}
         hidden={tab !== 'edit'}
       >
+        {viewingOldVersion ? (
+          <p className="hint" style={{ margin: '0 0 0.5rem' }}>
+            The preview is showing an older version — editing always applies to
+            the latest version.
+          </p>
+        ) : null}
         <div className="row" style={{ alignItems: 'baseline' }}>
           <label
             htmlFor={`tex-${resume.id}`}
@@ -408,6 +421,16 @@ export function ResumeTabs({
         hidden={tab !== 'history'}
       >
         <RunHistoryList runs={history} />
+      </div>
+
+      {/* ---- Share ---- */}
+      <div
+        role="tabpanel"
+        id={`panel-${resume.id}-share`}
+        aria-labelledby={`tab-${resume.id}-share`}
+        hidden={tab !== 'share'}
+      >
+        <SharePanel resumeId={resume.id} active={tab === 'share'} />
       </div>
     </div>
   );

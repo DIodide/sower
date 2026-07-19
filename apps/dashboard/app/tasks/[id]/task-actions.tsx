@@ -9,6 +9,7 @@ import {
   discardTask,
   investigateTask,
   markApplied,
+  reingestTask,
   requeueTask,
   restoreTask,
   startSessionCapture,
@@ -25,7 +26,8 @@ type Mode =
   | 'discard'
   | 'restore'
   | 'mark-applied'
-  | 'unmark-applied';
+  | 'unmark-applied'
+  | 'reingest';
 
 const LABELS: Record<Mode, { idle: string; className: string; title: string }> =
   {
@@ -77,6 +79,12 @@ const LABELS: Record<Mode, { idle: string; className: string; title: string }> =
       className: 'btn',
       title: `"Mark applied" was a mistake — moves this task back in "${SECTIONS.waiting}"; only out-of-band marks can be undone, never a real sower submission`,
     },
+    reingest: {
+      idle: 'Re-ingest',
+      className: 'btn',
+      title:
+        'Discard this task and re-run it through ingestion from scratch (fresh parse, current pipeline)',
+    },
   };
 
 /** Modes carrying an optional free-text note. Two-step confirm: the first
@@ -111,6 +119,7 @@ export function TaskActions({ taskId, mode }: { taskId: string; mode: Mode }) {
       if (mode === 'investigate') return investigateTask(taskId);
       if (mode === 'restore') return restoreTask(taskId);
       if (mode === 'unmark-applied') return unmarkApplied(taskId);
+      if (mode === 'reingest') return reingestTask(taskId);
       if (mode === 'discard' || mode === 'mark-applied') {
         // The optional note typed next to the button — empty is fine.
         const note = formData.get('note');
@@ -122,6 +131,12 @@ export function TaskActions({ taskId, mode }: { taskId: string; mode: Mode }) {
       return requeueTask(taskId);
     };
     const outcome = await run();
+    // Reingest replaced this task with a fresh one — follow the replacement
+    // (the success toast still renders while the navigation happens).
+    if (outcome.ok && mode === 'reingest' && outcome.newTaskId) {
+      router.push(`/tasks/${outcome.newTaskId}`);
+      return outcome;
+    }
     // The action's revalidatePath alone can leave THIS page's banner/badge
     // stale (the restore-from-archive bug); an explicit client refresh makes
     // every state change land without a manual reload.

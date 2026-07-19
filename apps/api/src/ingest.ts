@@ -68,8 +68,9 @@ async function duplicateResult(
 /**
  * Returns the reason a parsed job must be parked (NEEDS_INPUT, no enqueue)
  * instead of queued, or null when an adapter can actually discover it.
+ * Exported for the reingest route, which parks/queues by the same rule.
  */
-function parkReason(ref: PlatformRef): string | null {
+export function parkReason(ref: PlatformRef): string | null {
   if (ref.platform === 'unknown') {
     return 'unknown platform';
   }
@@ -103,7 +104,7 @@ export async function ingestJob(
   deps: Deps,
   input: IngestInput,
 ): Promise<IngestResult> {
-  const { db, queue } = deps;
+  const { db } = deps;
 
   // Detect on the INPUT url before any live GET: a supported ATS URL is
   // discovered via the platform API from the tenant+id in the URL itself, so
@@ -192,6 +193,57 @@ export async function ingestJob(
     throw new Error('failed to insert job');
   }
 
+  const spawned = await spawnTaskForJob(deps, {
+    id: job.id,
+    canonicalUrl,
+    platform: ref.platform,
+    tenant: ref.tenant,
+    externalId: ref.externalId,
+  });
+  return {
+    duplicate: false,
+    jobId: job.id,
+    taskId: spawned.taskId,
+    state: spawned.state,
+  };
+}
+
+/** What spawnTaskForJob produced: the fresh task, where it landed, and — when
+ *  it parked — the parkReason, so callers can react (e.g. trigger Tier-2 form
+ *  discovery). */
+export interface SpawnedTask {
+  taskId: string;
+  state: TaskState;
+  /** Why the task parked NEEDS_INPUT; null when it was queued. */
+  parkedReason: string | null;
+}
+
+/**
+ * The ingest-time task tail, shared by ingestJob and POST /tasks/:id/reingest:
+ * insert a fresh application_tasks row on `job` (INGESTED), record PARSE_OK,
+ * then either PARK -> NEEDS_INPUT (nothing can discover the job's platform
+ * identity, no enqueue) or ENQUEUE -> QUEUED + queue.enqueueProcess. The
+ * platform identity is read from the fields passed in, so callers must pass
+ * the CURRENT job-row values (reingest re-detects/upgrades them first).
+ */
+export async function spawnTaskForJob(
+  deps: Deps,
+  job: {
+    id: string;
+    canonicalUrl: string;
+    platform: string;
+    tenant: string | null;
+    externalId: string | null;
+  },
+): Promise<SpawnedTask> {
+  const { db, queue } = deps;
+  // jobs.platform is free text in the DB; PlatformRef.platform is the union.
+  const ref: PlatformRef = {
+    platform: job.platform as PlatformRef['platform'],
+    tenant: job.tenant,
+    externalId: job.externalId,
+  };
+
   const insertedTasks = await db
     .insert(applicationTasks)
     .values({ jobId: job.id, state: 'INGESTED' })
@@ -202,7 +254,7 @@ export async function ingestJob(
   }
 
   let state = await transitionTask(db, task.id, 'INGESTED', 'PARSE_OK', {
-    canonicalUrl,
+    canonicalUrl: job.canonicalUrl,
     platform: ref.platform,
   });
 
@@ -214,10 +266,10 @@ export async function ingestJob(
       platform: ref.platform,
       tenant: ref.tenant,
     });
-    return { duplicate: false, jobId: job.id, taskId: task.id, state };
+    return { taskId: task.id, state, parkedReason: reason };
   }
 
   state = await transitionTask(db, task.id, state, 'ENQUEUE');
   await queue.enqueueProcess(task.id);
-  return { duplicate: false, jobId: job.id, taskId: task.id, state };
+  return { taskId: task.id, state, parkedReason: null };
 }

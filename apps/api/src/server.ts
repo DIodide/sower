@@ -47,6 +47,7 @@ import {
   ranksCollide,
   waitingOrderBy,
 } from './rank.js';
+import { registerReingestRoutes } from './reingest-routes.js';
 import { registerResumeLinkRoutes } from './resume-links.js';
 import { registerResumeRoutes } from './resume-routes.js';
 import {
@@ -1859,6 +1860,9 @@ export function buildServer(deps: Deps): FastifyInstance {
   registerResumeLinkRoutes(app, deps);
 
   registerProfileRoutes(app, deps);
+
+  // POST /tasks/:id/reingest (drop the task + re-run ingestion; x-api-key).
+  registerReingestRoutes(app, deps);
 
   // POST /discord/interactions (signature-authenticated, raw-body parsed).
   registerDiscordRoutes(app, deps);

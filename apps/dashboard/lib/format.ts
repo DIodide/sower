@@ -322,6 +322,7 @@ const EVENT_LABELS: Record<string, string> = {
   RESTORE: 'Restored to the queue',
   MARK_SUBMITTED: 'Marked applied (out of band)',
   UNMARK_SUBMITTED: 'Un-marked applied — back in the queue',
+  REINGESTED: 'Re-ingested — replaced by a fresh task',
   REJECTED: 'Rejected',
   FORM_DISCOVERED: 'Application form discovered by the browser agent',
   FORM_NOT_FOUND: 'Browser agent found no application form',

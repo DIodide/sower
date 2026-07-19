@@ -26,6 +26,9 @@ import { documentKind } from './question-kind';
 export interface ActionResult {
   ok: boolean;
   message: string;
+  /** Reingest only: the fresh task that replaced the re-ingested one, so the
+   *  UI can follow the replacement. */
+  newTaskId?: string;
 }
 
 const uuidSchema = z.string().uuid();
@@ -603,6 +606,25 @@ export async function restoreTask(taskId: string): Promise<ActionResult> {
 }
 
 /**
+ * Re-ingest a task via the api service: the current task is discarded (its
+ * record and history stay in the Archive) and a FRESH task is spawned on the
+ * same job — a from-scratch run through today's ingest pipeline (fresh parse,
+ * current probes/adapters). Refused by the api (409) for SUBMITTED/CONFIRMED.
+ * Returns the replacement's id as `newTaskId` so the UI can follow it.
+ */
+export async function reingestTask(taskId: string): Promise<ActionResult> {
+  const idParse = uuidSchema.safeParse(taskId);
+  if (!idParse.success) return { ok: false, message: 'invalid task id.' };
+  const result = await callApi(idParse.data, 'reingest');
+  revalidatePath(`/tasks/${idParse.data}`);
+  revalidatePath('/');
+  if (result.ok && result.newTaskId) {
+    revalidatePath(`/tasks/${result.newTaskId}`);
+  }
+  return result;
+}
+
+/**
  * Manually start the browser agent (form-discovery investigation) on an
  * unsupported maybe-job via the api service. The api gates eligibility
  * (unknown platform or a recorded screenshot) and reports whether the agent
@@ -657,6 +679,8 @@ const apiResponseSchema = z.object({
   /** Reorder only: present when the drop crossed a tier boundary and the
    *  row adopted the destination tier's priority. */
   priority: z.number().optional(),
+  /** Reingest only: the fresh task that replaced the re-ingested one. */
+  newTaskId: z.string().optional(),
   error: z.string().optional(),
   message: z.string().optional(),
 });
@@ -679,7 +703,8 @@ async function callApi(
     | 'unmark-applied'
     | 'investigate'
     | 'meta'
-    | 'reorder',
+    | 'reorder'
+    | 'reingest',
   jsonBody?: Record<string, unknown>,
 ): Promise<ActionResult> {
   const base = process.env.API_BASE_URL;
@@ -770,6 +795,14 @@ async function callApi(
     return {
       ok: true,
       message: `task restored — back in "${SECTIONS.waiting}".`,
+    };
+  }
+
+  if (action === 'reingest') {
+    return {
+      ok: true,
+      message: 're-ingested — a fresh task took its place.',
+      ...(body.newTaskId ? { newTaskId: body.newTaskId } : {}),
     };
   }
 
