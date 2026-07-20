@@ -53,7 +53,10 @@ import {
 import { extractListingLinks, LISTING_LINKS_MIN } from './listing-links.js';
 import {
   type AnchorCandidate,
+  assembleDescriptionMarkdown,
   collectAnchors,
+  type EmbeddedDescription,
+  recoverEmbeddedDescription,
   scoreApplyControlText,
   serializeToMarkdown,
 } from './page-functions.js';
@@ -82,7 +85,9 @@ export interface DiscoveredForm {
   title?: string;
   /**
    * The job description + requirements as markdown, extracted
-   * PROGRAMMATICALLY from the details page DOM (before any Apply hop).
+   * PROGRAMMATICALLY from the details page (before any Apply hop): assembled
+   * from the rendered DOM, or — when that came back suspiciously small —
+   * recovered from the page's embedded <script> data (noted in notes).
    * Never agent-generated. Capped at ~20k chars (truncation noted in notes).
    */
   descriptionMarkdown?: string;
@@ -178,6 +183,12 @@ const DEFAULT_INTERPRET_MAX_TURNS = 6;
 const MAX_EXTRACTION_JSON_CHARS = 24_000;
 const MAX_DESCRIPTION_MARKDOWN_CHARS = 20_000;
 const DESCRIPTION_EXCERPT_CHARS = 1_500;
+/**
+ * A DOM-extracted description below this is SUSPICIOUSLY SMALL — full JDs
+ * run thousands of chars — and triggers the embedded-payload fallback scan
+ * of the page's <script> data (see recoverEmbeddedDescription).
+ */
+const SUSPICIOUS_DESCRIPTION_CHARS = 2_000;
 
 /**
  * Masks the most-checked headless fingerprint before any page script runs.
@@ -454,23 +465,32 @@ function extractPageState(
 
 /**
  * Runs INSIDE the page: extract the posting's title, company, and the full
- * description/requirements content serialized to markdown. The content node
- * is chosen by tiered heuristics — description-ish class/id selectors first,
- * then article/job sections, then main — taking within each tier the node
- * whose serialized markdown is largest, and falling through to the next tier
- * (finally body) when nothing yields a substantial block. The serializer
- * (injected as a parameter) skips nav/header/footer/aside, scripts, forms,
- * cookie/consent banners, and hidden elements. Self-contained otherwise.
+ * description/requirements content serialized to markdown. The description
+ * is ASSEMBLED (injected assemble — see assembleDescriptionMarkdown) from
+ * ALL the content blocks around description-classed nodes within the
+ * content region (a substantial main/[role=main], else body): job pages
+ * routinely split the JD across sibling blocks (about / responsibilities /
+ * qualifications / pay), and the previous "largest single node" choice
+ * captured only one of them. The serializer (also injected) skips
+ * nav/header/footer/aside, scripts, forms, cookie/consent banners, and
+ * hidden elements. Self-contained otherwise.
  */
 function extractJobMetadata(
   serialize: (
     root: Element,
     maxChars: number,
   ) => { markdown: string; truncated: boolean },
+  assemble: (
+    region: Element,
+    serialize: (
+      root: Element,
+      maxChars: number,
+    ) => { markdown: string; truncated: boolean },
+    maxChars: number,
+  ) => { markdown: string; truncated: boolean },
   maxChars: number,
 ): JobMetadata {
-  const MIN_CONTENT_CHARS = 200;
-  const MAX_CANDIDATES_PER_TIER = 25;
+  const MIN_REGION_CHARS = 200;
 
   const norm = (s: string | null | undefined): string =>
     (s ?? '').replace(/\s+/g, ' ').trim();
@@ -548,44 +568,26 @@ function extractJobMetadata(
     logoAlt ||
     hostCompany;
 
-  const candidateTiers: string[][] = [
-    [
-      '[class*="description" i]',
-      '[id*="description" i]',
-      '[class*="posting" i]',
-      '[data-testid*="description" i]',
-    ],
-    ['article', 'section[class*="job" i]', 'div[class*="job" i]'],
-    ['main', '[role="main"]'],
-  ];
-  let contentNode: Element | null = null;
-  for (const tier of candidateTiers) {
-    let bestNode: Element | null = null;
-    let bestLength = 0;
-    const seen = new Set<Element>();
-    for (const selector of tier) {
-      for (const el of Array.from(document.querySelectorAll(selector)).slice(
-        0,
-        MAX_CANDIDATES_PER_TIER,
-      )) {
-        if (seen.has(el)) continue;
-        seen.add(el);
-        const length = serialize(el, maxChars).markdown.length;
-        if (length > bestLength) {
-          bestLength = length;
-          bestNode = el;
-        }
+  // Content REGION: the first substantial main/[role=main], else body. The
+  // assembly then collects EVERY content block around description-classed
+  // nodes inside it (or serializes the whole region when none exist).
+  let region: Element | null = null;
+  for (const selector of ['main', '[role="main"]']) {
+    for (const el of Array.from(document.querySelectorAll(selector)).slice(
+      0,
+      5,
+    )) {
+      if (serialize(el, maxChars).markdown.length >= MIN_REGION_CHARS) {
+        region = el;
+        break;
       }
     }
-    if (bestNode && bestLength >= MIN_CONTENT_CHARS) {
-      contentNode = bestNode;
-      break;
-    }
+    if (region) break;
   }
-  if (!contentNode) contentNode = document.body;
+  if (!region) region = document.body;
 
-  const serialized = contentNode
-    ? serialize(contentNode, maxChars)
+  const serialized = region
+    ? assemble(region, serialize, maxChars)
     : { markdown: '', truncated: false };
   return {
     title,
@@ -608,7 +610,34 @@ function extractionExpression(): string {
 }
 
 function metadataExpression(): string {
-  return `/* sower:metadata */((__name) => (${extractJobMetadata.toString()})((${serializeToMarkdown.toString()}), ${MAX_DESCRIPTION_MARKDOWN_CHARS}))((t) => t)`;
+  return `/* sower:metadata */((__name) => (${extractJobMetadata.toString()})((${serializeToMarkdown.toString()}), (${assembleDescriptionMarkdown.toString()}), ${MAX_DESCRIPTION_MARKDOWN_CHARS}))((t) => t)`;
+}
+
+/**
+ * In-page embedded-payload recovery (see recoverEmbeddedDescription): scans
+ * document.scripts for a JD the DOM extraction missed. The injected
+ * htmlToMarkdown parses HTML-valued payloads with DOMParser — an INERT
+ * document (scripts never execute, subresources never load — this is
+ * untrusted page data) — and maps the tree onto plain structural nodes
+ * before serializing, deliberately dropping checkVisibility: detached nodes
+ * always report themselves invisible, which would blank the conversion.
+ */
+function payloadRecoveryExpression(domDescriptionChars: number): string {
+  const htmlToMarkdown = `(html) => {
+    const toNode = (node) => ({
+      nodeType: node.nodeType,
+      textContent: node.textContent,
+      tagName: node.tagName,
+      className: typeof node.className === 'string' ? node.className : '',
+      id: typeof node.id === 'string' ? node.id : '',
+      href: node.href,
+      childNodes: Array.from(node.childNodes || []).map(toNode),
+      getAttribute: (name) => (node.getAttribute ? node.getAttribute(name) : null),
+    });
+    const body = new DOMParser().parseFromString(html, 'text/html').body;
+    return body ? (${serializeToMarkdown.toString()})(toNode(body), ${MAX_DESCRIPTION_MARKDOWN_CHARS}).markdown : '';
+  }`;
+  return `/* sower:payload */((__name) => (${recoverEmbeddedDescription.toString()})(Array.from(document.scripts, (s) => s.textContent || ''), ${domDescriptionChars}, (${htmlToMarkdown}), ${MAX_DESCRIPTION_MARKDOWN_CHARS}))((t) => t)`;
 }
 
 function anchorsExpression(): string {
@@ -647,6 +676,28 @@ async function runMetadataExtraction(
     company: typeof value.company === 'string' ? value.company : '',
     descriptionMarkdown: value.descriptionMarkdown,
     descriptionTruncated: value.descriptionTruncated === true,
+  };
+}
+
+/** Embedded-payload description recovery; tolerant of malformed results. */
+async function runPayloadRecovery(
+  page: Page,
+  domDescriptionChars: number,
+): Promise<EmbeddedDescription | undefined> {
+  const value = (await page.evaluate(
+    payloadRecoveryExpression(domDescriptionChars),
+  )) as Partial<EmbeddedDescription> | null | undefined;
+  if (
+    !value ||
+    typeof value.markdown !== 'string' ||
+    value.markdown.length === 0
+  ) {
+    return undefined;
+  }
+  // Cap again Node-side — the in-page cap ran in an untrusted context.
+  return {
+    markdown: value.markdown.slice(0, MAX_DESCRIPTION_MARKDOWN_CHARS),
+    truncated: value.truncated === true,
   };
 }
 
@@ -935,7 +986,8 @@ type RenderResult =
       extraction: RawExtraction;
       applyUrl: string;
       metadata?: JobMetadata;
-      iframeNotes: string[];
+      /** Programmatic notes (payload recovery, iframes) for the result. */
+      extractionNotes: string[];
       /** Cleaned supported-ATS posting URL (final page or iframe src). */
       handoffUrl?: string;
       /** Candidate job links from the rendered DOM (no-form pages only). */
@@ -1035,6 +1087,49 @@ async function renderAndExtract(
         tool: 'browser.extract',
         output: `metadata extraction failed: ${errorMessage(error)}`,
       });
+    }
+
+    // Programmatic notes appended to the result (payload recovery, iframes).
+    const extractionNotes: string[] = [];
+
+    // Embedded-payload fallback: a missing or suspiciously small DOM
+    // description often means the full JD lives only in <script> SSR/
+    // hydration data. Untrusted page data — it flows into the SAME
+    // schema-capped, safely-rendered descriptionMarkdown channel as the DOM
+    // extraction. Failure is non-fatal; the DOM result stands.
+    const domDescriptionChars = metadata?.descriptionMarkdown.length ?? 0;
+    if (domDescriptionChars < SUSPICIOUS_DESCRIPTION_CHARS) {
+      step({
+        kind: 'tool_use',
+        tool: 'browser.extract',
+        input: { url: page.url(), target: 'embedded-payload' },
+      });
+      try {
+        const recovered = await runPayloadRecovery(page, domDescriptionChars);
+        if (recovered) {
+          const note = `description recovered from embedded page data (${recovered.markdown.length} chars; DOM had ${domDescriptionChars})`;
+          metadata = {
+            title: metadata?.title ?? '',
+            company: metadata?.company ?? '',
+            descriptionMarkdown: recovered.markdown,
+            descriptionTruncated: recovered.truncated,
+          };
+          extractionNotes.push(note);
+          step({ kind: 'tool_result', tool: 'browser.extract', output: note });
+        } else {
+          step({
+            kind: 'tool_result',
+            tool: 'browser.extract',
+            output: `no embedded job-description payload qualified (DOM description: ${domDescriptionChars} chars)`,
+          });
+        }
+      } catch (error) {
+        step({
+          kind: 'tool_result',
+          tool: 'browser.extract',
+          output: `embedded-payload recovery failed: ${errorMessage(error)}`,
+        });
+      }
     }
 
     step({
@@ -1145,7 +1240,6 @@ async function renderAndExtract(
     // for cross-origin frames record the src — and when it's a supported
     // ATS host (greenhouse/lever/ashby), say so, since the caller can
     // ingest that URL directly.
-    const iframeNotes: string[] = [];
     if (!best.looksLikeApplicationForm) {
       const mainFrame = page.mainFrame();
       const childFrames = page
@@ -1185,7 +1279,7 @@ async function renderAndExtract(
               frameExtraction.controls.length > best.controls.length
             ) {
               best = frameExtraction;
-              iframeNotes.push(
+              extractionNotes.push(
                 `form controls were found inside an embedded same-origin iframe (${frameUrl})`,
               );
               if (best.looksLikeApplicationForm) break;
@@ -1202,7 +1296,7 @@ async function renderAndExtract(
           const note = ats
             ? `the page embeds a supported ATS (${ats}) in a cross-origin iframe: ${frameUrl} — that URL can be ingested directly`
             : `a cross-origin iframe is present (${frameUrl}) — the application form may live inside it`;
-          iframeNotes.push(note);
+          extractionNotes.push(note);
           step({ kind: 'system', text: 'cross_origin_iframe', output: note });
           if (handoffUrl === undefined) {
             handoffUrl = detectHandoffUrl(frameUrl);
@@ -1262,7 +1356,7 @@ async function renderAndExtract(
       extraction: best,
       applyUrl: page.url(),
       metadata,
-      iframeNotes,
+      extractionNotes,
       handoffUrl,
       listingLinks,
     };
@@ -1382,9 +1476,9 @@ function dedupeQuestionIds(
 /** Programmatic notes appended after the agent's own (iframes, truncation). */
 function appendProgrammaticNotes(
   base: string,
-  args: { metadata?: JobMetadata; iframeNotes: string[] },
+  args: { metadata?: JobMetadata; extractionNotes: string[] },
 ): string {
-  const parts = [base, ...args.iframeNotes];
+  const parts = [base, ...args.extractionNotes];
   if (args.metadata?.descriptionTruncated) {
     parts.push(
       `description markdown truncated at ${MAX_DESCRIPTION_MARKDOWN_CHARS} chars`,
@@ -1405,7 +1499,7 @@ async function interpretExtraction(args: {
   extraction: RawExtraction;
   applyUrl: string;
   metadata?: JobMetadata;
-  iframeNotes: string[];
+  extractionNotes: string[];
   handoffUrl?: string;
   hint?: string;
   maxTurns?: number;
@@ -1599,7 +1693,7 @@ export async function discoverForm(input: {
           confidence: 'low',
           notes: appendProgrammaticNotes(noFormNotes(rendered.extraction), {
             metadata: rendered.metadata,
-            iframeNotes: rendered.iframeNotes,
+            extractionNotes: rendered.extractionNotes,
           }),
         },
         rendered.listingLinks,
@@ -1612,7 +1706,7 @@ export async function discoverForm(input: {
     extraction: rendered.extraction,
     applyUrl: rendered.applyUrl,
     metadata: rendered.metadata,
-    iframeNotes: rendered.iframeNotes,
+    extractionNotes: rendered.extractionNotes,
     handoffUrl: rendered.handoffUrl,
     hint: input.hint,
     maxTurns: input.maxTurns,

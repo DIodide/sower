@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  assembleDescriptionMarkdown,
   collectAnchors,
   type MarkdownishNode,
+  recoverEmbeddedDescription,
   scoreApplyControlText,
   serializeToMarkdown,
 } from './page-functions.js';
@@ -235,6 +237,401 @@ describe('serializeToMarkdown', () => {
     );
     expect(markdown).toBe('short');
     expect(truncated).toBe(false);
+  });
+});
+
+describe('assembleDescriptionMarkdown', () => {
+  const assemble = (region: MarkdownishNode, maxChars = 20_000) =>
+    assembleDescriptionMarkdown(region, serializeToMarkdown, maxChars);
+
+  /** Order assertion helper: each needle appears, and in the given order. */
+  const expectInOrder = (haystack: string, needles: string[]) => {
+    let last = -1;
+    for (const needle of needles) {
+      const at = haystack.indexOf(needle);
+      expect(at, `missing: ${needle}`).toBeGreaterThan(last);
+      last = at;
+    }
+  };
+
+  it('concatenates split JD sections (about + responsibilities + qualifications + pay) in DOM order', () => {
+    // The TikTok shape: only ONE block is description/job-classed; the
+    // others are anonymous sibling sections the old "largest single node"
+    // heuristic silently dropped.
+    const about = el(
+      'div',
+      [
+        el('h2', [text('About the team')]),
+        el('p', [
+          text(
+            'The Multimedia AI team focuses on building, researching, and applying large models to power global products at scale.',
+          ),
+        ]),
+      ],
+      { class: 'job-description' },
+    );
+    const responsibilities = el('section', [
+      el('h2', [text('Responsibilities')]),
+      el('ul', [
+        el('li', [text('Support post-training strategies for LLMs')]),
+        el('li', [text('Build robust evaluation pipelines')]),
+      ]),
+    ]);
+    const qualifications = el('section', [
+      el('h2', [text('Qualifications')]),
+      el('ul', [
+        el('li', [text('Currently pursuing a CS degree')]),
+        el('li', [text('Strong Python and PyTorch experience')]),
+      ]),
+    ]);
+    const pay = el('div', [
+      el('p', [text('The hourly rate range for this position is $45 - $45.')]),
+    ]);
+    const region = el('main', [
+      el('nav', [text('Home | Jobs')]),
+      el('div', [about, responsibilities, qualifications, pay]),
+      el('footer', [text('© MegaCorp')]),
+    ]);
+
+    const { markdown, truncated } = assemble(region);
+    expectInOrder(markdown, [
+      '## About the team',
+      '## Responsibilities',
+      '- Support post-training strategies',
+      '## Qualifications',
+      '- Currently pursuing a CS degree',
+      'hourly rate range',
+    ]);
+    expect(markdown).not.toContain('Home | Jobs');
+    expect(markdown).not.toContain('© MegaCorp');
+    expect(truncated).toBe(false);
+  });
+
+  it('keeps a LARGE anonymous sibling alongside a small description-classed node (never shadowed)', () => {
+    const bigText =
+      'Design, build, and operate distributed systems that serve billions. '.repeat(
+        80,
+      );
+    const small = el(
+      'div',
+      [el('p', [text('Pay Transparency: the hourly rate is $45 an hour.')])],
+      { class: 'compensation-description' },
+    );
+    const large = el('div', [
+      el('h2', [text('Responsibilities')]),
+      el('p', [text(bigText)]),
+    ]);
+    const region = el('main', [el('div', [small, large])]);
+
+    const { markdown } = assemble(region);
+    expect(markdown).toContain('Pay Transparency');
+    expect(markdown).toContain('## Responsibilities');
+    expect(markdown.length).toBeGreaterThan(5_000);
+    // DOM order: the small pay node comes first on this page.
+    expect(markdown.indexOf('Pay Transparency')).toBeLessThan(
+      markdown.indexOf('## Responsibilities'),
+    );
+  });
+
+  it('never serializes a nested block twice (description node inside a posting node)', () => {
+    const inner = el(
+      'div',
+      [
+        el('p', [
+          text(
+            'The one true responsibilities paragraph, long enough to matter for the assembled description of this role.',
+          ),
+        ]),
+      ],
+      { class: 'job-description' },
+    );
+    const outer = el('div', [el('h2', [text('The role')]), inner], {
+      class: 'posting-body',
+    });
+    const sibling = el('div', [
+      el('p', [
+        text(
+          'Qualifications: TypeScript, strong systems fundamentals, and a demonstrated love of tests.',
+        ),
+      ]),
+    ]);
+    const region = el('main', [el('div', [outer, sibling])]);
+
+    const { markdown } = assemble(region);
+    const occurrences =
+      markdown.split('one true responsibilities paragraph').length - 1;
+    expect(occurrences).toBe(1);
+    expect(markdown).toContain('Qualifications: TypeScript');
+  });
+
+  it('skips link-farm siblings (footer menus that are NOT inside nav/footer tags)', () => {
+    // The lifeattiktok.com case: the site menu/footer is plain divs of
+    // [label](url) link lists — mostly link syntax, so the density check
+    // drops them even though no nav/footer tag marks them as chrome.
+    const linkFarm = el('div', [
+      el('h4', [text('Company')]),
+      ...Array.from({ length: 8 }, (_, i) =>
+        el('a', [text(`Link ${i}`)], {
+          href: `https://example.com/some/deep/path-${i}`,
+        }),
+      ),
+    ]);
+    const jd = el(
+      'div',
+      [
+        el('h2', [text('Responsibilities')]),
+        el('p', [
+          text(
+            'Support the development and optimization of post-training strategies for large models, and help the team ship. '.repeat(
+              3,
+            ),
+          ),
+        ]),
+      ],
+      { class: 'job-description' },
+    );
+    const region = el('main', [el('div', [linkFarm, jd])]);
+
+    const { markdown } = assemble(region);
+    expect(markdown).toContain('## Responsibilities');
+    expect(markdown).not.toContain('#### Company');
+    expect(markdown).not.toContain('deep/path-');
+  });
+
+  it('serializes the whole region when nothing is description-classed', () => {
+    const region = el('main', [
+      el('h1', [text('SWE Intern')]),
+      el('p', [
+        text(
+          'A plain page with no description-classed markup at all, but plenty of real content to serialize for the caller.',
+        ),
+      ]),
+    ]);
+    expect(assemble(region).markdown).toBe(
+      serializeToMarkdown(region, 20_000).markdown,
+    );
+  });
+
+  it('falls back to the whole region when the anchor family is tiny', () => {
+    const region = el('main', [
+      el('div', [el('p', [text('Short blurb.')])], { class: 'description' }),
+      el('p', [
+        text('Body copy that lives outside the anchor family... '.repeat(6)),
+      ]),
+    ]);
+    // Family (anchor + its region-level sibling) and region agree here; the
+    // point is that a tiny assembly yields the region serialization, never
+    // an empty/near-empty description.
+    expect(assemble(region).markdown).toBe(
+      serializeToMarkdown(region, 20_000).markdown,
+    );
+  });
+
+  it('caps the assembled markdown at maxChars and flags truncation', () => {
+    const sections = Array.from({ length: 40 }, (_, i) =>
+      el('section', [
+        el('h2', [text(`Section ${i}`)]),
+        el('p', [
+          text(`Padding paragraph number ${i} with some text. `.repeat(4)),
+        ]),
+      ]),
+    );
+    const anchor = el(
+      'div',
+      [el('p', [text('About the role: build things that scale nicely.')])],
+      { class: 'job-description' },
+    );
+    const region = el('main', [el('div', [anchor, ...sections])]);
+    const { markdown, truncated } = assemble(region, 2_000);
+    expect(truncated).toBe(true);
+    expect(markdown.length).toBeLessThanOrEqual(2_000);
+  });
+});
+
+/** Live-excerpt-shaped JD text (lifeattiktok.com/search/7631599293708126517). */
+const TIKTOK_CHUNK_ONE = [
+  'The Multimedia AI team at TikTok focuses on building, researching, and applying Large Language Models (LLMs) to power our global products. We believe the most impactful problems in AI arise at the intersection of research and real-world deployment—and post-training is where that intersection is sharpest.',
+  '',
+  'We are looking for talented individuals to join us for an internship in 2026. Internships at our Company aim to offer students industry exposure and hands-on experience. Watch your ambitions become reality as your inspiration brings infinite opportunities at our Company.',
+  '',
+  'Candidates can apply to a maximum of two positions and will be considered for jobs in the order you apply. Applications will be reviewed on a rolling basis - we encourage you to apply early. Please state your availability clearly in your resume (Start date, End date).',
+  '',
+  'Summer Start Dates:',
+  'May 11th, 2026',
+  'May 18th, 2026',
+  'May 26th, 2026',
+  'June 8th, 2026',
+  'June 22nd, 2026',
+  '',
+  'Responsibilities',
+  '- Support the development and optimization of post-training strategies, including instruction tuning, preference tuning (SFT/DPO/PPO), and model alignment.',
+  '- Assist in building robust evaluation pipelines to measure model performance, helpfulness, and safety across diverse multimedia product use cases.',
+  '- Participate in the research and implementation of cutting-edge methodologies in reward modeling and human preference learning.',
+  '- Collaborate with engineering teams to bridge the gap between experimental research and production-ready AI applications (e.g., video understanding, translation, and content classification).',
+  '- Analyze and process large-scale datasets to identify patterns that improve model behavior and alignment quality.',
+].join('\n');
+
+const TIKTOK_CHUNK_TWO = [
+  'Minimum Qualifications:',
+  '- Currently pursuing an Undergraduate or Master’s degree in Computer Science, Machine Learning, or a related technical discipline.',
+  '- Strong programming skills in Python and experience with deep learning frameworks such as PyTorch or JAX.',
+  '- Foundational understanding of Transformer architectures and LLM training principles.',
+  '- Demonstrated ability to learn quickly in a fast-paced environment and a strong passion for AI "landing" and product application.',
+  '- Able to commit to working for 12 weeks in 2026',
+  '',
+  'Preferred Qualifications:',
+  '- Previous experience or research projects involving LLM fine-tuning, RLHF, or synthetic data generation.',
+  '- Familiarity with distributed training tools (e.g., DeepSpeed, Megatron-LM).',
+  '- Experience or interest in multimodal AI (integrating text with video or audio).',
+].join('\n');
+
+describe('recoverEmbeddedDescription', () => {
+  const failingHtmlToMarkdown = (html: string): string => {
+    throw new Error(`html conversion should not run for: ${html.slice(0, 40)}`);
+  };
+
+  it('recovers + unescapes a TikTok-shaped JD split across React-flight push chunks', () => {
+    // The live case: the JD ships as escaped plain-text string literals in
+    // SEPARATE `self.__next_f.push` script tags — neither chunk qualifies
+    // alone (one marker / too short), the stitched candidate does.
+    const scripts = [
+      `self.__next_f.push([1,${JSON.stringify(TIKTOK_CHUNK_ONE)}])`,
+      `self.__next_f.push([1,${JSON.stringify(`32:T479,${TIKTOK_CHUNK_TWO}33:T8f5,`)}])`,
+    ];
+    const result = recoverEmbeddedDescription(
+      scripts,
+      1_421,
+      failingHtmlToMarkdown,
+      20_000,
+    );
+    expect(result).not.toBeNull();
+    const markdown = result?.markdown ?? '';
+    // Unescaped: real newlines and `- ` bullets, no literal \n sequences.
+    expect(markdown).toContain('The Multimedia AI team at TikTok');
+    expect(markdown).toContain('Summer Start Dates:\nMay 11th, 2026');
+    expect(markdown).toContain(
+      'Responsibilities\n- Support the development and optimization',
+    );
+    expect(markdown).not.toContain('\\n');
+    // Both chunks present, in document order; flight text refs stripped.
+    expect(markdown.indexOf('Responsibilities')).toBeLessThan(
+      markdown.indexOf('Minimum Qualifications:'),
+    );
+    expect(markdown).not.toContain('32:T479');
+    expect(markdown).not.toContain('33:T8f5');
+    // ≥2 distinct markers and ≥1.5× the 1,421-char DOM extraction.
+    expect(markdown.length).toBeGreaterThan(2_132);
+    expect(result?.truncated).toBe(false);
+  });
+
+  it('recovers the JD from a window.__DATA__ assignment payload', () => {
+    const payload = {
+      job: {
+        id: '7631599293708126517',
+        description: `${TIKTOK_CHUNK_ONE}\n\n${TIKTOK_CHUNK_TWO}`,
+      },
+    };
+    const scripts = [
+      `window.__DATA__ = ${JSON.stringify(payload)};${' '.repeat(400)}`,
+    ];
+    const result = recoverEmbeddedDescription(
+      scripts,
+      0,
+      failingHtmlToMarkdown,
+      20_000,
+    );
+    expect(result?.markdown).toContain('The Multimedia AI team at TikTok');
+    expect(result?.markdown).toContain('Minimum Qualifications:');
+    expect(result?.markdown).not.toContain('\\n');
+  });
+
+  it('recovers the JD from a bare JSON-blob script (JSON-LD style)', () => {
+    const blob = JSON.stringify({
+      '@type': 'JobPosting',
+      title: 'ML Intern',
+      description: `${TIKTOK_CHUNK_ONE}\n\n${TIKTOK_CHUNK_TWO}`,
+    });
+    const result = recoverEmbeddedDescription(
+      [blob],
+      500,
+      failingHtmlToMarkdown,
+      20_000,
+    );
+    expect(result?.markdown).toContain('Responsibilities');
+    expect(result?.markdown).toContain('Preferred Qualifications:');
+  });
+
+  it('routes an HTML-valued payload through htmlToMarkdown', () => {
+    const html = `<div class="editor-content"><h3>About the role</h3><p>${'Build multimedia AI products for a global audience. '.repeat(40)}</p><h3>Responsibilities</h3><ul><li>Ship models</li><li>Evaluate pipelines</li></ul><h3>Minimum Qualifications</h3><ul><li>Pursuing a CS degree</li></ul></div>`;
+    const converted: string[] = [];
+    const htmlToMarkdown = (value: string): string => {
+      converted.push(value);
+      return `### CONVERTED MARKDOWN ###\n\n${value.replace(/<[^>]+>/g, ' ').replace(/[ \t]+/g, ' ')}`;
+    };
+    const result = recoverEmbeddedDescription(
+      [`window.__STATE__ = ${JSON.stringify({ jd: html })}`],
+      0,
+      htmlToMarkdown,
+      20_000,
+    );
+    expect(converted).toEqual([html]);
+    expect(result?.markdown).toContain('### CONVERTED MARKDOWN ###');
+  });
+
+  it('returns null when nothing qualifies (DOM result stands)', () => {
+    // Long but markerless; marked but short; empty — none qualify.
+    const lorem = 'All work and no play makes for dull descriptions here. ';
+    expect(
+      recoverEmbeddedDescription(
+        [
+          `self.__next_f.push([1,${JSON.stringify(lorem.repeat(60))}])`,
+          `self.__next_f.push([1,${JSON.stringify('Responsibilities and Qualifications')}])`,
+          '',
+          null,
+        ],
+        1_000,
+        failingHtmlToMarkdown,
+        20_000,
+      ),
+    ).toBeNull();
+  });
+
+  it('returns null when the payload is not ≥1.5× the DOM extraction', () => {
+    const jd = `${TIKTOK_CHUNK_ONE}\n\n${TIKTOK_CHUNK_TWO}`;
+    const scripts = [`window.__DATA__ = ${JSON.stringify({ jd })}`];
+    const domChars = Math.ceil(jd.length / 1.4); // 1.4x < required 1.5x
+    expect(
+      recoverEmbeddedDescription(
+        scripts,
+        domChars,
+        failingHtmlToMarkdown,
+        20_000,
+      ),
+    ).toBeNull();
+  });
+
+  it('discards JSON-structured payloads (React flight trees) even when they contain marker words', () => {
+    const flightTree = `f:["$","div",null,{"className":"${'x'.repeat(1_600)}","children":["Responsibilities","Qualifications","Requirements"]}]`;
+    expect(
+      recoverEmbeddedDescription(
+        [`self.__next_f.push([1,${JSON.stringify(flightTree)}])`],
+        0,
+        failingHtmlToMarkdown,
+        20_000,
+      ),
+    ).toBeNull();
+  });
+
+  it('caps the recovered markdown at maxChars with a truncation flag', () => {
+    const jd = `${TIKTOK_CHUNK_ONE}\n\n${TIKTOK_CHUNK_TWO}`;
+    const result = recoverEmbeddedDescription(
+      [`window.__DATA__ = ${JSON.stringify({ jd })}`],
+      0,
+      failingHtmlToMarkdown,
+      600,
+    );
+    expect(result?.truncated).toBe(true);
+    expect(result?.markdown.length).toBeLessThanOrEqual(600);
   });
 });
 

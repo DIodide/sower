@@ -46,11 +46,13 @@ const DEFAULT_METADATA: JobMetadata = {
 
 /**
  * A scripted Playwright double: `evaluate` answers the metadata expression
- * with `metadata`, the anchors expression with `anchors` (default []),
- * click-fallback expressions with undefined, and extraction expressions with
- * the queued extractions in order; `goto` returns `statuses` per call
- * (default 200); each `click` advances the page URL to the next entry in
- * `urls`; `frames` become child frames alongside a main frame.
+ * with `metadata`, the anchors expression with `anchors` (default []), the
+ * embedded-payload expression with `payload` (default null — nothing
+ * recovered), click-fallback expressions with undefined, and extraction
+ * expressions with the queued extractions in order; `goto` returns
+ * `statuses` per call (default 200); each `click` advances the page URL to
+ * the next entry in `urls`; `frames` become child frames alongside a main
+ * frame.
  */
 function fakePlaywright(opts: {
   extractions: RawExtraction[];
@@ -58,6 +60,7 @@ function fakePlaywright(opts: {
   gotoError?: Error;
   statuses?: number[];
   metadata?: JobMetadata | null;
+  payload?: { markdown: string; truncated?: boolean } | null;
   frames?: FakeFrameSpec[];
   anchors?: AnchorCandidate[];
 }) {
@@ -100,6 +103,9 @@ function fakePlaywright(opts: {
       }
       if (typeof expr === 'string' && expr.includes('sower:anchors')) {
         return opts.anchors ?? [];
+      }
+      if (typeof expr === 'string' && expr.includes('sower:payload')) {
+        return opts.payload ?? null;
       }
       if (typeof expr === 'string' && expr.includes('.click()')) {
         return undefined;
@@ -323,14 +329,17 @@ describe('discoverForm', () => {
       '--disable-blink-features=AutomationControlled',
     );
 
-    // Browser phase steps come first (navigate, metadata extract, form
-    // extract), then the agent's steps; seq monotonic.
+    // Browser phase steps come first (navigate, metadata extract, the
+    // embedded-payload probe — the small test description triggers it —
+    // then the form extract), then the agent's steps; seq monotonic.
     const browserSteps = transcript.filter((s) =>
       s.tool?.startsWith('browser.'),
     );
     expect(browserSteps.map((s) => [s.kind, s.tool])).toEqual([
       ['tool_use', 'browser.navigate'],
       ['tool_result', 'browser.navigate'],
+      ['tool_use', 'browser.extract'],
+      ['tool_result', 'browser.extract'],
       ['tool_use', 'browser.extract'],
       ['tool_result', 'browser.extract'],
       ['tool_use', 'browser.extract'],
@@ -545,9 +554,10 @@ describe('discoverForm', () => {
     );
     // The agent is never invoked when there is nothing to interpret.
     expect(queryMock).not.toHaveBeenCalled();
-    // Three extract pairs: job-metadata + form controls + listing links.
+    // Four extract pairs: job-metadata + embedded-payload probe (the small
+    // test description triggers it) + form controls + listing links.
     expect(transcript.filter((s) => s.tool === 'browser.extract')).toHaveLength(
-      6,
+      8,
     );
   });
 
@@ -944,6 +954,88 @@ describe('discoverForm', () => {
     });
 
     expect(result.deadline).toBe('2027-01-09T00:00:00.000Z');
+  });
+
+  it('replaces a suspiciously small DOM description with a recovered embedded payload', async () => {
+    const recovered = `# About the Team\n\n${'The Multimedia AI team builds LLM post-training systems. '.repeat(40)}\n\n## Responsibilities\n\n- Support post-training\n\n## Minimum Qualifications\n\n- Pursuing a CS degree`;
+    fakePlaywright({
+      extractions: [EMPTY_EXTRACTION],
+      // DEFAULT_METADATA's description is well under the 2,000-char
+      // suspicion threshold, so the payload probe runs — and succeeds.
+      payload: { markdown: recovered, truncated: false },
+    });
+
+    const { result, transcript } = await discoverForm({
+      url: 'https://jobs.example.com/posting/123',
+    });
+
+    expect(result.descriptionMarkdown).toBe(recovered);
+    // Title/company still come from the DOM metadata extraction.
+    expect(result.company).toBe('Example Co');
+    expect(result.title).toBe('Software Engineer Intern');
+    // Provenance is noted for the caller AND the transcript.
+    expect(result.notes).toMatch(
+      /description recovered from embedded page data \(\d+ chars; DOM had \d+\)/,
+    );
+    const probeUse = transcript.find(
+      (s) =>
+        s.kind === 'tool_use' &&
+        s.tool === 'browser.extract' &&
+        (s.input as { target?: string }).target === 'embedded-payload',
+    );
+    expect(probeUse).toBeDefined();
+    const probeResult = transcript.find((s) =>
+      s.output?.includes('recovered from embedded page data'),
+    );
+    expect(probeResult?.output).toContain(`${recovered.length} chars`);
+    expect(probeResult?.output).toContain(
+      `DOM had ${DEFAULT_METADATA.descriptionMarkdown.length}`,
+    );
+  });
+
+  it('keeps the DOM description when no embedded payload qualifies', async () => {
+    fakePlaywright({ extractions: [EMPTY_EXTRACTION], payload: null });
+
+    const { result, transcript } = await discoverForm({
+      url: 'https://jobs.example.com/posting/123',
+    });
+
+    expect(result.descriptionMarkdown).toBe(
+      DEFAULT_METADATA.descriptionMarkdown,
+    );
+    expect(result.notes).not.toContain('recovered from embedded page data');
+    const probeResult = transcript.find((s) =>
+      s.output?.includes('no embedded job-description payload qualified'),
+    );
+    expect(probeResult?.output).toContain(
+      `DOM description: ${DEFAULT_METADATA.descriptionMarkdown.length} chars`,
+    );
+  });
+
+  it('never probes embedded payloads when the DOM description is substantial', async () => {
+    const { page } = fakePlaywright({
+      extractions: [EMPTY_EXTRACTION],
+      metadata: {
+        ...DEFAULT_METADATA,
+        descriptionMarkdown: `# Role\n\n${'A thorough responsibilities paragraph. '.repeat(80)}`,
+      },
+      // A qualifying payload exists — but must never even be asked for.
+      payload: { markdown: `# Decoy\n\n${'x'.repeat(6_000)}` },
+    });
+
+    const { result } = await discoverForm({
+      url: 'https://jobs.example.com/posting/123',
+    });
+
+    expect(result.descriptionMarkdown).toContain(
+      'A thorough responsibilities paragraph.',
+    );
+    expect(result.notes).not.toContain('recovered from embedded page data');
+    expect(
+      page.evaluate.mock.calls.some((call) =>
+        String(call[0]).includes('sower:payload'),
+      ),
+    ).toBe(false);
   });
 
   it('returns formFound:false when navigation fails (never throws)', async () => {
