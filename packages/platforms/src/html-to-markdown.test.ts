@@ -119,6 +119,36 @@ describe('htmlToMarkdown', () => {
     expect(htmlToMarkdown('<p>x <strong> </strong> y</p>')).toBe('x y');
   });
 
+  it('never mints 3+ asterisk runs from nested emphasis (salesforce <b><b>)', () => {
+    // Workday tenants (Salesforce) emit doubled bolds; the redundant outer
+    // wrap must drop — `****x****` is unparseable by the dashboard renderer.
+    expect(
+      htmlToMarkdown(
+        '<p><span class="emphasis-3"><b><b>About Futureforce</b></b></span></p>',
+      ),
+    ).toBe('**About Futureforce**');
+    // Mixed nesting keeps the INNER style; the outer one drops.
+    expect(htmlToMarkdown('<p><i><b>x</b></i></p>')).toBe('**x**');
+    expect(htmlToMarkdown('<p><b><em>x</em></b></p>')).toBe('*x*');
+    expect(htmlToMarkdown('<p><b>a <b>b</b></b></p>')).toBe('a **b**');
+  });
+
+  it('keeps a decoded blank line inside a text run as a paragraph break', () => {
+    // Workday double-encodes real paragraph breaks as &amp;#xa; pairs inside
+    // tag-free text (Salesforce's pay-transparency block). Mid-text blank
+    // lines survive as breaks; tag-adjacent newlines are pretty-printing
+    // and still collapse.
+    expect(
+      htmlToMarkdown('regions.&amp;#xa;&amp;#xa;The typical base salary'),
+    ).toBe('regions.\n\nThe typical base salary');
+    expect(
+      htmlToMarkdown('<p>a</p>x.&amp;#xa;&amp;#xa;y &amp;#xa; z<p>b</p>'),
+    ).toBe('a\n\nx.\n\ny z\n\nb');
+    expect(htmlToMarkdown('<div>keep.&#xa;&#xa;split</div>')).toBe(
+      'keep.\n\nsplit',
+    );
+  });
+
   it('keeps a bolded short header paragraph as its own **Header:** block', () => {
     // Greenhouse's typical section shape: a <p> that is ONLY a bolded label
     // ending in ':' followed by the list it introduces. It stays a bold

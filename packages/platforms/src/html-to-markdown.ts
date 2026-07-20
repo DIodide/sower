@@ -282,10 +282,32 @@ function tidyLine(text: string): string {
 }
 
 /**
+ * Collapse whitespace runs in a text node to single spaces — EXCEPT a blank
+ * line embedded between non-space characters, which survives as a paragraph
+ * break. Workday double-encodes real paragraph breaks as `&amp;#xa;&amp;#xa;`
+ * inside otherwise tag-free text runs (Salesforce's pay-transparency block);
+ * after decoding, those mid-text blank lines are the only newlines that carry
+ * meaning — newlines touching a tag boundary are source pretty-printing and
+ * still collapse. Single-line consumers strip the break with their existing
+ * `\n+ → ' '` tidy.
+ */
+function collapseText(text: string): string {
+  return text
+    .split(/(?<=\S)[^\S\n]*\n(?:[^\S\n]*\n)+[^\S\n]*(?=\S)/)
+    .map((piece) => piece.replace(/\s+/g, ' '))
+    .join('\n\n');
+}
+
+/**
  * Wrap inline content in a markdown marker, moving surrounding whitespace
  * OUTSIDE the markers (` **x** ` not `** x **`) so the renderer's regex
  * matches. Content-free wraps vanish; embedded line breaks become spaces
  * (the renderer parses inline markup per line).
+ *
+ * Content that already starts or ends with an asterisk is returned UNWRAPPED:
+ * concatenating markers would mint a 3+ asterisk run the renderer cannot
+ * parse (Workday/Salesforce nest `<b><b>…</b></b>`, which would otherwise
+ * emit `****…****`). The inner markup wins; the redundant outer style drops.
  */
 function wrapMarker(marker: string, inner: string): string {
   const m = inner.match(/^(\s*)([\s\S]*?)(\s*)$/);
@@ -294,6 +316,9 @@ function wrapMarker(marker: string, inner: string): string {
   const tail = m?.[3] ?? '';
   if (core === '') {
     return lead + tail;
+  }
+  if (core.startsWith('*') || core.endsWith('*')) {
+    return lead + core + tail;
   }
   return `${lead}${marker}${core}${marker}${tail}`;
 }
@@ -312,7 +337,7 @@ function inlineText(nodes: HtmlNode[]): string {
   let out = '';
   for (const node of nodes) {
     if (node.kind === 'text') {
-      out += node.text.replace(/\s+/g, ' ');
+      out += collapseText(node.text);
       continue;
     }
     switch (node.tag) {
@@ -445,7 +470,7 @@ function renderBlocks(nodes: HtmlNode[]): string {
       continue;
     }
     if (node.kind === 'text') {
-      inline += node.text.replace(/\s+/g, ' ');
+      inline += collapseText(node.text);
       continue;
     }
     const { tag } = node;
