@@ -232,6 +232,11 @@ export default async function Page({
       ilike(jobs.company, pattern),
       ilike(jobs.title, pattern),
       ilike(applicationTasks.notes, pattern),
+      // Row labels fall back to the jobSpec's title/company (agent-discovered
+      // forms fill those before the jobs row is backfilled) — the search must
+      // match what the user SEES, not just the jobs columns.
+      sql`${applicationTasks.jobSpec}->>'title' ilike ${pattern}`,
+      sql`${applicationTasks.jobSpec}->>'company' ilike ${pattern}`,
     );
     if (search) baseConditions.push(search);
   }
