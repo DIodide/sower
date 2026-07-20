@@ -1080,17 +1080,6 @@ export default async function TaskPage({
         </section>
       ) : null}
 
-      {/* ---- agent investigation (Tier-2 screenshot triage) ---- */}
-      {investigation ? (
-        <section>
-          <SectionHeading>Agent investigation</SectionHeading>
-          <InvestigationPanel
-            run={investigation}
-            foundTaskId={foundTaskRow?.id ?? null}
-          />
-        </section>
-      ) : null}
-
       {/* ---- form & answers ---- */}
       <section id="answers">
         <SectionHeading>Questions &amp; answers</SectionHeading>
@@ -1175,6 +1164,34 @@ export default async function TaskPage({
 
       {/* ---- secondary: history, network ---- */}
       <SectionHeading>Details</SectionHeading>
+
+      {/* Agent investigation lives in Details, collapsed by default — the
+          transcript is observability, not workflow, and it dominated the page
+          when rendered open up top. The summary line carries the verdict. */}
+      {investigation ? (
+        <details className="panel">
+          <summary>
+            Agent investigation{' '}
+            <span className="hint">
+              {investigation.status === 'running'
+                ? 'running…'
+                : investigation.status === 'found'
+                  ? 'form found'
+                  : investigation.status === 'not_found'
+                    ? 'no form found'
+                    : investigation.status}
+              {' · '}
+              <Timestamp value={investigation.startedAt} inline />
+            </span>
+          </summary>
+          <div className="panel-body">
+            <InvestigationPanel
+              run={investigation}
+              foundTaskId={foundTaskRow?.id ?? null}
+            />
+          </div>
+        </details>
+      ) : null}
 
       <details className="panel">
         <summary>
