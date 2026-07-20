@@ -46,6 +46,19 @@ vi.mock('./investigate-trigger.js', () => ({
   }),
 }));
 
+/** Tasks the reingest route asked the Google Calendar sync to bring in line. */
+const calendarSyncState = vi.hoisted(() => ({ taskCalls: [] as string[] }));
+
+// The sync itself is proven in calendar-sync.test.ts; here we only assert
+// the reset invokes it (a re-ingest out of the archive restores the event
+// its deadline warrants; the fn self-gates and never throws).
+vi.mock('./calendar-sync.js', () => ({
+  syncTaskCalendarEvent: vi.fn(async (_deps: unknown, taskId: string) => {
+    calendarSyncState.taskCalls.push(taskId);
+    return { kind: 'disabled' as const };
+  }),
+}));
+
 vi.mock('@sower/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@sower/core')>()),
   canonicalizeUrl: (url: string) => url.toLowerCase().replace(/\/+$/, ''),
@@ -173,6 +186,7 @@ const config: Config = {
   SCREENSHOT_INVESTIGATION_ENABLED: false,
   RESUME_EDITOR_JOB_NAME: 'sower-resume-editor',
   RESUME_EDITOR_ENABLED: false,
+  CALENDAR_SYNC_ENABLED: false,
   DASHBOARD_BASE_URL: undefined,
 };
 
@@ -233,6 +247,7 @@ beforeEach(() => {
   probeState.calls = [];
   refreshState.calls = [];
   investigateState.calls = [];
+  calendarSyncState.taskCalls = [];
 });
 
 describe('POST /tasks/:id/reingest', () => {
@@ -342,6 +357,9 @@ describe('POST /tasks/:id/reingest', () => {
 
     // The #ingest reply line returns to queued as the state settles.
     expect(refreshState.calls).toEqual([OLD_TASK_ID]);
+    // The reset task's calendar event follows its new state (a reingest out
+    // of the archive restores the event its deadline warrants).
+    expect(calendarSyncState.taskCalls).toEqual([OLD_TASK_ID]);
     // A queued reset needs no investigation; the stored identity was already
     // discoverable, so the probe was never consulted either.
     expect(investigateState.calls).toEqual([]);

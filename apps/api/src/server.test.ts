@@ -77,6 +77,30 @@ vi.mock('./investigate-trigger.js', () => ({
   }),
 }));
 
+/** Tasks/jobs the endpoints asked the Google Calendar sync to bring in line. */
+const calendarSyncState = vi.hoisted(() => ({
+  taskCalls: [] as string[],
+  jobCalls: [] as string[],
+}));
+
+// The sync itself is proven in calendar-sync.test.ts; here we only assert
+// the trigger points invoke it after their transitions (it never throws and
+// self-gates on CALENDAR_SYNC_ENABLED).
+vi.mock('./calendar-sync.js', () => ({
+  syncTaskCalendarEvent: vi.fn(async (_deps: unknown, taskId: string) => {
+    calendarSyncState.taskCalls.push(taskId);
+    return { kind: 'disabled' as const };
+  }),
+  syncCalendarEventsForJob: vi.fn(async (_deps: unknown, jobId: string) => {
+    calendarSyncState.jobCalls.push(jobId);
+  }),
+  reconcileCalendarEvents: vi.fn(async () => ({
+    enabled: false,
+    candidates: 0,
+    synced: 0,
+  })),
+}));
+
 // Depth-0 listing-expansion children reach classifyAndIngest's page fetch.
 // The listings in these tests are JS-rendered SPAs whose raw HTML yields
 // nothing (the very reason the browser agent extracted the links), so the
@@ -243,6 +267,7 @@ const config: Config = {
   SCREENSHOT_INVESTIGATION_ENABLED: false,
   RESUME_EDITOR_JOB_NAME: 'sower-resume-editor',
   RESUME_EDITOR_ENABLED: false,
+  CALENDAR_SYNC_ENABLED: false,
   DASHBOARD_BASE_URL: undefined,
 };
 
@@ -268,6 +293,8 @@ beforeEach(() => {
   investigateState.fired = true;
   probeState.tenant = null;
   probeState.calls = [];
+  calendarSyncState.taskCalls = [];
+  calendarSyncState.jobCalls = [];
 });
 
 describe('buildServer', () => {
@@ -1526,6 +1553,9 @@ describe('buildServer', () => {
         expect(deadlineUpdate?.arg).toEqual({
           deadline: new Date('2027-01-09T00:00:00.000Z'),
         });
+        // A NEW posting deadline changes every task's effective deadline —
+        // the job-wide calendar sync runs (proven in calendar-sync.test.ts).
+        expect(calendarSyncState.jobCalls).toEqual([jobRow.id]);
       });
 
       it('parses the deadline out of descriptionMarkdown when no field is sent', async () => {
@@ -1589,6 +1619,8 @@ describe('buildServer', () => {
 
         expect(res.statusCode).toBe(200);
         expect(writes.some((w) => w.table === jobs)).toBe(false);
+        // Nothing changed, so nothing to mirror onto the calendar.
+        expect(calendarSyncState.jobCalls).toEqual([]);
       });
 
       it('handoffUrl: ingests it, records a HANDOFF event, and reports it in the body', async () => {
@@ -2263,6 +2295,7 @@ describe('buildServer', () => {
         due: 0,
         alerted: 0,
         skipped: 0,
+        calendar: { enabled: false, candidates: 0, synced: 0 },
       });
     });
 
@@ -2311,6 +2344,7 @@ describe('buildServer', () => {
         due: 1,
         alerted: 1,
         skipped: 0,
+        calendar: { enabled: false, candidates: 0, synced: 0 },
       });
       expect(postChannelMessage).toHaveBeenCalledTimes(1);
       const alertEvent = writes
@@ -2504,6 +2538,9 @@ describe('buildServer', () => {
 
       // The #ingest reply line flips to "discarded".
       expect(refreshState.calls).toEqual([TASK_ID]);
+      // A discarded task needs no calendar event — the sync runs after the
+      // transition (deleting any stored event; proven in calendar-sync tests).
+      expect(calendarSyncState.taskCalls).toEqual([TASK_ID]);
     });
 
     it('stores a trimmed note in the DISCARD event data when one is sent', async () => {
@@ -2684,6 +2721,8 @@ describe('buildServer', () => {
         data: { reason: 'manual' },
       });
       expect(refreshState.calls).toEqual([TASK_ID]);
+      // A restored task with a deadline gets its calendar event back.
+      expect(calendarSyncState.taskCalls).toEqual([TASK_ID]);
     });
 
     it('double-clicked undo is safe: NEEDS_INPUT is a 200 no-op', async () => {
@@ -2786,6 +2825,9 @@ describe('buildServer', () => {
 
       // The #ingest reply line flips to "applied".
       expect(refreshState.calls).toEqual([TASK_ID]);
+      // A submitted task needs no calendar event — the sync runs after the
+      // transition (deleting any stored one).
+      expect(calendarSyncState.taskCalls).toEqual([TASK_ID]);
     });
 
     it('stores a trimmed note ("where/how") in the MARK_SUBMITTED event data', async () => {
@@ -2953,6 +2995,8 @@ describe('buildServer', () => {
 
       // The #ingest reply line leaves "applied".
       expect(refreshState.calls).toEqual([TASK_ID]);
+      // The now-actionable task gets its calendar event back.
+      expect(calendarSyncState.taskCalls).toEqual([TASK_ID]);
     });
 
     it('responds 409 when sower itself submitted (latest SUBMITTED-entering event is SUBMIT_OK)', async () => {
@@ -3084,8 +3128,10 @@ describe('buildServer', () => {
         .filter((arg) => arg.type === 'DISCARD');
       expect(discardEvents).toHaveLength(1);
       expect(discardEvents[0]).toMatchObject({ taskId: ID_A });
-      // ...and only that task's reply was refreshed.
+      // ...and only that task's reply was refreshed + calendar-synced (the
+      // discarded task needs no event anymore).
       expect(refreshState.calls).toEqual([ID_A]);
+      expect(calendarSyncState.taskCalls).toEqual([ID_A]);
     });
 
     it('stores the optional bulk note on every DISCARD event (H5)', async () => {
@@ -3529,6 +3575,31 @@ describe('buildServer', () => {
         unknown
       >;
       expect(set.dueDate).toBeNull();
+    });
+
+    it('a dueDate write (set OR clear) triggers the calendar sync AFTER the update', async () => {
+      for (const payload of [{ dueDate: '2026-08-01' }, { dueDate: null }]) {
+        calendarSyncState.taskCalls = [];
+        const { deps } = createDeps(metaDb([]));
+        const app = buildServer(deps);
+
+        const res = await inject(app, payload);
+
+        expect(res.statusCode).toBe(200);
+        expect(calendarSyncState.taskCalls).toEqual([TASK_ID]);
+      }
+    });
+
+    it('notes/priority-only writes never touch the calendar', async () => {
+      for (const payload of [{ notes: 'hi' }, { priority: 1 }]) {
+        const { deps } = createDeps(metaDb([]));
+        const app = buildServer(deps);
+
+        const res = await inject(app, payload);
+
+        expect(res.statusCode).toBe(200);
+        expect(calendarSyncState.taskCalls).toEqual([]);
+      }
     });
 
     it('responds 400 for an unparseable dueDate (nothing written)', async () => {

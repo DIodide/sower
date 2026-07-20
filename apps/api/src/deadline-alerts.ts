@@ -1,6 +1,10 @@
 import type { TaskState } from '@sower/core';
 import { applicationTasks, events, jobs } from '@sower/db';
 import { and, eq, inArray, isNotNull, notInArray, or } from 'drizzle-orm';
+import {
+  type CalendarReconcileResult,
+  reconcileCalendarEvents,
+} from './calendar-sync.js';
 import { escapeLabel, shortenUrlForLabel } from './discord-ingest.js';
 import type { Deps } from './types.js';
 
@@ -71,6 +75,8 @@ export interface DeadlineAlertsResult {
   alerted: number;
   /** Due tasks not alerted: already alerted today, or the send failed. */
   skipped: number;
+  /** Google Calendar reconcile sweep (self-gated; rides the same run). */
+  calendar: CalendarReconcileResult;
 }
 
 /** Plain-words status phrase for the alert line (mirrors the dashboard's). */
@@ -151,16 +157,33 @@ export async function sendDeadlineAlert(
 }
 
 /**
- * Find every task due TODAY (America/New_York), alert each once, and record
- * a DEADLINE_ALERT event per alert. No-op `{enabled:false}` until Discord +
- * the alerts channel are configured. Per-task tolerant: one failed send is
- * logged and counted as skipped, never stops the batch. `now` is injectable
- * for tests; the endpoint always uses the server clock.
+ * The midnight-ET run: post the Discord due-today alerts, then run the
+ * Google Calendar reconcile sweep on the SAME schedule (each half self-gates
+ * on its own config, so either can be live without the other). `now` is
+ * injectable for tests; the endpoint always uses the server clock.
  */
 export async function runDeadlineAlerts(
   deps: Deps,
   now: Date = new Date(),
 ): Promise<DeadlineAlertsResult> {
+  const alerts = await runDiscordDeadlineAlerts(deps, now);
+  // Never throws (self-gated + fully caught inside): the sweep backfills
+  // events for tasks dated before the sync existed and heals any drift a
+  // failed trigger-point sync left behind.
+  const calendar = await reconcileCalendarEvents(deps, now);
+  return { ...alerts, calendar };
+}
+
+/**
+ * Find every task due TODAY (America/New_York), alert each once, and record
+ * a DEADLINE_ALERT event per alert. No-op `{enabled:false}` until Discord +
+ * the alerts channel are configured. Per-task tolerant: one failed send is
+ * logged and counted as skipped, never stops the batch.
+ */
+async function runDiscordDeadlineAlerts(
+  deps: Deps,
+  now: Date,
+): Promise<Omit<DeadlineAlertsResult, 'calendar'>> {
   const { db, config, notify } = deps;
   if (!config.DISCORD_ENABLED || !config.DISCORD_ALERTS_CHANNEL_ID || !notify) {
     return { enabled: false, due: 0, alerted: 0, skipped: 0 };

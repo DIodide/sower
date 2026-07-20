@@ -177,6 +177,17 @@ vi.mock('./ingest-reply.js', () => ({
   refreshIngestReply: vi.fn(async () => {}),
 }));
 
+/** Jobs whose tasks processTask asked the calendar sync to bring in line. */
+const calendarSyncState = vi.hoisted(() => ({ jobCalls: [] as string[] }));
+
+// The sync itself is proven in calendar-sync.test.ts; here we only assert
+// the deadline-persist path fires it (it self-gates and never throws).
+vi.mock('./calendar-sync.js', () => ({
+  syncCalendarEventsForJob: vi.fn(async (_deps: unknown, jobId: string) => {
+    calendarSyncState.jobCalls.push(jobId);
+  }),
+}));
+
 interface FakeTaskRow {
   id: string;
   jobId: string;
@@ -477,6 +488,7 @@ const config: Config = {
   SCREENSHOT_INVESTIGATION_ENABLED: false,
   RESUME_EDITOR_JOB_NAME: 'sower-resume-editor',
   RESUME_EDITOR_ENABLED: false,
+  CALENDAR_SYNC_ENABLED: false,
 };
 
 function createDeps(db: Deps['db'], overrides: Partial<Deps> = {}): Deps {
@@ -519,6 +531,7 @@ const discordConfig: Config = {
 
 beforeEach(() => {
   vi.mocked(refreshIngestReply).mockClear();
+  calendarSyncState.jobCalls = [];
   adapterState.discoverError = null;
   adapterState.questions = [];
   adapterState.lastDiscoverOpts = undefined;
@@ -1328,6 +1341,9 @@ describe('processTask deadline persistence (jobs.deadline)', () => {
 
     expect(outcome.kind).toBe('processed');
     expect(job.deadline).toEqual(new Date('2026-08-01T00:00:00.000Z'));
+    // A NEW posting deadline is the tasks' effective deadline — the job-wide
+    // calendar sync runs (proven in calendar-sync.test.ts, mocked here).
+    expect(calendarSyncState.jobCalls).toEqual([job.id]);
   });
 
   it('parses an explicit "apply by <date>" out of the JD text when the spec has no field', async () => {
@@ -1362,6 +1378,8 @@ describe('processTask deadline persistence (jobs.deadline)', () => {
     await processTask(createDeps(db), 'task-1');
 
     expect(job.deadline).toBe(recorded);
+    // No deadline change ⇒ no calendar churn.
+    expect(calendarSyncState.jobCalls).toEqual([]);
   });
 
   it('writes nothing when neither the spec nor the JD names a deadline', async () => {

@@ -59,6 +59,7 @@ describe('schema', () => {
       'approval_channel_id',
       'approval_message_id',
       'attempt',
+      'calendar_event_id',
       'created_at',
       'due_date',
       'id',
@@ -95,6 +96,10 @@ describe('schema', () => {
     // timestamptz, absent until the user sets one.
     expect(applicationTasks.dueDate.notNull).toBe(false);
     expect(applicationTasks.dueDate.columnType).toBe('PgTimestamp');
+    // Google Calendar mirror of the effective deadline: nullable text —
+    // absent until the calendar sync creates an event, nulled on delete.
+    expect(applicationTasks.calendarEventId.notNull).toBe(false);
+    expect(applicationTasks.calendarEventId.columnType).toBe('PgText');
     // Both nullable: Discord may be disabled or the card post may fail.
     expect(applicationTasks.approvalChannelId.notNull).toBe(false);
     expect(applicationTasks.approvalMessageId.notNull).toBe(false);

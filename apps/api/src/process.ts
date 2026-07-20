@@ -25,6 +25,7 @@ import {
 } from '@sower/platforms';
 import { computeDedupeKey } from '@sower/sources';
 import { and, desc, eq, inArray, lt, ne, or, sql } from 'drizzle-orm';
+import { syncCalendarEventsForJob } from './calendar-sync.js';
 import { postReviewApprovalCard } from './discord.js';
 import { refreshIngestReply } from './ingest-reply.js';
 import { trailingNumericJobId } from './link-extract.js';
@@ -213,7 +214,12 @@ export async function processTask(
     // FAIL/retry rather than silently dropping the discovered data.
     await backfillJobFields(db, job, jobSpec);
     await recordJobDescription(db, job.id, jobSpec.description);
-    await persistJobDeadline(db, job, jobSpec);
+    if (await persistJobDeadline(db, job, jobSpec)) {
+      // A NEW posting deadline is every task's effective deadline (unless a
+      // user due_date overrides it) — mirror it onto the calendar. Self-gated
+      // and never throws; a calendar hiccup must not fail processing.
+      await syncCalendarEventsForJob(deps, job.id);
+    }
 
     // Auto-discard full-time roles: the user hunts internships, so a posting
     // whose employment type says full-time (and whose title/type nowhere says
@@ -580,27 +586,30 @@ export async function backfillJobFields(
  * never inferred). Written ONLY when the jobs row has no deadline yet — a
  * recorded deadline is never silently rewritten. Exported for the
  * form-discovery result endpoint, which persists the agent-scraped
- * deadline/JD markdown through the same rule.
+ * deadline/JD markdown through the same rule. Returns true when a deadline
+ * was written, so callers can mirror the new effective deadline onto the
+ * calendar (syncCalendarEventsForJob).
  */
 export async function persistJobDeadline(
   db: Deps['db'],
   job: { id: string; deadline: Date | null | undefined },
   spec: { deadline?: string; description?: string },
-): Promise<void> {
+): Promise<boolean> {
   if (job.deadline !== null && job.deadline !== undefined) {
-    return;
+    return false;
   }
   const iso =
     (spec.deadline ? deadlineFromIsoDate(spec.deadline) : null) ??
     (spec.description ? extractDeadline(spec.description) : null);
   if (iso === null) {
-    return;
+    return false;
   }
   const deadline = new Date(iso);
   if (Number.isNaN(deadline.getTime())) {
-    return;
+    return false;
   }
   await db.update(jobs).set({ deadline }).where(eq(jobs.id, job.id));
+  return true;
 }
 
 /**

@@ -148,6 +148,14 @@ export const applicationTasks = pgTable('application_tasks', {
    * jobs.deadline so both render identically.
    */
   dueDate: timestamp('due_date', { withTimezone: true }),
+  /**
+   * Google Calendar event mirroring this task's EFFECTIVE deadline (due_date
+   * if set, else jobs.deadline) — written by the api's calendar sync, which
+   * upserts the event as the deadline/state changes and deletes it when the
+   * task no longer needs one (submitted/discarded/deadline cleared). Null
+   * when no event exists (sync disabled, no deadline, or already removed).
+   */
+  calendarEventId: text('calendar_event_id'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });

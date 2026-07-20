@@ -21,6 +21,10 @@ import { and, asc, desc, eq, inArray, isNotNull } from 'drizzle-orm';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { registerAnswerLibraryRoutes } from './answer-library.js';
+import {
+  syncCalendarEventsForJob,
+  syncTaskCalendarEvent,
+} from './calendar-sync.js';
 import { runDeadlineAlerts } from './deadline-alerts.js';
 import { markApprovalCardSubmitted, registerDiscordRoutes } from './discord.js';
 import {
@@ -570,8 +574,10 @@ export function buildServer(deps: Deps): FastifyInstance {
       // Omit the key entirely when absent/blank — event data stays minimal.
       ...(note ? { note } : {}),
     });
-    // Best-effort: the reply line for this task flips to "discarded".
+    // Best-effort: the reply line for this task flips to "discarded", and a
+    // discarded task needs no calendar event (both never throw).
     await refreshIngestReply(deps, taskId);
+    await syncTaskCalendarEvent(deps, taskId);
     return reply.code(200).send({ ok: true });
   });
 
@@ -608,8 +614,10 @@ export function buildServer(deps: Deps): FastifyInstance {
     await transitionTask(deps.db, taskId, row.state, 'RESTORE', {
       reason: 'manual',
     });
-    // Best-effort: the reply line for this task leaves "discarded".
+    // Best-effort: the reply line leaves "discarded", and a restored task
+    // with a deadline gets its calendar event back (both never throw).
     await refreshIngestReply(deps, taskId);
+    await syncTaskCalendarEvent(deps, taskId);
     return reply.code(200).send({ ok: true });
   });
 
@@ -656,8 +664,10 @@ export function buildServer(deps: Deps): FastifyInstance {
       // Omit the key entirely when absent/blank — event data stays minimal.
       ...(note ? { note } : {}),
     });
-    // Best-effort: the reply line for this task flips to "applied".
+    // Best-effort: the reply line flips to "applied", and a submitted task
+    // needs no calendar event anymore (both never throw).
     await refreshIngestReply(deps, taskId);
+    await syncTaskCalendarEvent(deps, taskId);
     return reply.code(200).send({ ok: true });
   });
 
@@ -705,6 +715,8 @@ export function buildServer(deps: Deps): FastifyInstance {
         });
         discarded += 1;
         await refreshIngestReply(deps, taskId);
+        // Best-effort: a discarded task needs no calendar event.
+        await syncTaskCalendarEvent(deps, taskId);
       } catch (error) {
         skipped.push({
           id: taskId,
@@ -785,6 +797,16 @@ export function buildServer(deps: Deps): FastifyInstance {
       .update(applicationTasks)
       .set(set)
       .where(eq(applicationTasks.id, taskId));
+    if (body.data.dueDate !== undefined) {
+      // Best-effort: mirror the new effective deadline onto Google Calendar
+      // (create/move/delete the task's event). syncTaskCalendarEvent never
+      // throws by contract; the belt keeps the meta save's 200 unconditional.
+      try {
+        await syncTaskCalendarEvent(deps, taskId);
+      } catch (error) {
+        console.warn(`[sower] calendar sync failed for task ${taskId}:`, error);
+      }
+    }
     return reply.code(200).send({ ok: true });
   });
 
@@ -1015,8 +1037,10 @@ export function buildServer(deps: Deps): FastifyInstance {
     await transitionTask(deps.db, taskId, row.state, 'UNMARK_SUBMITTED', {
       reason: 'manual',
     });
-    // Best-effort: the reply line for this task leaves "applied".
+    // Best-effort: the reply line leaves "applied", and the now-actionable
+    // task gets its calendar event back (both never throw).
     await refreshIngestReply(deps, taskId);
+    await syncTaskCalendarEvent(deps, taskId);
     return reply.code(200).send({ ok: true });
   });
 
@@ -1308,10 +1332,16 @@ export function buildServer(deps: Deps): FastifyInstance {
           title: result.title,
         });
         await recordJobDescription(deps.db, job.id, result.descriptionMarkdown);
-        await persistJobDeadline(deps.db, job, {
-          deadline: result.deadline,
-          description: result.descriptionMarkdown,
-        });
+        if (
+          await persistJobDeadline(deps.db, job, {
+            deadline: result.deadline,
+            description: result.descriptionMarkdown,
+          })
+        ) {
+          // A NEW posting deadline changes every task's effective deadline —
+          // mirror it onto the calendar (self-gated, never throws).
+          await syncCalendarEventsForJob(deps, job.id);
+        }
 
         // Supported-platform handoff: the apply flow landed on an ATS an
         // adapter CAN ingest (the Workday popup case). Feed it through the

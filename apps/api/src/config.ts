@@ -128,6 +128,20 @@ const envSchema = z
      * is right whenever the caller reaches the api by its public name.
      */
     PUBLIC_API_BASE_URL: z.string().optional(),
+    /**
+     * Google OAuth client shared with the Gmail inbox reader (@sower/inbox
+     * reads the same two env vars directly). Both SECRETS (Secret Manager in
+     * production); optional — absent, calendar sync stays fully dormant.
+     */
+    GMAIL_CLIENT_ID: z.string().optional(),
+    GMAIL_CLIENT_SECRET: z.string().optional(),
+    /**
+     * SECRET (Secret Manager `google-calendar-refresh-token`): long-lived
+     * OAuth refresh token granting calendar.events on the user's Google
+     * Calendar. Optional — absent, calendar sync stays fully dormant (see
+     * the derived CALENDAR_SYNC_ENABLED below).
+     */
+    GOOGLE_CALENDAR_REFRESH_TOKEN: z.string().optional(),
   })
   .transform((env) => ({
     ...env,
@@ -138,6 +152,15 @@ const envSchema = z
       (env.SCREENSHOT_INVESTIGATION_ENABLED ?? '') === 'true',
     /** Derived: resume-editor runs fire only when explicitly enabled. */
     RESUME_EDITOR_ENABLED: (env.RESUME_EDITOR_ENABLED ?? '') === 'true',
+    /**
+     * Derived: Google Calendar deadline sync runs only when the full OAuth
+     * triple is configured (client id + secret + calendar refresh token).
+     * Anything missing keeps every sync a silent no-op.
+     */
+    CALENDAR_SYNC_ENABLED:
+      (env.GMAIL_CLIENT_ID ?? '') !== '' &&
+      (env.GMAIL_CLIENT_SECRET ?? '') !== '' &&
+      (env.GOOGLE_CALENDAR_REFRESH_TOKEN ?? '') !== '',
   }));
 
 export type Config = z.infer<typeof envSchema>;

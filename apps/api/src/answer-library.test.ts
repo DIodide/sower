@@ -127,6 +127,7 @@ const config: Config = {
   SCREENSHOT_INVESTIGATION_ENABLED: false,
   RESUME_EDITOR_JOB_NAME: 'sower-resume-editor',
   RESUME_EDITOR_ENABLED: false,
+  CALENDAR_SYNC_ENABLED: false,
 };
 
 function createApp(db: Deps['db']) {

@@ -1,0 +1,1 @@
+ALTER TABLE "application_tasks" ADD COLUMN "calendar_event_id" text;

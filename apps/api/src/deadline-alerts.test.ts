@@ -1,6 +1,6 @@
 import { deadlineFromIsoDate } from '@sower/core';
 import { events } from '@sower/db';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
 import {
   DEADLINE_ALERT_EVENT,
@@ -9,6 +9,24 @@ import {
   sendDeadlineAlert,
 } from './deadline-alerts.js';
 import type { Deps, Notifier } from './types.js';
+
+/** What the mocked calendar reconcile reports + how it was called. */
+const calendarState = vi.hoisted(() => ({
+  calls: [] as Date[],
+  result: { enabled: false, candidates: 0, synced: 0 },
+}));
+
+// The sweep itself is proven in calendar-sync.test.ts; here we only assert
+// the alerts run invokes it (it self-gates and never throws).
+vi.mock('./calendar-sync.js', () => ({
+  reconcileCalendarEvents: vi.fn(async (_deps: unknown, now: Date) => {
+    calendarState.calls.push(now);
+    return calendarState.result;
+  }),
+}));
+
+/** The reconcile result while calendar sync is unconfigured (the default). */
+const DISABLED_CALENDAR = { enabled: false, candidates: 0, synced: 0 };
 
 interface Chain {
   from: () => Chain;
@@ -96,6 +114,7 @@ const baseConfig: Config = {
   SCREENSHOT_INVESTIGATION_ENABLED: false,
   RESUME_EDITOR_JOB_NAME: 'sower-resume-editor',
   RESUME_EDITOR_ENABLED: false,
+  CALENDAR_SYNC_ENABLED: false,
   DASHBOARD_BASE_URL: 'https://dash.example',
 };
 
@@ -122,6 +141,11 @@ function createDeps(overrides: {
 /** 00:30 ET on July 18, 2026 (EDT, UTC-4) — just after the midnight run. */
 const NOW = new Date('2026-07-18T04:30:00Z');
 const TODAY_ET = '2026-07-18';
+
+beforeEach(() => {
+  calendarState.calls = [];
+  calendarState.result = { ...DISABLED_CALENDAR };
+});
 
 /** A candidate row as the tasks+jobs join returns it. */
 function row(overrides: Partial<Record<string, unknown>> = {}) {
@@ -170,6 +194,7 @@ describe('runDeadlineAlerts', () => {
         due: 0,
         alerted: 0,
         skipped: 0,
+        calendar: DISABLED_CALENDAR,
       });
     }
     expect(notify.postChannelMessage).not.toHaveBeenCalled();
@@ -178,7 +203,13 @@ describe('runDeadlineAlerts', () => {
   it('is disabled without a notifier even when the channel id is set', async () => {
     const deps = createDeps({ notify: undefined });
     const result = await runDeadlineAlerts(deps, NOW);
-    expect(result).toEqual({ enabled: false, due: 0, alerted: 0, skipped: 0 });
+    expect(result).toEqual({
+      enabled: false,
+      due: 0,
+      alerted: 0,
+      skipped: 0,
+      calendar: DISABLED_CALENDAR,
+    });
   });
 
   it('alerts tasks due today in ET, with due_date taking precedence over jobs.deadline', async () => {
@@ -211,7 +242,13 @@ describe('runDeadlineAlerts', () => {
 
     const result = await runDeadlineAlerts(deps, NOW);
 
-    expect(result).toEqual({ enabled: true, due: 2, alerted: 2, skipped: 0 });
+    expect(result).toEqual({
+      enabled: true,
+      due: 2,
+      alerted: 2,
+      skipped: 0,
+      calendar: DISABLED_CALENDAR,
+    });
     expect(notify.postChannelMessage).toHaveBeenCalledTimes(2);
     expect(vi.mocked(notify.postChannelMessage).mock.calls[0]?.[0]).toBe(
       'chan-alerts',
@@ -257,6 +294,7 @@ describe('runDeadlineAlerts', () => {
       due: 0,
       alerted: 0,
       skipped: 0,
+      calendar: DISABLED_CALENDAR,
     });
     expect(notifyJul19.postChannelMessage).not.toHaveBeenCalled();
 
@@ -275,6 +313,7 @@ describe('runDeadlineAlerts', () => {
       due: 1,
       alerted: 1,
       skipped: 0,
+      calendar: DISABLED_CALENDAR,
     });
     expect(notifyJul20.postChannelMessage).toHaveBeenCalledTimes(1);
     const inserted = writes
@@ -297,7 +336,13 @@ describe('runDeadlineAlerts', () => {
 
     const result = await runDeadlineAlerts(deps, NOW);
 
-    expect(result).toEqual({ enabled: true, due: 0, alerted: 0, skipped: 0 });
+    expect(result).toEqual({
+      enabled: true,
+      due: 0,
+      alerted: 0,
+      skipped: 0,
+      calendar: DISABLED_CALENDAR,
+    });
     expect(notify.postChannelMessage).not.toHaveBeenCalled();
   });
 
@@ -325,7 +370,13 @@ describe('runDeadlineAlerts', () => {
 
     const result = await runDeadlineAlerts(deps, NOW);
 
-    expect(result).toEqual({ enabled: true, due: 2, alerted: 1, skipped: 1 });
+    expect(result).toEqual({
+      enabled: true,
+      due: 2,
+      alerted: 1,
+      skipped: 1,
+      calendar: DISABLED_CALENDAR,
+    });
     expect(notify.postChannelMessage).toHaveBeenCalledTimes(1);
     const inserted = writes
       .filter((w) => w.method === 'insert' && w.table === events)
@@ -426,7 +477,13 @@ describe('runDeadlineAlerts', () => {
 
     const result = await runDeadlineAlerts(deps, NOW);
 
-    expect(result).toEqual({ enabled: true, due: 2, alerted: 1, skipped: 1 });
+    expect(result).toEqual({
+      enabled: true,
+      due: 2,
+      alerted: 1,
+      skipped: 1,
+      calendar: DISABLED_CALENDAR,
+    });
     // Only the successful send recorded its DEADLINE_ALERT event — the
     // failed one stays unrecorded, so the next run retries it.
     const inserted = writes
@@ -435,6 +492,41 @@ describe('runDeadlineAlerts', () => {
     expect(inserted).toHaveLength(1);
     expect(inserted[0]?.taskId).toBe('aaaaaaaa-0000-4000-8000-000000000402');
     warn.mockRestore();
+  });
+
+  it('runs the calendar reconcile sweep on the same clock and reports its result (proven in calendar-sync.test.ts, mocked here)', async () => {
+    calendarState.result = { enabled: true, candidates: 3, synced: 2 };
+    const db = createFakeDb({ selectResults: [[], []] });
+    const deps = createDeps({ db, notify: createNotify() });
+
+    const result = await runDeadlineAlerts(deps, NOW);
+
+    expect(calendarState.calls).toEqual([NOW]);
+    expect(result).toEqual({
+      enabled: true,
+      due: 0,
+      alerted: 0,
+      skipped: 0,
+      calendar: { enabled: true, candidates: 3, synced: 2 },
+    });
+  });
+
+  it('runs the reconcile sweep even when Discord alerts are unconfigured (each half self-gates)', async () => {
+    calendarState.result = { enabled: true, candidates: 1, synced: 1 };
+    const deps = createDeps({
+      config: { DISCORD_ALERTS_CHANNEL_ID: undefined },
+      notify: undefined,
+    });
+
+    const result = await runDeadlineAlerts(deps, NOW);
+
+    expect(calendarState.calls).toEqual([NOW]);
+    expect(result.calendar).toEqual({
+      enabled: true,
+      candidates: 1,
+      synced: 1,
+    });
+    expect(result.enabled).toBe(false);
   });
 });
 

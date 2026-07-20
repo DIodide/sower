@@ -6,6 +6,7 @@ import { computeDedupeKey } from '@sower/sources';
 import { and, eq, ne, or } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { syncTaskCalendarEvent } from './calendar-sync.js';
 import { parkReason, runIngestTail } from './ingest.js';
 import { refreshIngestReply } from './ingest-reply.js';
 import { triggerInvestigation } from './investigate-trigger.js';
@@ -177,8 +178,11 @@ export function registerReingestRoutes(app: FastifyInstance, deps: Deps): void {
       await triggerInvestigation(deps, taskId);
     }
 
-    // Best-effort: the #ingest reply line returns to queued/parked.
+    // Best-effort: the #ingest reply line returns to queued/parked, and the
+    // reset task's calendar event follows its new state (a re-ingest out of
+    // the archive restores the event its deadline warrants; both never throw).
     await refreshIngestReply(deps, taskId);
+    await syncTaskCalendarEvent(deps, taskId);
 
     return reply.code(200).send({ ok: true, state: tail.state });
   });
