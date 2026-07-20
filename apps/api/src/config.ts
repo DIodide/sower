@@ -47,6 +47,16 @@ const envSchema = z
     ANSWER_BANK_PATH: z.string().default(DEFAULT_ANSWER_BANK_PATH),
     SIMPLIFY_TERMS: z.string().default('Summer 2027'),
     SIMPLIFY_MAX_PER_RUN: z.coerce.number().int().positive().default(10),
+    /**
+     * Max Tier-2 form-discovery investigations the hourly listings-source
+     * poll may fire per run — this run's fresh unknown-platform parks first,
+     * then (with any remaining budget) the oldest never-investigated parked
+     * backlog from the same sources. Throttles the browser-agent burst when a
+     * source drops dozens of unsupported listings at once; 0 disables the
+     * drip (parked tasks stay reachable via the queue's manual "Run browser
+     * agent" button either way).
+     */
+    SOURCE_INVESTIGATE_PER_RUN: z.coerce.number().int().min(0).default(5),
     SOWER_SUBMIT_ENABLED: z.string().default('false'),
     SOWER_ENV: z.string().default('development'),
     /** SECRET (Secret Manager). Absent => Discord notifications disabled. */

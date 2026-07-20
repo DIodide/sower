@@ -1724,9 +1724,11 @@ export function buildServer(deps: Deps): FastifyInstance {
   });
 
   // Poll the configured Summer 2027 source(s), normalize + filter by term, and
-  // auto-ingest listings on any supported platform (greenhouse/ashby/lever/
-  // workday) with a resolvable tenant. Records one ingestion_runs row. Kept at
-  // this path so the existing Cloud Scheduler job needs no re-point.
+  // ingest EVERY filtered listing: supported platforms (greenhouse/ashby/
+  // lever/workday) queue for auto-processing, unknown/tenant-less ones are
+  // recorded + parked (with a throttled form-discovery drip). Records one
+  // ingestion_runs row. Kept at this path so the existing Cloud Scheduler job
+  // needs no re-point.
   app.post('/sources/simplify/poll', async () => {
     return runIngestionPoll(deps);
   });

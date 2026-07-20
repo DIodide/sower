@@ -231,6 +231,7 @@ const config: Config = {
   ANSWER_BANK_PATH: './config/answer-bank.sample.yaml',
   SIMPLIFY_TERMS: 'Summer 2027',
   SIMPLIFY_MAX_PER_RUN: 10,
+  SOURCE_INVESTIGATE_PER_RUN: 5,
   SOWER_SUBMIT_ENABLED: 'false',
   SOWER_ENV: 'test',
   DISCORD_BOT_TOKEN: undefined,
@@ -658,10 +659,10 @@ describe('buildServer', () => {
     });
   });
 
-  it('POST /sources/simplify/poll normalizes both raw schemas and only ingests greenhouse listings with a known tenant', async () => {
+  it('POST /sources/simplify/poll normalizes both raw schemas and ingests EVERY filtered listing (supported queue, the rest park)', async () => {
     sourcesState.listings = [
       {
-        // SimplifyJobs schema (terms[]) — greenhouse with tenant: ingested.
+        // SimplifyJobs schema (terms[]) — greenhouse with tenant: queued.
         url: 'https://boards.greenhouse.io/acme/jobs/123',
         company_name: 'Acme',
         title: 'SWE Intern',
@@ -669,7 +670,7 @@ describe('buildServer', () => {
       },
       {
         // vanshb03 schema (season word) matches the requested 'Summer 2027';
-        // greenhouse with tenant: ingested.
+        // greenhouse with tenant: queued.
         url: 'https://boards.greenhouse.io/globex/jobs/456',
         company_name: 'Globex',
         title: 'SWE Intern',
@@ -683,14 +684,15 @@ describe('buildServer', () => {
         terms: ['Fall 2028'],
       },
       {
-        // greenhouse without tenant (gh_jid custom domain): skipped.
+        // greenhouse without tenant (gh_jid custom domain): the tenant probe
+        // reports null here, so it ingests + parks (no longer skipped).
         url: 'https://jobs.example.com/opening?gh_jid=42',
         company_name: 'Example',
         title: 'SWE Intern',
         terms: ['Summer 2027'],
       },
       {
-        // Non-greenhouse: counted per-platform, not auto-ingested.
+        // Non-greenhouse (no adapter in this mock): ingests + parks.
         url: 'https://jobs.lever.co/other/xyz',
         company_name: 'Other',
         title: 'SWE Intern',
@@ -720,9 +722,10 @@ describe('buildServer', () => {
       },
     };
     const db = createFakeDb({
-      // Two ingests: each does a dup-check select, then 4 inserts
-      // (job, task, PARSE_OK event, ENQUEUE event).
-      selectResults: [[], []],
+      // 1 known-canonical-URL pre-filter select, then four ingests: each does
+      // a dup-check select and 4 inserts (job, task, PARSE_OK event, then an
+      // ENQUEUE event for the queued two / a PARK event for the parked two).
+      selectResults: [[], [], [], [], []],
       insertResults: [
         [{ id: 'job-1' }],
         [{ id: 'task-1' }],
@@ -732,6 +735,14 @@ describe('buildServer', () => {
         [{ id: 'task-2' }],
         [], // PARSE_OK event
         [], // ENQUEUE event
+        [{ id: 'job-3' }],
+        [{ id: 'task-3' }],
+        [], // PARSE_OK event
+        [], // PARK event (greenhouse without tenant)
+        [{ id: 'job-4' }],
+        [{ id: 'task-4' }],
+        [], // PARSE_OK event
+        [], // PARK event (no lever adapter in this mock)
       ],
     });
     const { deps, enqueueProcess } = createDeps(db);
@@ -742,19 +753,26 @@ describe('buildServer', () => {
       headers: { 'x-api-key': 'test-key' },
     });
     expect(res.statusCode).toBe(200);
-    // Only greenhouse has an adapter in this mock, so lever is skipped here;
-    // the multi-platform expansion is proven in ingest-poll.test.ts.
+    // Only greenhouse has an adapter in this mock, so the lever listing parks
+    // here (multi-platform queueing is proven in ingest-poll.test.ts) — but
+    // NOTHING is dropped: all four filtered listings become jobs + tasks.
     expect(res.json()).toEqual({
-      scanned: 4,
+      fetched: 5,
+      filtered: 4,
       byPlatform: { greenhouse: 3, lever: 1 },
-      matched: 2,
+      fresh: 4,
       ingested: 2,
+      parked: 2,
       duplicates: 0,
-      skipped: 2,
+      capDeferred: 0,
+      // SCREENSHOT_INVESTIGATION_ENABLED is false in this config, so the
+      // parked pair waits for the drip/manual triage without any trigger.
+      investigationsTriggered: 0,
     });
     expect(enqueueProcess).toHaveBeenCalledTimes(2);
     expect(enqueueProcess).toHaveBeenNthCalledWith(1, 'task-1');
     expect(enqueueProcess).toHaveBeenNthCalledWith(2, 'task-2');
+    expect(investigateState.calls).toEqual([]);
   });
 
   describe('POST /tasks/:id/investigation-result', () => {

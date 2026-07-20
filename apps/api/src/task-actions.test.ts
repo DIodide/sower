@@ -163,6 +163,7 @@ const config: Config = {
   ANSWER_BANK_PATH: './config/answer-bank.sample.yaml',
   SIMPLIFY_TERMS: 'Summer 2027',
   SIMPLIFY_MAX_PER_RUN: 10,
+  SOURCE_INVESTIGATE_PER_RUN: 5,
   SOWER_SUBMIT_ENABLED: 'false',
   SOWER_ENV: 'test',
   DISCORD_BOT_TOKEN: undefined,
