@@ -24,7 +24,11 @@ import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll } from 'vitest';
-import { compileTex, stripPdfTexDirectives } from './tectonic.js';
+import {
+  compileTex,
+  describeBraceImbalance,
+  stripPdfTexDirectives,
+} from './tectonic.js';
 
 const workdir = await mkdtemp(path.join(tmpdir(), 'sower-tectonic-test-'));
 afterAll(async () => {
@@ -159,5 +163,50 @@ describe('compileTex', () => {
     await expect(
       readFile(path.join(workdir, 'Broken.pdf'), 'utf8'),
     ).rejects.toThrow();
+  });
+});
+
+describe('describeBraceImbalance', () => {
+  it('returns null for balanced source, including escaped braces', () => {
+    expect(describeBraceImbalance('\\textbf{ok} \\small{x}')).toBeNull();
+    // \{ and \} are literal characters, not grouping.
+    expect(describeBraceImbalance('a \\{ b \\} c')).toBeNull();
+    expect(describeBraceImbalance('')).toBeNull();
+  });
+
+  it('ignores braces inside comments but not an escaped percent', () => {
+    expect(describeBraceImbalance('% a stray { in prose')).toBeNull();
+    expect(describeBraceImbalance('\\textbf{100\\% done}')).toBeNull();
+  });
+
+  it('names the line where the surviving brace opened', () => {
+    const source = ['\\begin{center}', '\\small{\\item{', 'body', '}'].join(
+      '\n',
+    );
+    expect(describeBraceImbalance(source)).toMatch(
+      /1 unclosed '\{' — the last one opens at line 2/,
+    );
+  });
+
+  it('points into the awards block for the real dropped-brace regression', () => {
+    // The exact shape that broke a live compile: the \textbf{Awards}{: …}
+    // group lost its closing brace, and tectonic blamed \end{itemize} two
+    // lines below.
+    const source = [
+      '\\begin{itemize}[leftmargin=0.15in, label={}]',
+      '   \\small{\\item{',
+      '    \\textbf{Awards}{: Qualcomm Honorable Mention, COSCON Honor',
+      '   }}',
+      '\\end{itemize}',
+    ].join('\n');
+    const hint = describeBraceImbalance(source);
+    expect(hint).toContain('1 unclosed');
+    expect(hint).toContain('line 2');
+  });
+
+  it('truncates a long culprit line in the hint', () => {
+    const hint = describeBraceImbalance(`\\item{${'x'.repeat(200)}`);
+    expect(hint).toContain('…');
+    expect((hint ?? '').length).toBeLessThan(160);
   });
 });

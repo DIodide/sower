@@ -51,6 +51,43 @@ export function stripPdfTexDirectives(source: string): string {
 }
 
 /**
+ * Locate braces left open at end of source, reported as a one-line hint.
+ *
+ * TeX blames the token where it NOTICED the imbalance — typically the
+ * `\end{...}` far below the real mistake ("Missing } inserted" at line 219
+ * for a `}` dropped on 217) — which sends you hunting in the wrong place.
+ * Scanning for the still-open braces points at the block that actually
+ * needs one.
+ *
+ * `\{`/`\}` are literal characters, and everything after an unescaped `%`
+ * is a comment, so neither contributes. This is a HINT ONLY: it is
+ * appended to a compile failure that already happened and never gates a
+ * compile, so an over-eager match (a brace inside verbatim, say) can
+ * mislead but can never block a valid resume.
+ */
+export function describeBraceImbalance(source: string): string | null {
+  const open: { line: number; text: string }[] = [];
+  const lines = source.split('\n');
+  for (const [index, raw] of lines.entries()) {
+    const code = raw.replace(/\\[{}%]/g, '').replace(/(?<!\\)%.*$/, '');
+    for (const char of code) {
+      if (char === '{') {
+        open.push({ line: index + 1, text: raw.trim() });
+      } else if (char === '}') {
+        open.pop();
+      }
+    }
+  }
+  const culprit = open[open.length - 1];
+  if (!culprit) {
+    return null;
+  }
+  const excerpt =
+    culprit.text.length > 80 ? `${culprit.text.slice(0, 80)}…` : culprit.text;
+  return `${open.length} unclosed '{' — the last one opens at line ${culprit.line}: ${excerpt}`;
+}
+
+/**
  * Compile `texFile` (a filename relative to `cwd`); the PDF lands in cwd
  * under the ORIGINAL name (`<name>.pdf`), exactly as callers expect.
  *
@@ -76,7 +113,12 @@ export async function compileTex(cwd: string, texFile: string): Promise<void> {
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(`compiling ${texFile} failed: ${detail}`);
+      // Tectonic halts where it NOTICED the problem; the hint names where
+      // the brace was actually left open (see describeBraceImbalance).
+      const hint = describeBraceImbalance(source);
+      throw new Error(
+        `compiling ${texFile} failed: ${detail}${hint ? `\n\nlikely cause: ${hint}` : ''}`,
+      );
     }
     // tectonic names the PDF after its input file — publish the original name.
     await fs.rename(buildPdfPath, path.join(cwd, `${name}.pdf`));
