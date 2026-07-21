@@ -8,6 +8,7 @@ import {
   applicationTasks,
   documents,
   events,
+  followups,
   investigationRuns,
   jobDescriptions,
   jobs,
@@ -123,6 +124,75 @@ describe('schema', () => {
     ]);
     expect(events.taskId.notNull).toBe(true);
     expect(events.type.notNull).toBe(true);
+  });
+
+  it('defines the followups table', () => {
+    expect(getTableName(followups)).toBe('followups');
+    expect(sqlColumnNames(followups)).toEqual([
+      'calendar_event_id',
+      'created_at',
+      'due_date',
+      'id',
+      'kind',
+      'notes',
+      'source',
+      'source_ref',
+      'state',
+      'task_id',
+      'title',
+      'updated_at',
+      'url',
+    ]);
+    expect(followups.taskId.notNull).toBe(true);
+    expect(followups.kind.notNull).toBe(true);
+    expect(followups.title.notNull).toBe(true);
+    // Every follow-up starts in the machine's initial state.
+    expect(followups.state.notNull).toBe(true);
+    expect(followups.state.default).toBe('RECEIVED');
+    // Manual creation is the default; email/discord ingest set it explicitly.
+    expect(followups.source.notNull).toBe(true);
+    expect(followups.source.default).toBe('manual');
+    // All nullable: absent until the user (or the classifier) sets them.
+    expect(followups.url.notNull).toBe(false);
+    expect(followups.notes.notNull).toBe(false);
+    expect(followups.dueDate.notNull).toBe(false);
+    expect(followups.dueDate.columnType).toBe('PgTimestamp');
+    // Null for manual rows; the Gmail message id for email-ingested ones.
+    expect(followups.sourceRef.notNull).toBe(false);
+    // Absent until the calendar sync creates an event, nulled on delete.
+    expect(followups.calendarEventId.notNull).toBe(false);
+    expect(followups.createdAt.notNull).toBe(true);
+    expect(followups.updatedAt.notNull).toBe(true);
+  });
+
+  it('references application_tasks and indexes (task_id, created_at) on followups', () => {
+    const config = getTableConfig(followups);
+    const fk = config.foreignKeys[0]?.reference();
+    expect(fk?.foreignTable && getTableName(fk.foreignTable)).toBe(
+      'application_tasks',
+    );
+    expect(fk?.columns.map((c) => c.name)).toEqual(['task_id']);
+    const listing = config.indexes.find(
+      (idx) => idx.config.name === 'followups_task_id_created_at_idx',
+    );
+    expect(listing).toBeDefined();
+    expect(
+      listing?.config.columns.map((c) => ('name' in c ? c.name : null)),
+    ).toEqual(['task_id', 'created_at']);
+  });
+
+  it('enforces the email-ingest dedupe key: UNIQUE(source_ref) WHERE NOT NULL', () => {
+    const config = getTableConfig(followups);
+    const unique = config.indexes.find(
+      (idx) => idx.config.name === 'followups_source_ref_uq',
+    );
+    expect(unique).toBeDefined();
+    expect(unique?.config.unique).toBe(true);
+    expect(
+      unique?.config.columns.map((c) => ('name' in c ? c.name : null)),
+    ).toEqual(['source_ref']);
+    // Partial: manual rows' NULL source_refs must never collide.
+    expect(unique?.config.where).toBeDefined();
   });
 
   it('defines the answers table', () => {

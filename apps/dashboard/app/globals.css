@@ -1982,6 +1982,109 @@ details.show-more[open] > summary .show-more-open {
   }
 }
 
+/* --------------------------------------- post-application follow-up rows */
+
+/* One follow-up as a list row (home "In play" + the task page's
+   Post-application panel), inside the shared .row-list box:
+   kind badge | title | state badge | due — the .grid-row treatment at
+   follow-up scale. */
+.fu-row {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) max-content max-content;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.4375rem 0.625rem;
+  border-top: var(--border-soft);
+  transition: background 100ms ease;
+}
+
+.row-list > .fu-row:first-child {
+  border-top: none;
+}
+
+.fu-row:hover {
+  background: #f6f7f9;
+}
+
+.fu-row > * {
+  min-width: 0;
+}
+
+.fu-title {
+  font-weight: 500;
+  font-size: 0.875rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fu-due {
+  justify-self: end;
+  white-space: nowrap;
+}
+
+/* faint "N open" follow-up pointer riding a Sent row's status cell */
+.fu-open {
+  margin-left: 0.5rem;
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+/* the task page's inline "Add follow-up" form: one compact line */
+.fu-add {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex-wrap: wrap;
+}
+
+.fu-add .field {
+  width: auto;
+  font-size: 0.8125rem;
+}
+
+.fu-add .fu-add-title {
+  flex: 1 1 14rem;
+}
+
+.fu-add .fu-add-url {
+  flex: 1 1 9rem;
+}
+
+/* narrow: due date drops to the row's second line rather than crushing the
+   title (the badges stay with it) */
+@media (max-width: 700px) {
+  .fu-row {
+    grid-template-columns: max-content minmax(0, 1fr) max-content;
+    grid-template-areas:
+      "kind title state"
+      "due due due";
+    row-gap: 0.25rem;
+  }
+
+  .fu-row > :nth-child(1) {
+    grid-area: kind;
+  }
+
+  .fu-row > .fu-title {
+    grid-area: title;
+  }
+
+  .fu-row > :nth-child(3) {
+    grid-area: state;
+    justify-self: end;
+  }
+
+  .fu-row > .fu-due {
+    grid-area: due;
+    justify-self: start;
+  }
+
+  .fu-row > .fu-due:empty {
+    display: none;
+  }
+}
+
 /* --------------------------------------------------------- resume workspace */
 
 /* Two panes — the compiled PDF and the tabbed editor — that stack when the

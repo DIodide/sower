@@ -13,13 +13,14 @@ import {
   applicationTasks,
   documents,
   events,
+  followups,
   investigationRuns,
   jobDescriptions,
   jobs,
   type WorkdaySessionRow,
   workdaySessions,
 } from '@sower/db';
-import { asc, desc, eq } from 'drizzle-orm';
+import { asc, desc, eq, sql } from 'drizzle-orm';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import type { ReactNode } from 'react';
@@ -45,6 +46,7 @@ import {
   StateBadge,
   Timestamp,
 } from '../../../lib/ui';
+import { FollowupsPanel } from './followups-panel';
 import { InvestigationPanel } from './investigation-panel';
 import { JobDescriptionPanel } from './job-description-panel';
 import { NeedsInputForm } from './needs-input-form';
@@ -605,6 +607,7 @@ export default async function TaskPage({
     descriptionRows,
     investigationRows,
     bankAnswerRows,
+    followupRows,
   ] = await Promise.all([
     db.select().from(jobs).where(eq(jobs.id, task.jobId)).limit(1),
     db
@@ -643,6 +646,16 @@ export default async function TaskPage({
         company: answers.company,
       })
       .from(answers),
+    // Post-application follow-ups on this task: due first (nulls last), then
+    // newest — the same order the home "In play" section uses.
+    db
+      .select()
+      .from(followups)
+      .where(eq(followups.taskId, id))
+      .orderBy(
+        sql`${followups.dueDate} asc nulls last`,
+        desc(followups.createdAt),
+      ),
   ]);
   const job = jobRows[0];
   const latestDescription = descriptionRows[0];
@@ -1030,6 +1043,14 @@ export default async function TaskPage({
           </>
         ) : null}
       </section>
+
+      {/* ---- post-application follow-ups: ALWAYS on sent tasks (the panel
+           invites tracking the first reply), and on any task that already
+           has some (they survive an un-mark back into the queue). ---- */}
+      {['SUBMITTED', 'CONFIRMED'].includes(task.state) ||
+      followupRows.length > 0 ? (
+        <FollowupsPanel taskId={task.id} rows={followupRows} />
+      ) : null}
 
       {/* ---- job description — up top, right under the ask: it's what the
            user reads while answering. Collapsible; open by default for

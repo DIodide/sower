@@ -39,8 +39,14 @@ interface GmailMessageRef {
   id: string;
 }
 
+interface GmailHeader {
+  name?: string;
+  value?: string;
+}
+
 interface GmailMessagePart {
   mimeType?: string;
+  headers?: GmailHeader[];
   body?: { data?: string };
   parts?: GmailMessagePart[];
 }
@@ -50,6 +56,18 @@ interface GmailMessage {
   internalDate?: string;
   payload?: GmailMessagePart;
   snippet?: string;
+}
+
+/**
+ * One message read for general scanning (the follow-up inbox poll): key
+ * headers + every decoded text body joined into one blob.
+ */
+export interface GmailMessageSummary {
+  id: string;
+  subject: string;
+  from: string;
+  receivedAt: Date | null;
+  bodyText: string;
 }
 
 /** Flatten a message's MIME tree into decoded text bodies (plain + html). */
@@ -144,6 +162,54 @@ export class GmailInboxReader implements InboxReader {
       }
     }
     return null;
+  }
+
+  /**
+   * List the message ids matching a raw Gmail search query (newest first —
+   * Gmail's default ordering). Throws on an API failure; an empty result is
+   * simply [].
+   */
+  async searchMessageIds(query: string, maxResults = 25): Promise<string[]> {
+    const token = await this.token();
+    const listRes = await this.fetchImpl(
+      `${GMAIL_BASE}/messages?maxResults=${maxResults}&q=${encodeURIComponent(query)}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (!listRes.ok) {
+      throw new Error(`gmail search failed with status ${listRes.status}`);
+    }
+    const list = (await listRes.json()) as { messages?: GmailMessageRef[] };
+    return (list.messages ?? []).map((ref) => ref.id);
+  }
+
+  /**
+   * Fetch one message's headers + decoded text bodies. Null when the
+   * message cannot be read (deleted, permission hiccup) — an unreadable
+   * message is a skip for callers, never a batch failure.
+   */
+  async readMessage(id: string): Promise<GmailMessageSummary | null> {
+    const token = await this.token();
+    const msgRes = await this.fetchImpl(
+      `${GMAIL_BASE}/messages/${id}?format=full`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (!msgRes.ok) {
+      return null;
+    }
+    const message = (await msgRes.json()) as GmailMessage;
+    const headers = message.payload?.headers ?? [];
+    const header = (name: string): string =>
+      headers.find((h) => h.name?.toLowerCase() === name)?.value ?? '';
+    const bodies = [...collectBodies(message.payload), message.snippet ?? ''];
+    return {
+      id: message.id,
+      subject: header('subject'),
+      from: header('from'),
+      receivedAt: message.internalDate
+        ? new Date(Number(message.internalDate))
+        : null,
+      bodyText: bodies.filter((body) => body.trim() !== '').join('\n'),
+    };
   }
 
   /** Poll findOtp until a result or the timeout budget runs out. */

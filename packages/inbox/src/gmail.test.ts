@@ -180,6 +180,109 @@ describe('GmailInboxReader.findOtp', () => {
   });
 });
 
+describe('GmailInboxReader.searchMessageIds / readMessage', () => {
+  /** fetch mock serving one full message with headers + mixed MIME parts. */
+  function createSearchFetch() {
+    return vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith('https://oauth2.googleapis.com/token')) {
+        return new Response(
+          JSON.stringify({ access_token: 'at-1', expires_in: 3600 }),
+          { status: 200 },
+        );
+      }
+      if (url.includes('/messages?')) {
+        return new Response(
+          JSON.stringify({ messages: [{ id: 'm1' }, { id: 'm2' }] }),
+          { status: 200 },
+        );
+      }
+      if (url.includes('/messages/m1')) {
+        return new Response(
+          JSON.stringify({
+            id: 'm1',
+            internalDate: '1784732400000',
+            snippet: 'snippet text',
+            payload: {
+              mimeType: 'multipart/alternative',
+              headers: [
+                { name: 'Subject', value: 'Online Assessment Invitation' },
+                {
+                  name: 'From',
+                  value: 'Akuna <no-reply@hackerrankforwork.com>',
+                },
+              ],
+              parts: [
+                {
+                  mimeType: 'text/plain',
+                  body: { data: b64url('plain body') },
+                },
+                {
+                  mimeType: 'text/html',
+                  body: { data: b64url('<p>html body</p>') },
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response('{}', { status: 404 });
+    }) as unknown as typeof fetch;
+  }
+
+  it('lists the ids the search returned, passing the raw query through', async () => {
+    const fetchMock = createSearchFetch();
+    const reader = new GmailInboxReader(config, fetchMock);
+    const ids = await reader.searchMessageIds(
+      'newer_than:7d in:inbox category:primary',
+      50,
+    );
+    expect(ids).toEqual(['m1', 'm2']);
+    const listCall = vi
+      .mocked(fetchMock)
+      .mock.calls.map((call) => String(call[0]))
+      .find((url) => url.includes('/messages?'));
+    expect(listCall).toContain('maxResults=50');
+    expect(listCall).toContain(
+      encodeURIComponent('newer_than:7d in:inbox category:primary'),
+    );
+  });
+
+  it('throws on a failed search (never silently empty)', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith('https://oauth2.googleapis.com/token')) {
+        return new Response(
+          JSON.stringify({ access_token: 'at-1', expires_in: 3600 }),
+          { status: 200 },
+        );
+      }
+      return new Response('{}', { status: 500 });
+    }) as unknown as typeof fetch;
+    await expect(
+      new GmailInboxReader(config, fetchMock).searchMessageIds('q'),
+    ).rejects.toThrow(/gmail search failed/);
+  });
+
+  it('reads headers, receivedAt, and every decoded text body (snippet included)', async () => {
+    const reader = new GmailInboxReader(config, createSearchFetch());
+    const message = await reader.readMessage('m1');
+    expect(message).toEqual({
+      id: 'm1',
+      subject: 'Online Assessment Invitation',
+      from: 'Akuna <no-reply@hackerrankforwork.com>',
+      receivedAt: new Date(1784732400000),
+      bodyText: 'plain body\n<p>html body</p>\nsnippet text',
+    });
+  });
+
+  it('returns null for an unreadable message (a skip, not a failure)', async () => {
+    const reader = new GmailInboxReader(config, createSearchFetch());
+    expect(await reader.readMessage('gone')).toBeNull();
+  });
+});
+
 describe('GmailInboxReader.waitForOtp', () => {
   it('polls until a message appears', async () => {
     const messages: Array<{ id: string; body: string }> = [];

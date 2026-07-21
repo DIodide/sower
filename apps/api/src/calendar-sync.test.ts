@@ -1,7 +1,8 @@
-import { applicationTasks } from '@sower/db';
+import { applicationTasks, followups } from '@sower/db';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   buildCalendarEvent,
+  buildFollowupCalendarEvent,
   CALENDAR_ATTENDEE_EMAIL,
   calendarEventTimes,
   isEasternMidnight,
@@ -9,6 +10,7 @@ import {
   reconcileCalendarEvents,
   resetCalendarTokenCache,
   syncCalendarEventsForJob,
+  syncFollowupCalendarEvent,
   syncTaskCalendarEvent,
 } from './calendar-sync.js';
 import type { Config } from './config.js';
@@ -543,6 +545,272 @@ describe('syncTaskCalendarEvent', () => {
   });
 });
 
+const FOLLOWUP_ID = 'bbbbbbbb-0000-4000-8000-000000000001';
+
+/** A followups+task+job join row as the follow-up sync select returns it. */
+function followupRow(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    followupId: FOLLOWUP_ID,
+    state: 'ACTION_NEEDED',
+    title: 'Assessment — HackerRank invite',
+    url: 'https://www.hackerrank.com/tests/abc',
+    // Date-only due date as deadlineFromIsoDate stores it: ET midnight.
+    dueDate: new Date('2026-07-25T04:00:00Z'),
+    calendarEventId: null,
+    company: 'Akuna Capital',
+    ...overrides,
+  };
+}
+
+describe('buildFollowupCalendarEvent', () => {
+  it('builds the ⏱ title — company summary, follow-up + link description, attendee, reminders', () => {
+    const event = buildFollowupCalendarEvent(
+      followupRow() as Parameters<typeof buildFollowupCalendarEvent>[0],
+      new Date('2026-07-25T04:00:00Z'),
+      baseConfig,
+    );
+    expect(event).toEqual({
+      summary: '⏱ Assessment — HackerRank invite — Akuna Capital',
+      description:
+        `Follow-up: https://dash.example/followups/${FOLLOWUP_ID}\n` +
+        'Link: https://www.hackerrank.com/tests/abc',
+      start: { date: '2026-07-25' },
+      end: { date: '2026-07-26' },
+      attendees: [{ email: CALENDAR_ATTENDEE_EMAIL }],
+      reminders: { useDefault: true },
+    });
+  });
+
+  it('degrades gracefully: no company, no dashboard base, no url', () => {
+    const event = buildFollowupCalendarEvent(
+      followupRow({ company: null, url: null }) as Parameters<
+        typeof buildFollowupCalendarEvent
+      >[0],
+      new Date('2026-07-25T04:00:00Z'),
+      { ...baseConfig, DASHBOARD_BASE_URL: undefined },
+    );
+    expect(event.summary).toBe('⏱ Assessment — HackerRank invite');
+    expect(event.description).toBe('');
+  });
+});
+
+describe('syncFollowupCalendarEvent', () => {
+  it('no-ops {kind:disabled} before touching the db or the network', async () => {
+    const db = createFakeDb();
+    const { fetchImpl } = createFetch();
+    const deps = createDeps({ db, config: { CALENDAR_SYNC_ENABLED: false } });
+
+    const outcome = await syncFollowupCalendarEvent(
+      deps,
+      FOLLOWUP_ID,
+      fetchImpl,
+    );
+
+    expect(outcome).toEqual({ kind: 'disabled' });
+    expect(db.selectCount()).toBe(0);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('returns not_found for a deleted follow-up', async () => {
+    const { fetchImpl } = createFetch();
+    const deps = createDeps({ db: createFakeDb({ selectResults: [[]] }) });
+    const outcome = await syncFollowupCalendarEvent(
+      deps,
+      FOLLOWUP_ID,
+      fetchImpl,
+    );
+    expect(outcome).toEqual({ kind: 'not_found' });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('INSERTS an all-day event for an OPEN follow-up and stores the id on followups', async () => {
+    const writes: DbWrite[] = [];
+    const db = createFakeDb({ selectResults: [[followupRow()]], writes });
+    const { fetchImpl, calls } = createFetch([respond(200, { id: 'evt-f1' })]);
+
+    const outcome = await syncFollowupCalendarEvent(
+      createDeps({ db }),
+      FOLLOWUP_ID,
+      fetchImpl,
+    );
+
+    expect(outcome).toEqual({ kind: 'created', eventId: 'evt-f1' });
+    expect(calls).toEqual([
+      {
+        method: 'POST',
+        url: `${EVENTS_URL}?sendUpdates=all`,
+        body: expect.objectContaining({
+          summary: '⏱ Assessment — HackerRank invite — Akuna Capital',
+          start: { date: '2026-07-25' },
+          end: { date: '2026-07-26' },
+        }),
+      },
+    ]);
+    expect(writes).toEqual([
+      {
+        method: 'update',
+        table: followups,
+        arg: { calendarEventId: 'evt-f1' },
+      },
+    ]);
+  });
+
+  it('inserts a TIMED one-hour block for a due date carrying a real time', async () => {
+    const db = createFakeDb({
+      selectResults: [
+        [followupRow({ dueDate: new Date('2026-07-25T18:00:00Z') })],
+      ],
+    });
+    const { fetchImpl, calls } = createFetch([respond(200, { id: 'evt-f2' })]);
+
+    await syncFollowupCalendarEvent(createDeps({ db }), FOLLOWUP_ID, fetchImpl);
+
+    expect(calls[0]?.body).toMatchObject({
+      start: {
+        dateTime: '2026-07-25T17:00:00.000Z',
+        timeZone: 'America/New_York',
+      },
+      end: {
+        dateTime: '2026-07-25T18:00:00.000Z',
+        timeZone: 'America/New_York',
+      },
+    });
+  });
+
+  it('PATCHES the stored event on a later sync (every OPEN state keeps its event)', async () => {
+    for (const state of ['RECEIVED', 'SCHEDULED', 'WAITING']) {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[followupRow({ state, calendarEventId: 'evt-f9' })]],
+        writes,
+      });
+      const { fetchImpl, calls } = createFetch([
+        respond(200, { id: 'evt-f9' }),
+      ]);
+
+      const outcome = await syncFollowupCalendarEvent(
+        createDeps({ db }),
+        FOLLOWUP_ID,
+        fetchImpl,
+      );
+
+      expect(outcome).toEqual({ kind: 'updated', eventId: 'evt-f9' });
+      expect(calls[0]?.method).toBe('PATCH');
+      expect(writes).toEqual([]);
+    }
+  });
+
+  it('RECREATES the event when the PATCH 404s (user deleted it)', async () => {
+    const writes: DbWrite[] = [];
+    const db = createFakeDb({
+      selectResults: [[followupRow({ calendarEventId: 'evt-f9' })]],
+      writes,
+    });
+    const { fetchImpl, calls } = createFetch([
+      respond(404),
+      respond(200, { id: 'evt-new' }),
+    ]);
+
+    const outcome = await syncFollowupCalendarEvent(
+      createDeps({ db }),
+      FOLLOWUP_ID,
+      fetchImpl,
+    );
+
+    expect(outcome).toEqual({ kind: 'recreated', eventId: 'evt-new' });
+    expect(calls.map((c) => c.method)).toEqual(['PATCH', 'POST']);
+    expect(writes).toEqual([
+      {
+        method: 'update',
+        table: followups,
+        arg: { calendarEventId: 'evt-new' },
+      },
+    ]);
+  });
+
+  it('DELETES the event and nulls the column on DONE/DISMISSED', async () => {
+    for (const state of ['DONE', 'DISMISSED']) {
+      const writes: DbWrite[] = [];
+      const db = createFakeDb({
+        selectResults: [[followupRow({ state, calendarEventId: 'evt-f9' })]],
+        writes,
+      });
+      const { fetchImpl, calls } = createFetch([respond(204)]);
+
+      const outcome = await syncFollowupCalendarEvent(
+        createDeps({ db }),
+        FOLLOWUP_ID,
+        fetchImpl,
+      );
+
+      expect(outcome).toEqual({ kind: 'deleted' });
+      expect(calls).toEqual([
+        {
+          method: 'DELETE',
+          url: `${EVENTS_URL}/evt-f9?sendUpdates=all`,
+          body: undefined,
+        },
+      ]);
+      expect(writes).toEqual([
+        {
+          method: 'update',
+          table: followups,
+          arg: { calendarEventId: null },
+        },
+      ]);
+    }
+  });
+
+  it('deletes when the due date was cleared; no-ops when none desired and none stored', async () => {
+    const writes: DbWrite[] = [];
+    const cleared = createFakeDb({
+      selectResults: [
+        [followupRow({ dueDate: null, calendarEventId: 'evt-f9' })],
+      ],
+      writes,
+    });
+    const { fetchImpl } = createFetch([respond(404)]);
+    expect(
+      await syncFollowupCalendarEvent(
+        createDeps({ db: cleared }),
+        FOLLOWUP_ID,
+        fetchImpl,
+      ),
+    ).toEqual({ kind: 'deleted' });
+
+    const bare = createFakeDb({
+      selectResults: [[followupRow({ dueDate: null })]],
+    });
+    const { fetchImpl: noFetch } = createFetch();
+    expect(
+      await syncFollowupCalendarEvent(
+        createDeps({ db: bare }),
+        FOLLOWUP_ID,
+        noFetch,
+      ),
+    ).toEqual({ kind: 'noop' });
+    expect(noFetch).not.toHaveBeenCalled();
+  });
+
+  it('never throws: a network failure is logged and reported as {kind:error}', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const db = createFakeDb({ selectResults: [[followupRow()]] });
+    const fetchImpl = vi.fn(async () => {
+      throw new Error('ECONNRESET');
+    }) as unknown as typeof fetch;
+
+    const outcome = await syncFollowupCalendarEvent(
+      createDeps({ db }),
+      FOLLOWUP_ID,
+      fetchImpl,
+    );
+
+    expect(outcome).toEqual({ kind: 'error', error: 'ECONNRESET' });
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
 describe('syncCalendarEventsForJob', () => {
   it('no-ops while disabled (no db access)', async () => {
     const db = createFakeDb();
@@ -724,6 +992,117 @@ describe('reconcileCalendarEvents', () => {
       synced: RECONCILE_MAX_PER_RUN,
     });
     expect(calls).toHaveLength(RECONCILE_MAX_PER_RUN);
+  });
+
+  it('reconciles follow-ups too: backfills missing events, deletes stale ones, skips past/consistent rows', async () => {
+    const writes: DbWrite[] = [];
+    const staleId = 'bbbbbbbb-0000-4000-8000-000000000002';
+    const db = createFakeDb({
+      selectResults: [
+        // No task candidates this run.
+        [],
+        // Follow-up candidates: missing event, stale event, past, consistent.
+        [
+          {
+            followupId: FOLLOWUP_ID,
+            state: 'ACTION_NEEDED',
+            dueDate: new Date('2026-07-25T04:00:00Z'),
+            calendarEventId: null,
+          },
+          {
+            followupId: staleId,
+            state: 'DONE',
+            dueDate: new Date('2026-07-25T04:00:00Z'),
+            calendarEventId: 'evt-stale',
+          },
+          {
+            followupId: 'bbbbbbbb-0000-4000-8000-000000000003',
+            state: 'ACTION_NEEDED',
+            dueDate: new Date('2026-07-01T04:00:00Z'),
+            calendarEventId: null,
+          },
+          {
+            followupId: 'bbbbbbbb-0000-4000-8000-000000000004',
+            state: 'DISMISSED',
+            dueDate: new Date('2026-07-25T04:00:00Z'),
+            calendarEventId: null,
+          },
+        ],
+        // Per-mismatch syncs re-load their join row.
+        [followupRow()],
+        [
+          followupRow({
+            followupId: staleId,
+            state: 'DONE',
+            calendarEventId: 'evt-stale',
+          }),
+        ],
+      ],
+      writes,
+    });
+    const { fetchImpl, calls } = createFetch([
+      respond(200, { id: 'evt-new' }),
+      respond(204),
+    ]);
+
+    const result = await reconcileCalendarEvents(
+      createDeps({ db }),
+      NOW,
+      fetchImpl,
+    );
+
+    expect(result).toEqual({ enabled: true, candidates: 2, synced: 2 });
+    expect(calls.map((c) => [c.method, c.url])).toEqual([
+      ['POST', `${EVENTS_URL}?sendUpdates=all`],
+      ['DELETE', `${EVENTS_URL}/evt-stale?sendUpdates=all`],
+    ]);
+    expect(writes).toEqual([
+      {
+        method: 'update',
+        table: followups,
+        arg: { calendarEventId: 'evt-new' },
+      },
+      {
+        method: 'update',
+        table: followups,
+        arg: { calendarEventId: null },
+      },
+    ]);
+  });
+
+  it(`the ${RECONCILE_MAX_PER_RUN}-per-run cap is task-first, but follow-ups keep a guaranteed floor`, async () => {
+    const taskRows = Array.from({ length: RECONCILE_MAX_PER_RUN }, (_, i) =>
+      row({ taskId: `aaaaaaaa-0000-4000-8000-${String(i).padStart(12, '0')}` }),
+    );
+    const followupRows = Array.from({ length: 3 }, (_, i) => ({
+      followupId: `bbbbbbbb-0000-4000-8000-${String(i).padStart(12, '0')}`,
+      state: 'ACTION_NEEDED',
+      dueDate: new Date('2026-07-25T04:00:00Z'),
+      calendarEventId: null,
+    }));
+    const db = createFakeDb({
+      // Task candidates, then 50 per-task sync loads (empty → not_found,
+      // still counted synced), then the follow-up candidates.
+      selectResults: [taskRows, ...taskRows.map(() => []), followupRows],
+    });
+    const { fetchImpl } = createFetch();
+
+    const result = await reconcileCalendarEvents(
+      createDeps({ db }),
+      NOW,
+      fetchImpl,
+    );
+
+    // All 53 mismatches reported. Tasks fill the whole cap, but follow-ups
+    // hold a guaranteed floor (10) so a persistently full task backfill can
+    // never starve them — all 3 sync the same night. (Their rows load empty
+    // in this fixture → not_found, still counted synced, no Calendar call.)
+    expect(result).toEqual({
+      enabled: true,
+      candidates: RECONCILE_MAX_PER_RUN + 3,
+      synced: RECONCILE_MAX_PER_RUN + 3,
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it('never throws: a broken sweep query is logged and reported as zero work', async () => {

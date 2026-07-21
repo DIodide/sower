@@ -259,6 +259,8 @@ export function isBucket(value: string): value is Bucket {
 export const SECTIONS = {
   waiting: 'Waiting on you',
   processing: 'New & processing',
+  // Post-application follow-ups still in motion (open, not yet resolved).
+  inPlay: 'In play',
   sent: 'Sent',
   archive: 'Archive',
 } as const;
@@ -337,6 +339,10 @@ const EVENT_LABELS: Record<string, string> = {
   LISTING_EXPANDED:
     'Listing page expanded — individual jobs added to the queue',
   DEADLINE_ALERT: 'Deadline alert sent',
+  // Post-application follow-ups (parallel entity; data.followupId names one).
+  FOLLOWUP_CREATED: 'Follow-up added',
+  FOLLOWUP_STATE: 'Follow-up state changed',
+  FOLLOWUP_UPDATED: 'Follow-up edited',
 };
 
 /**

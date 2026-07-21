@@ -1,8 +1,9 @@
-import type { TaskState } from '@sower/core';
+import { OPEN_FOLLOWUP_STATES, type TaskState } from '@sower/core';
 import {
   applicationTasks,
   type DiscoveredForm,
   events,
+  followups,
   type InvestigationResult,
   type InvestigationRunStatus,
   investigationRuns,
@@ -27,6 +28,7 @@ import {
   BUCKETS,
   type Bucket,
   deadlineChipLabel,
+  formatDeadline,
   formatLocal,
   isBucket,
   isDeadlineSoon,
@@ -39,6 +41,7 @@ import {
 } from '../lib/format';
 import { compareWaiting } from '../lib/reorder';
 import { Empty, SectionHeading } from '../lib/ui';
+import { FollowupKindBadge, FollowupStateBadge } from './followups/ui';
 import { OrderedList } from './ordered-list';
 import { QuickAddBar } from './quick-add-bar';
 import { SearchBox } from './search-box';
@@ -275,8 +278,8 @@ export default async function Page({
   // unranked block (new/untriaged, newest arrival first — a fresh ingest
   // surfaces at the TOP of its tier) ahead of the hand-ranked block
   // (sort_rank asc). Other sections never rank.
-  const [platformRows, stateCounts, waitingRows, otherRows] = await Promise.all(
-    [
+  const [platformRows, stateCounts, waitingRows, otherRows, inPlayRows] =
+    await Promise.all([
       db
         .selectDistinct({ platform: jobs.platform })
         .from(jobs)
@@ -327,8 +330,37 @@ export default async function Page({
           desc(applicationTasks.updatedAt),
         )
         .limit(LIST_CAP),
-    ],
-  );
+      // Open post-application follow-ups ("In play"), joined with the parent
+      // job for the company cell. The search/platform conditions apply so the
+      // section always agrees with the filtered task lists; task-state
+      // filters deliberately do NOT — follow-ups have their own states.
+      // Order: what's due first (no due date sinks last), then newest.
+      db
+        .select({
+          id: followups.id,
+          taskId: followups.taskId,
+          kind: followups.kind,
+          title: followups.title,
+          state: followups.state,
+          dueDate: followups.dueDate,
+          company: jobs.company,
+          jobTitle: jobs.title,
+          jobSpec: applicationTasks.jobSpec,
+        })
+        .from(followups)
+        .innerJoin(applicationTasks, eq(followups.taskId, applicationTasks.id))
+        .innerJoin(jobs, eq(applicationTasks.jobId, jobs.id))
+        .where(
+          and(
+            inArray(followups.state, [...OPEN_FOLLOWUP_STATES]),
+            ...baseConditions,
+          ),
+        )
+        .orderBy(
+          sql`${followups.dueDate} asc nulls last`,
+          desc(followups.createdAt),
+        ),
+    ]);
   const taskRows = [...waitingRows, ...otherRows];
   const platforms = platformRows.map((r) => r.platform);
 
@@ -482,6 +514,15 @@ export default async function Page({
       note: typeof note === 'string' && note !== '' ? note : null,
     });
   }
+  // Open follow-ups per task — the Sent rows' "N open" hint comes straight
+  // from the "In play" fetch, so the two can never disagree.
+  const openFollowupsByTask = new Map<string, number>();
+  for (const followup of inPlayRows) {
+    openFollowupsByTask.set(
+      followup.taskId,
+      (openFollowupsByTask.get(followup.taskId) ?? 0) + 1,
+    );
+  }
 
   const rows: TaskRowData[] = taskRows.map((row) => {
     const meta = stateMeta(row.state);
@@ -551,6 +592,10 @@ export default async function Page({
       canUnmark:
         row.state === 'SUBMITTED' &&
         latestSubmitTypes.get(row.id) === 'MARK_SUBMITTED',
+      // Sent rows only: the quiet "N open" pointer at the task's follow-ups.
+      openFollowups: (SENT_STATES as string[]).includes(row.state)
+        ? (openFollowupsByTask.get(row.id) ?? 0)
+        : 0,
       deadline: picked
         ? {
             label: deadlineChipLabel(picked.date) ?? '',
@@ -711,7 +756,7 @@ export default async function Page({
       </div>
 
       {/* ---- the workspace ---- */}
-      {rows.length === 0 ? (
+      {rows.length === 0 && inPlayRows.length === 0 ? (
         <div className="card" style={{ marginTop: '0.5rem' }}>
           {hasFilters ? (
             <p className="hint" style={{ margin: 0 }}>
@@ -732,6 +777,49 @@ export default async function Page({
             rows={processing}
             count={processingTotal}
           />
+          {/* Post-application follow-ups still in motion — omitted entirely
+              when nothing is in play (an empty section here would only ask
+              a question the data can't answer yet). */}
+          {inPlayRows.length > 0 ? (
+            <section>
+              <SectionHeading count={inPlayRows.length}>
+                {SECTIONS.inPlay}
+              </SectionHeading>
+              <div className="row-list">
+                {inPlayRows.map((followup) => (
+                  <div key={followup.id} className="fu-row">
+                    <FollowupKindBadge kind={followup.kind} />
+                    <span className="fu-title">
+                      <span className="faint">
+                        {followup.company ??
+                          followup.jobSpec?.company ??
+                          'unknown company'}
+                        {' · '}
+                      </span>
+                      <Link href={`/followups/${followup.id}`}>
+                        {followup.title}
+                      </Link>
+                    </span>
+                    <FollowupStateBadge state={followup.state} />
+                    <span className="fu-due">
+                      {followup.dueDate ? (
+                        <span
+                          className={
+                            isDeadlineSoon(followup.dueDate)
+                              ? 'deadline-chip deadline-chip--soon'
+                              : 'deadline-chip'
+                          }
+                          title={`due ${formatDeadline(followup.dueDate)}`}
+                        >
+                          ⏰ {deadlineChipLabel(followup.dueDate)}
+                        </span>
+                      ) : null}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
           <section>
             <SectionHeading count={sentTotal}>{SECTIONS.sent}</SectionHeading>
             {sent.length === 0 ? (

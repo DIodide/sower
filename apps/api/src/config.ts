@@ -143,6 +143,13 @@ const envSchema = z
     GMAIL_CLIENT_ID: z.string().optional(),
     GMAIL_CLIENT_SECRET: z.string().optional(),
     /**
+     * SECRET (Secret Manager): the Gmail reader's long-lived OAuth refresh
+     * token (@sower/inbox reads the same var directly for OTP mail).
+     * Optional — absent, the follow-up inbox poll stays fully dormant
+     * (POST /inbox/followups/poll answers {enabled:false}).
+     */
+    GMAIL_REFRESH_TOKEN: z.string().optional(),
+    /**
      * SECRET (Secret Manager `google-calendar-refresh-token`): long-lived
      * OAuth refresh token granting calendar.events on the user's Google
      * Calendar. Optional — absent, calendar sync stays fully dormant (see

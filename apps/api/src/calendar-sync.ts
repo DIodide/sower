@@ -1,5 +1,5 @@
-import type { TaskState } from '@sower/core';
-import { applicationTasks, jobs } from '@sower/db';
+import { OPEN_FOLLOWUP_STATES, type TaskState } from '@sower/core';
+import { applicationTasks, followups, jobs } from '@sower/db';
 import { eq, isNotNull, or } from 'drizzle-orm';
 import { shortenUrlForLabel } from './discord-ingest.js';
 import type { Deps } from './types.js';
@@ -163,6 +163,45 @@ export function buildCalendarEvent(
   };
 }
 
+/** What the follow-up sync needs (the followups+task+job join projection). */
+interface CalendarFollowupRow {
+  followupId: string;
+  state: string;
+  title: string;
+  url: string | null;
+  dueDate: Date | null;
+  calendarEventId: string | null;
+  company: string | null;
+}
+
+/**
+ * The follow-up event body: `⏱ <title> — <company>` (company from the
+ * parent job; degrades to the bare title). Description links the dashboard
+ * follow-up page and the follow-up's own url (OA platform / scheduler).
+ */
+export function buildFollowupCalendarEvent(
+  row: CalendarFollowupRow,
+  dueDate: Date,
+  config: Deps['config'],
+): Record<string, unknown> {
+  const company = row.company?.trim();
+  const lines: string[] = [];
+  if (config.DASHBOARD_BASE_URL) {
+    const base = config.DASHBOARD_BASE_URL.replace(/\/+$/, '');
+    lines.push(`Follow-up: ${base}/followups/${row.followupId}`);
+  }
+  if (row.url && /^https:\/\//i.test(row.url)) {
+    lines.push(`Link: ${row.url}`);
+  }
+  return {
+    summary: company ? `⏱ ${row.title} — ${company}` : `⏱ ${row.title}`,
+    description: lines.join('\n'),
+    ...calendarEventTimes(dueDate),
+    attendees: [{ email: CALENDAR_ATTENDEE_EMAIL }],
+    reminders: { useDefault: true },
+  };
+}
+
 // Per-process access-token cache, exactly like gmail.ts's instance cache
 // (module-level because the sync is plain functions, not a class).
 let cachedAccessToken: string | null = null;
@@ -227,6 +266,79 @@ export type CalendarSyncOutcome =
   | { kind: 'error'; error: string };
 
 /**
+ * Shared mutation spine for one row's event: `wanted` null means NO event
+ * should exist (delete any stored one), otherwise upsert — PATCH when an
+ * event id is stored (falling through to a fresh POST when it 404/410s),
+ * POST when none is. `persistEventId` writes the row's calendar_event_id
+ * column (called only when it changes). Throws on real API failures; the
+ * per-entity sync wrappers own the never-throws contract.
+ */
+async function pushCalendarEvent(
+  config: Deps['config'],
+  fetchImpl: typeof fetch,
+  storedEventId: string | null,
+  wanted: Record<string, unknown> | null,
+  persistEventId: (eventId: string | null) => Promise<void>,
+): Promise<CalendarSyncOutcome> {
+  if (wanted === null) {
+    if (!storedEventId) {
+      return { kind: 'noop' };
+    }
+    const token = await calendarAccessToken(config, fetchImpl);
+    const res = await fetchImpl(eventUrl(storedEventId), {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    // 404/410: already gone (the user beat us to it) — still a success.
+    if (!res.ok && res.status !== 404 && res.status !== 410) {
+      throw new Error(`calendar event delete failed (${res.status})`);
+    }
+    await persistEventId(null);
+    return { kind: 'deleted' };
+  }
+
+  const token = await calendarAccessToken(config, fetchImpl);
+  const body = JSON.stringify(wanted);
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    'Content-Type': 'application/json',
+  };
+
+  if (storedEventId) {
+    const patchRes = await fetchImpl(eventUrl(storedEventId), {
+      method: 'PATCH',
+      headers,
+      body,
+    });
+    if (patchRes.ok) {
+      return { kind: 'updated', eventId: storedEventId };
+    }
+    // Gone (the user deleted it from their calendar): fall through to a
+    // fresh insert. Any other failure is a real error.
+    if (patchRes.status !== 404 && patchRes.status !== 410) {
+      throw new Error(`calendar event patch failed (${patchRes.status})`);
+    }
+  }
+
+  const insertRes = await fetchImpl(eventUrl(), {
+    method: 'POST',
+    headers,
+    body,
+  });
+  if (!insertRes.ok) {
+    throw new Error(`calendar event insert failed (${insertRes.status})`);
+  }
+  const inserted = (await insertRes.json()) as { id?: string };
+  if (!inserted.id) {
+    throw new Error('calendar event insert returned no id');
+  }
+  await persistEventId(inserted.id);
+  return storedEventId
+    ? { kind: 'recreated', eventId: inserted.id }
+    : { kind: 'created', eventId: inserted.id };
+}
+
+/**
  * Bring ONE task's calendar event in line with its current effective
  * deadline + state:
  * - no effective deadline, or a sent/archived state → NO event (delete any
@@ -278,70 +390,90 @@ export async function syncTaskCalendarEvent(
       deadline !== null &&
       !(EXCLUDED_STATES as string[]).includes(row.state as string);
 
-    if (!wantsEvent) {
-      if (!row.calendarEventId) {
-        return { kind: 'noop' };
-      }
-      const token = await calendarAccessToken(config, fetchImpl);
-      const res = await fetchImpl(eventUrl(row.calendarEventId), {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      // 404/410: already gone (the user beat us to it) — still a success.
-      if (!res.ok && res.status !== 404 && res.status !== 410) {
-        throw new Error(`calendar event delete failed (${res.status})`);
-      }
-      await db
-        .update(applicationTasks)
-        .set({ calendarEventId: null })
-        .where(eq(applicationTasks.id, taskId));
-      return { kind: 'deleted' };
-    }
-
-    const token = await calendarAccessToken(config, fetchImpl);
-    const body = JSON.stringify(buildCalendarEvent(row, deadline, config));
-    const headers = {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    };
-
-    if (row.calendarEventId) {
-      const patchRes = await fetchImpl(eventUrl(row.calendarEventId), {
-        method: 'PATCH',
-        headers,
-        body,
-      });
-      if (patchRes.ok) {
-        return { kind: 'updated', eventId: row.calendarEventId };
-      }
-      // Gone (the user deleted it from their calendar): fall through to a
-      // fresh insert. Any other failure is a real error.
-      if (patchRes.status !== 404 && patchRes.status !== 410) {
-        throw new Error(`calendar event patch failed (${patchRes.status})`);
-      }
-    }
-
-    const insertRes = await fetchImpl(eventUrl(), {
-      method: 'POST',
-      headers,
-      body,
-    });
-    if (!insertRes.ok) {
-      throw new Error(`calendar event insert failed (${insertRes.status})`);
-    }
-    const inserted = (await insertRes.json()) as { id?: string };
-    if (!inserted.id) {
-      throw new Error('calendar event insert returned no id');
-    }
-    await db
-      .update(applicationTasks)
-      .set({ calendarEventId: inserted.id })
-      .where(eq(applicationTasks.id, taskId));
-    return row.calendarEventId
-      ? { kind: 'recreated', eventId: inserted.id }
-      : { kind: 'created', eventId: inserted.id };
+    return await pushCalendarEvent(
+      config,
+      fetchImpl,
+      row.calendarEventId,
+      wantsEvent && deadline ? buildCalendarEvent(row, deadline, config) : null,
+      async (eventId) => {
+        await db
+          .update(applicationTasks)
+          .set({ calendarEventId: eventId })
+          .where(eq(applicationTasks.id, taskId));
+      },
+    );
   } catch (error) {
     console.warn(`[sower] calendar sync failed for task ${taskId}:`, error);
+    return {
+      kind: 'error',
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * Bring ONE follow-up's calendar event in line with its due date + state:
+ * an OPEN follow-up (RECEIVED/ACTION_NEEDED/SCHEDULED/WAITING) with a due
+ * date carries an event; DONE/DISMISSED or a cleared due date deletes it.
+ * Same all-day vs timed semantics, upsert ladder, and never-throws
+ * contract as syncTaskCalendarEvent.
+ */
+export async function syncFollowupCalendarEvent(
+  deps: Deps,
+  followupId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<CalendarSyncOutcome> {
+  const { db, config } = deps;
+  if (!config.CALENDAR_SYNC_ENABLED) {
+    return { kind: 'disabled' };
+  }
+  try {
+    const rows = await db
+      .select({
+        followupId: followups.id,
+        state: followups.state,
+        title: followups.title,
+        url: followups.url,
+        dueDate: followups.dueDate,
+        calendarEventId: followups.calendarEventId,
+        company: jobs.company,
+      })
+      .from(followups)
+      .innerJoin(applicationTasks, eq(followups.taskId, applicationTasks.id))
+      .innerJoin(jobs, eq(applicationTasks.jobId, jobs.id))
+      .where(eq(followups.id, followupId))
+      .limit(1);
+    const row = rows[0];
+    if (!row) {
+      return { kind: 'not_found' };
+    }
+
+    // Invalid dates are treated as absent (mirrors the task sync).
+    const dueDate =
+      row.dueDate && !Number.isNaN(row.dueDate.getTime()) ? row.dueDate : null;
+    const wantsEvent =
+      dueDate !== null &&
+      (OPEN_FOLLOWUP_STATES as string[]).includes(row.state as string);
+
+    return await pushCalendarEvent(
+      config,
+      fetchImpl,
+      row.calendarEventId,
+      wantsEvent && dueDate
+        ? buildFollowupCalendarEvent(row, dueDate, config)
+        : null,
+      async (eventId) => {
+        await db
+          .update(followups)
+          .set({ calendarEventId: eventId })
+          .where(eq(followups.id, followupId));
+      },
+    );
+  } catch (error) {
+    console.warn(
+      `[sower] calendar sync failed for followup ${followupId}:`,
+      error,
+    );
     return {
       kind: 'error',
       error: error instanceof Error ? error.message : String(error),
@@ -390,9 +522,11 @@ export interface CalendarReconcileResult {
  * calendar_event_id disagrees with whether it SHOULD have an event —
  * missing events (the backfill for tasks dated before the sync existed, or
  * a trigger-point sync that failed) and stale events (the task was
- * sent/archived but the delete failed). Caps at RECONCILE_MAX_PER_RUN so a
- * large backfill drains over a few nights instead of hammering the API.
- * Self-gated + never throws, like every other entry point.
+ * sent/archived but the delete failed). Follow-ups reconcile the same way
+ * (event iff OPEN + due today-or-later), sharing ONE combined
+ * RECONCILE_MAX_PER_RUN cap — tasks first — so a large backfill drains
+ * over a few nights instead of hammering the API. Self-gated + never
+ * throws, like every other entry point.
  */
 export async function reconcileCalendarEvents(
   deps: Deps,
@@ -436,13 +570,62 @@ export async function reconcileCalendarEvents(
     }
 
     let synced = 0;
-    for (const taskId of mismatched.slice(0, RECONCILE_MAX_PER_RUN)) {
+    const taskBudget = mismatched.slice(0, RECONCILE_MAX_PER_RUN);
+    for (const taskId of taskBudget) {
       const outcome = await syncTaskCalendarEvent(deps, taskId, fetchImpl);
       if (outcome.kind !== 'error') {
         synced += 1;
       }
     }
-    return { enabled: true, candidates: mismatched.length, synced };
+
+    // Follow-ups: same today-or-later window, event iff still OPEN.
+    const followupRows = await deps.db
+      .select({
+        followupId: followups.id,
+        state: followups.state,
+        dueDate: followups.dueDate,
+        calendarEventId: followups.calendarEventId,
+      })
+      .from(followups)
+      .where(isNotNull(followups.dueDate));
+    const followupMismatched: string[] = [];
+    for (const row of followupRows) {
+      if (!row.dueDate || Number.isNaN(row.dueDate.getTime())) {
+        continue;
+      }
+      if (easternDateOf(row.dueDate) < today) {
+        continue;
+      }
+      const shouldHaveEvent = (OPEN_FOLLOWUP_STATES as string[]).includes(
+        row.state as string,
+      );
+      if ((row.calendarEventId !== null) !== shouldHaveEvent) {
+        followupMismatched.push(row.followupId);
+      }
+    }
+    // Guaranteed floor: when the task backfill fills the whole cap run
+    // after run (e.g. a persistently erroring batch), follow-ups still get
+    // up to 10 syncs rather than starving indefinitely; the combined run
+    // then briefly exceeds RECONCILE_MAX_PER_RUN, which is fine — the cap
+    // bounds burst size, it is not a quota.
+    for (const followupId of followupMismatched.slice(
+      0,
+      Math.max(RECONCILE_MAX_PER_RUN - taskBudget.length, 10),
+    )) {
+      const outcome = await syncFollowupCalendarEvent(
+        deps,
+        followupId,
+        fetchImpl,
+      );
+      if (outcome.kind !== 'error') {
+        synced += 1;
+      }
+    }
+    return {
+      enabled: true,
+      candidates: mismatched.length + followupMismatched.length,
+      synced,
+    };
   } catch (error) {
     console.warn('[sower] calendar reconcile sweep failed:', error);
     return { enabled: true, candidates: 0, synced: 0 };

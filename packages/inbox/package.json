@@ -12,6 +12,9 @@
     "gmail-auth": "tsx scripts/gmail-auth.ts",
     "otp-check": "tsx scripts/otp-check.ts"
   },
+  "dependencies": {
+    "@sower/core": "workspace:*"
+  },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "tsx": "^4.20.3",

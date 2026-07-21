@@ -474,7 +474,16 @@ const MAX_URL_LABEL_CHARS = 48;
  * Exported for deadline alerts, whose labels embed in links the same way.
  */
 export function escapeLabel(text: string): string {
-  return text.replace(/[\\`*_~[\]()]/g, '\\$&');
+  return (
+    text
+      .replace(/[\\`*_~[\]()]/g, '\\$&')
+      // Neutralize Discord pings (@everyone/@here/<@id>): a zero-width
+      // space after '@' breaks mention parsing without visible change.
+      // Label text can come from attacker-controlled email subjects and
+      // scraped pages, and #alerts pings the user by explicit mention —
+      // injected mentions must never work.
+      .replace(/@/g, '@\u200b')
+  );
 }
 
 /** Scheme + leading `www.` stripped, trailing slash dropped, ~48-char cap.

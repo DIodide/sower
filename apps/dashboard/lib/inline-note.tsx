@@ -10,6 +10,7 @@
 // than dropping it; a dirty-but-unsaved state shows a subtle "…".
 
 import { useEffect, useRef, useState } from 'react';
+import type { ActionResult } from '../app/tasks/[id]/actions';
 import { updateTaskMeta } from '../app/tasks/[id]/actions';
 
 const DEBOUNCE_MS = 800;
@@ -30,12 +31,18 @@ export function InlineNote({
   taskId,
   note,
   readOnly = false,
+  saveAction,
 }: {
+  /** The row this note belongs to — a task id by default; with `saveAction`
+   *  set it is only an identity key (e.g. a follow-up id). */
   taskId: string;
   note: string | null;
   /** Sent/archived tasks: the note still shows, but is no longer editable
    *  (nothing renders at all when there is no note). */
   readOnly?: boolean;
+  /** Alternate persistence target (e.g. a bound follow-up patch action).
+   *  Default: the task-meta action keyed by `taskId`. */
+  saveAction?: (notes: string | null) => Promise<ActionResult>;
 }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(note ?? '');
@@ -53,6 +60,13 @@ export function InlineNote({
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flashRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Persistence target (default: the task-meta action), mirrored into a ref
+  // so the unmount flush (deps: [taskId] only) always calls the latest.
+  const persist = (notes: string | null) =>
+    saveAction ? saveAction(notes) : updateTaskMeta(taskId, { notes });
+  const persistRef = useRef(persist);
+  persistRef.current = persist;
+
   useEffect(
     () => () => {
       if (flashRef.current) clearTimeout(flashRef.current);
@@ -65,13 +79,13 @@ export function InlineNote({
           trimmed !== savedRef.current.trim() &&
           trimmed.length <= NOTE_MAX_CHARS
         ) {
-          void updateTaskMeta(taskId, {
-            notes: trimmed === '' ? null : trimmed,
-          }).catch(() => {});
+          void persistRef
+            .current(trimmed === '' ? null : trimmed)
+            .catch(() => {});
         }
       }
     },
-    [taskId],
+    [],
   );
 
   const save = (next: string) => {
@@ -82,7 +96,7 @@ export function InlineNote({
       setError('note is too long (max 20,000 characters)');
       return;
     }
-    updateTaskMeta(taskId, { notes: trimmed === '' ? null : trimmed })
+    persist(trimmed === '' ? null : trimmed)
       .then((result) => {
         if (result.ok) {
           savedRef.current = trimmed;

@@ -90,6 +90,9 @@ export interface TaskRowData {
   /** Precomputed on the server so hydration never disagrees on "now". */
   updatedRel: string;
   updatedAbs: string;
+  /** Open post-application follow-ups on this task (Sent rows only) — a
+   *  quiet "N open" pointer at the detail page's panel. Absent/0 = none. */
+  openFollowups?: number;
 }
 
 /** States the api refuses to discard (terminal, or already left the queue). */
@@ -317,6 +320,17 @@ export function TaskRow({
           editable={row.deadlineEditable}
           onError={(message) => ws.toast(message, { kind: 'error' })}
         />
+        {/* Sent rows with open follow-ups: the application may be sent, but
+            something post-application is still in motion. */}
+        {row.openFollowups ? (
+          <Link
+            href={`/tasks/${row.id}#followups`}
+            className="fu-open"
+            title={`${row.openFollowups} open follow-up${row.openFollowups === 1 ? '' : 's'} on this application`}
+          >
+            {row.openFollowups} open
+          </Link>
+        ) : null}
       </span>
       <span className="tr-note">
         {/* Same editability rule as the detail header: terminal tasks read-only. */}

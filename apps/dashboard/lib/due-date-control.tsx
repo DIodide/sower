@@ -13,6 +13,7 @@
 // touches jobs.deadline — the posting's value simply resurfaces on clear.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import type { ActionResult } from '../app/tasks/[id]/actions';
 import { updateTaskMeta } from '../app/tasks/[id]/actions';
 import { deadlineChipLabel, formatDeadline, isDeadlineSoon } from './format';
 
@@ -45,7 +46,10 @@ export function DueDateControl({
   editable,
   variant = 'chip',
   onError,
+  saveAction,
 }: {
+  /** The row this date belongs to — a task id by default; with `saveAction`
+   *  set it is only an identity key (e.g. a follow-up id). */
   taskId: string;
   /** Current display (user date wins), or null when neither date exists. */
   display: DueDateDisplay | null;
@@ -59,6 +63,9 @@ export function DueDateControl({
   variant?: 'chip' | 'cell';
   /** Failure sink (the row's toast layer). Omitted = inline message. */
   onError?: (message: string) => void;
+  /** Alternate persistence target (e.g. a bound follow-up patch action).
+   *  Default: the task-meta action keyed by `taskId`. */
+  saveAction?: (dueDate: string | null) => Promise<ActionResult>;
 }) {
   // Optimistic user date, reset whenever the server sends a fresh value.
   const [value, setValue] = useState(dueDateISO);
@@ -73,6 +80,12 @@ export function DueDateControl({
     setValue(dueDateISO);
     baseRef.current = dueDateISO;
   }
+  // Persistence target (default: the task-meta action), mirrored into a ref
+  // so the unmount flush (deps: [taskId] only) always calls the latest.
+  const persist = (next: string | null) =>
+    saveAction ? saveAction(next) : updateTaskMeta(taskId, { dueDate: next });
+  const persistRef = useRef(persist);
+  persistRef.current = persist;
   // Monotonic choice counter: stale failures never clobber a newer choice.
   const seqRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -111,11 +124,11 @@ export function DueDateControl({
         const pending = pendingRef.current;
         if (pending !== undefined) {
           // Unmounting mid-debounce must not lose the chosen date.
-          void updateTaskMeta(taskId, { dueDate: pending }).catch(() => {});
+          void persistRef.current(pending).catch(() => {});
         }
       }
     },
-    [taskId],
+    [],
   );
 
   const fail = (message: string) => {
@@ -135,7 +148,8 @@ export function DueDateControl({
     timerRef.current = setTimeout(() => {
       timerRef.current = null;
       pendingRef.current = undefined;
-      updateTaskMeta(taskId, { dueDate: next })
+      persistRef
+        .current(next)
         .then((result) => {
           if (seq !== seqRef.current) return; // a newer choice owns the control
           if (result.ok) {

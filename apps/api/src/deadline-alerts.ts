@@ -1,5 +1,9 @@
-import type { TaskState } from '@sower/core';
-import { applicationTasks, events, jobs } from '@sower/db';
+import {
+  type FollowupKind,
+  OPEN_FOLLOWUP_STATES,
+  type TaskState,
+} from '@sower/core';
+import { applicationTasks, events, followups, jobs } from '@sower/db';
 import { and, eq, inArray, isNotNull, notInArray, or } from 'drizzle-orm';
 import {
   type CalendarReconcileResult,
@@ -21,6 +25,12 @@ import type { Deps } from './types.js';
 
 /** Event type recorded per alert; its data.date is the alert's ET date. */
 export const DEADLINE_ALERT_EVENT = 'DEADLINE_ALERT';
+
+/**
+ * Event type recorded (on the PARENT task) per follow-up alert; its data
+ * carries the alert's ET date + the followupId the dedupe keys on.
+ */
+export const FOLLOWUP_DEADLINE_ALERT_EVENT = 'FOLLOWUP_DEADLINE_ALERT';
 
 /** States a deadline no longer means anything for: sent, or archived. */
 const EXCLUDED_STATES: readonly TaskState[] = [
@@ -67,13 +77,24 @@ export interface DeadlineAlertTask {
   deadline: Date;
 }
 
+/** One due-today OPEN follow-up, joined with its parent task's job. */
+export interface FollowupDeadlineAlert {
+  followupId: string;
+  /** The parent application task (the alert event is recorded on it). */
+  taskId: string;
+  kind: FollowupKind;
+  title: string;
+  company: string | null;
+  dueDate: Date;
+}
+
 export interface DeadlineAlertsResult {
   enabled: boolean;
-  /** Tasks whose effective deadline falls today (ET). */
+  /** Tasks + open follow-ups whose effective deadline falls today (ET). */
   due: number;
-  /** Alerts actually posted (and recorded as DEADLINE_ALERT events). */
+  /** Alerts actually posted (and recorded as *_ALERT events). */
   alerted: number;
-  /** Due tasks not alerted: already alerted today, or the send failed. */
+  /** Due items not alerted: already alerted today, or the send failed. */
   skipped: number;
   /** Google Calendar reconcile sweep (self-gated; rides the same run). */
   calendar: CalendarReconcileResult;
@@ -157,6 +178,55 @@ export async function sendDeadlineAlert(
 }
 
 /**
+ * The follow-up alert message (mirrors the task line):
+ * `<@id> ⏱ Due today: **<followup title>** — <Company> ·
+ *  [open in sower](<dashboard>/followups/<id>)`
+ * The mention, the company segment, and the dashboard link each degrade
+ * gracefully when unconfigured/unknown. Always under Discord's 2000 cap.
+ */
+function formatFollowupDeadlineAlert(
+  followup: FollowupDeadlineAlert,
+  config: Deps['config'],
+): string {
+  const mention = config.DISCORD_ALERT_MENTION_USER_ID
+    ? `<@${config.DISCORD_ALERT_MENTION_USER_ID}> `
+    : '';
+  const company = followup.company?.trim();
+  const head = company
+    ? `${mention}⏱ Due today: **${escapeLabel(followup.title)}** — ${escapeLabel(company)}`
+    : `${mention}⏱ Due today: **${escapeLabel(followup.title)}**`;
+  const parts = [head];
+  if (config.DASHBOARD_BASE_URL) {
+    const base = config.DASHBOARD_BASE_URL.replace(/\/+$/, '');
+    parts.push(`[open in sower](${base}/followups/${followup.followupId})`);
+  }
+  const text = parts.join(' · ');
+  return text.length > DISCORD_MESSAGE_MAX_CHARS
+    ? `${text.slice(0, DISCORD_MESSAGE_MAX_CHARS - 1)}…`
+    : text;
+}
+
+/**
+ * The follow-up half of the transport seam (same contract as
+ * sendDeadlineAlert): throws on failure so the caller's per-item try/catch
+ * keeps the batch tolerant.
+ */
+export async function sendFollowupDeadlineAlert(
+  deps: Deps,
+  followup: FollowupDeadlineAlert,
+): Promise<void> {
+  const { notify, config } = deps;
+  const channelId = config.DISCORD_ALERTS_CHANNEL_ID;
+  if (!notify || !config.DISCORD_ENABLED || !channelId) {
+    throw new Error('deadline alerts are not configured (no Discord channel)');
+  }
+  await notify.postChannelMessage(
+    channelId,
+    formatFollowupDeadlineAlert(followup, config),
+  );
+}
+
+/**
  * The midnight-ET run: post the Discord due-today alerts, then run the
  * Google Calendar reconcile sweep on the SAME schedule (each half self-gates
  * on its own config, so either can be live without the other). `now` is
@@ -175,10 +245,11 @@ export async function runDeadlineAlerts(
 }
 
 /**
- * Find every task due TODAY (America/New_York), alert each once, and record
- * a DEADLINE_ALERT event per alert. No-op `{enabled:false}` until Discord +
- * the alerts channel are configured. Per-task tolerant: one failed send is
- * logged and counted as skipped, never stops the batch.
+ * Find every task AND open follow-up due TODAY (America/New_York), alert
+ * each once, and record a DEADLINE_ALERT / FOLLOWUP_DEADLINE_ALERT event
+ * per alert. No-op `{enabled:false}` until Discord + the alerts channel are
+ * configured. Per-item tolerant: one failed send is logged and counted as
+ * skipped, never stops the batch.
  */
 async function runDiscordDeadlineAlerts(
   deps: Deps,
@@ -189,6 +260,8 @@ async function runDiscordDeadlineAlerts(
     return { enabled: false, due: 0, alerted: 0, skipped: 0 };
   }
   const today = easternDateOf(now);
+  let alerted = 0;
+  let skipped = 0;
 
   // Candidates: actionable tasks carrying ANY deadline. The date comparison
   // happens in JS (the ET calendar-date conversion has no clean SQL form),
@@ -232,57 +305,150 @@ async function runDiscordDeadlineAlerts(
       deadline,
     });
   }
-  if (due.length === 0) {
-    return { enabled: true, due: 0, alerted: 0, skipped: 0 };
+  if (due.length > 0) {
+    // Dedupe: a task already carrying a DEADLINE_ALERT event whose data.date
+    // is today's ET date was alerted by an earlier run (scheduler retry,
+    // manual re-POST) and is skipped — one ping per task per day.
+    const alertEvents = await db
+      .select({ taskId: events.taskId, data: events.data })
+      .from(events)
+      .where(
+        and(
+          eq(events.type, DEADLINE_ALERT_EVENT),
+          inArray(
+            events.taskId,
+            due.map((task) => task.taskId),
+          ),
+        ),
+      );
+    const alreadyAlerted = new Set(
+      alertEvents
+        .filter(
+          (event) => (event.data as { date?: unknown } | null)?.date === today,
+        )
+        .map((event) => event.taskId),
+    );
+
+    for (const task of due) {
+      if (alreadyAlerted.has(task.taskId)) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        await sendDeadlineAlert(deps, task);
+        // Recorded AFTER the send: a failed send leaves no event, so the next
+        // run retries; a failed event write can at worst re-ping once.
+        await db.insert(events).values({
+          taskId: task.taskId,
+          type: DEADLINE_ALERT_EVENT,
+          data: { date: today, channel: 'discord' },
+        });
+        alerted += 1;
+      } catch (error) {
+        skipped += 1;
+        console.warn(
+          `[sower] deadline alert failed for task ${task.taskId}:`,
+          error,
+        );
+      }
+    }
   }
 
-  // Dedupe: a task already carrying a DEADLINE_ALERT event whose data.date
-  // is today's ET date was alerted by an earlier run (scheduler retry,
-  // manual re-POST) and is skipped — one ping per task per day.
-  const alertEvents = await db
-    .select({ taskId: events.taskId, data: events.data })
-    .from(events)
+  // Open follow-ups due today (ET), joined with the parent job for the
+  // company segment. Terminal (DONE/DISMISSED) follow-ups never alert.
+  const followupRows = await db
+    .select({
+      followupId: followups.id,
+      taskId: followups.taskId,
+      kind: followups.kind,
+      title: followups.title,
+      state: followups.state,
+      dueDate: followups.dueDate,
+      company: jobs.company,
+    })
+    .from(followups)
+    .innerJoin(applicationTasks, eq(followups.taskId, applicationTasks.id))
+    .innerJoin(jobs, eq(applicationTasks.jobId, jobs.id))
     .where(
       and(
-        eq(events.type, DEADLINE_ALERT_EVENT),
-        inArray(
-          events.taskId,
-          due.map((task) => task.taskId),
-        ),
+        inArray(followups.state, [...OPEN_FOLLOWUP_STATES]),
+        isNotNull(followups.dueDate),
       ),
     );
-  const alreadyAlerted = new Set(
-    alertEvents
-      .filter(
-        (event) => (event.data as { date?: unknown } | null)?.date === today,
-      )
-      .map((event) => event.taskId),
-  );
-
-  let alerted = 0;
-  let skipped = 0;
-  for (const task of due) {
-    if (alreadyAlerted.has(task.taskId)) {
-      skipped += 1;
+  const followupsDue: FollowupDeadlineAlert[] = [];
+  for (const row of followupRows) {
+    if (!(OPEN_FOLLOWUP_STATES as string[]).includes(row.state as string)) {
       continue;
     }
-    try {
-      await sendDeadlineAlert(deps, task);
-      // Recorded AFTER the send: a failed send leaves no event, so the next
-      // run retries; a failed event write can at worst re-ping once.
-      await db.insert(events).values({
-        taskId: task.taskId,
-        type: DEADLINE_ALERT_EVENT,
-        data: { date: today, channel: 'discord' },
-      });
-      alerted += 1;
-    } catch (error) {
-      skipped += 1;
-      console.warn(
-        `[sower] deadline alert failed for task ${task.taskId}:`,
-        error,
+    if (!row.dueDate || easternDateOf(row.dueDate) !== today) {
+      continue;
+    }
+    followupsDue.push({
+      followupId: row.followupId,
+      taskId: row.taskId,
+      kind: row.kind,
+      title: row.title,
+      company: row.company,
+      dueDate: row.dueDate,
+    });
+  }
+
+  if (followupsDue.length > 0) {
+    // Dedupe on (followupId, today) — the alert event lives on the PARENT
+    // task, so the followupId in its data is the key.
+    const followupAlertEvents = await db
+      .select({ taskId: events.taskId, data: events.data })
+      .from(events)
+      .where(
+        and(
+          eq(events.type, FOLLOWUP_DEADLINE_ALERT_EVENT),
+          inArray(
+            events.taskId,
+            followupsDue.map((followup) => followup.taskId),
+          ),
+        ),
       );
+    const followupsAlreadyAlerted = new Set(
+      followupAlertEvents
+        .map(
+          (event) =>
+            event.data as { date?: unknown; followupId?: unknown } | null,
+        )
+        .filter((data) => data?.date === today)
+        .map((data) => data?.followupId),
+    );
+
+    for (const followup of followupsDue) {
+      if (followupsAlreadyAlerted.has(followup.followupId)) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        await sendFollowupDeadlineAlert(deps, followup);
+        await db.insert(events).values({
+          taskId: followup.taskId,
+          type: FOLLOWUP_DEADLINE_ALERT_EVENT,
+          data: {
+            date: today,
+            followupId: followup.followupId,
+            channel: 'discord',
+          },
+        });
+        alerted += 1;
+      } catch (error) {
+        skipped += 1;
+        console.warn(
+          `[sower] deadline alert failed for followup ${followup.followupId}:`,
+          error,
+        );
+      }
     }
   }
-  return { enabled: true, due: due.length, alerted, skipped };
+
+  return {
+    enabled: true,
+    due: due.length + followupsDue.length,
+    alerted,
+    skipped,
+  };
 }

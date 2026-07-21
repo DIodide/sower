@@ -1,10 +1,13 @@
 import type {
+  FollowupKind,
+  FollowupState,
   JobSpec,
   Question,
   ResolutionResult,
   TaskPriority,
   TaskState,
 } from '@sower/core';
+import { sql } from 'drizzle-orm';
 import {
   boolean,
   doublePrecision,
@@ -159,6 +162,70 @@ export const applicationTasks = pgTable('application_tasks', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
+
+/** Where a follow-up came from (dedupe semantics hang off source_ref). */
+export type FollowupSource = 'manual' | 'email' | 'discord';
+
+/**
+ * Post-application follow-ups: one row per thing that arrived AFTER the
+ * parent application was sent (OA invite, interview request, recruiter
+ * mail, offer, rejection). Carries its OWN small state machine
+ * (@sower/core FOLLOWUP_ALLOWED) — the parent task's state is never
+ * touched by follow-up activity.
+ */
+export const followups = pgTable(
+  'followups',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    /** The (SUBMITTED/CONFIRMED) application this follow-up belongs to. */
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => applicationTasks.id),
+    kind: text('kind').$type<FollowupKind>().notNull(),
+    title: text('title').notNull(),
+    state: text('state').$type<FollowupState>().notNull().default('RECEIVED'),
+    /** The thing to open (OA platform / scheduling link). Https-only. */
+    url: text('url'),
+    /** Freeform user notes (never sent anywhere). */
+    notes: text('notes'),
+    /**
+     * When this follow-up is due (OA window end, interview time). Date-only
+     * values are stored at ET midnight (deadlineFromIsoDate) exactly like
+     * application_tasks.due_date, so calendar sync and the midnight
+     * deadline alerts treat both identically.
+     */
+    dueDate: timestamp('due_date', { withTimezone: true }),
+    source: text('source').$type<FollowupSource>().notNull().default('manual'),
+    /**
+     * Ingest dedupe key for non-manual sources (the Gmail message id for
+     * source 'email'). Null for manual rows — the partial unique index
+     * below only constrains non-null values, so inserts key ON CONFLICT
+     * (source_ref) DO NOTHING and a re-poll can never duplicate a row.
+     */
+    sourceRef: text('source_ref'),
+    /**
+     * Google Calendar event mirroring due_date — upserted by the api's
+     * calendar sync, deleted when the follow-up is DONE/DISMISSED or the
+     * due date is cleared. Null when no event exists.
+     */
+    calendarEventId: text('calendar_event_id'),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // The task detail page reads a task's follow-ups newest-first.
+    index('followups_task_id_created_at_idx').on(table.taskId, table.createdAt),
+    // Email-ingest dedupe: at most one row per Gmail message. Partial so
+    // the manual rows' NULLs never collide.
+    uniqueIndex('followups_source_ref_uq')
+      .on(table.sourceRef)
+      .where(sql`${table.sourceRef} IS NOT NULL`),
+  ],
+);
 
 export const events = pgTable(
   'events',

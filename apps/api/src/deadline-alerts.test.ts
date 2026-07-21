@@ -5,6 +5,7 @@ import type { Config } from './config.js';
 import {
   DEADLINE_ALERT_EVENT,
   easternDateOf,
+  FOLLOWUP_DEADLINE_ALERT_EVENT,
   runDeadlineAlerts,
   sendDeadlineAlert,
 } from './deadline-alerts.js';
@@ -527,6 +528,213 @@ describe('runDeadlineAlerts', () => {
       synced: 1,
     });
     expect(result.enabled).toBe(false);
+  });
+});
+
+/** A followups+task+job join row as the follow-up candidates query returns it. */
+function followupRow(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    followupId: 'bbbbbbbb-0000-4000-8000-000000000001',
+    taskId: 'aaaaaaaa-0000-4000-8000-000000000001',
+    kind: 'assessment',
+    title: 'Assessment — HackerRank invite',
+    state: 'ACTION_NEEDED',
+    // ET midnight of July 18 (EDT) → due on ET July 18.
+    dueDate: new Date('2026-07-18T04:00:00Z'),
+    company: 'Akuna Capital',
+    ...overrides,
+  };
+}
+
+describe('runDeadlineAlerts — follow-ups', () => {
+  it('alerts open follow-ups due today with the ⏱ line and records FOLLOWUP_DEADLINE_ALERT on the parent task', async () => {
+    const writes: DbWrite[] = [];
+    // No tasks due; one open follow-up due today; no prior alert events.
+    const db = createFakeDb({
+      selectResults: [[], [followupRow()], []],
+      writes,
+    });
+    const notify = createNotify();
+    const deps = createDeps({ db, notify });
+
+    const result = await runDeadlineAlerts(deps, NOW);
+
+    expect(result).toEqual({
+      enabled: true,
+      due: 1,
+      alerted: 1,
+      skipped: 0,
+      calendar: DISABLED_CALENDAR,
+    });
+    const text = vi.mocked(notify.postChannelMessage).mock.calls[0]?.[1];
+    expect(text).toBe(
+      '<@424242> ⏱ Due today: **Assessment — HackerRank invite** — Akuna Capital · ' +
+        '[open in sower](https://dash.example/followups/bbbbbbbb-0000-4000-8000-000000000001)',
+    );
+    const inserted = writes
+      .filter((w) => w.method === 'insert' && w.table === events)
+      .map((w) => w.arg as Record<string, unknown>);
+    expect(inserted).toEqual([
+      {
+        taskId: 'aaaaaaaa-0000-4000-8000-000000000001',
+        type: FOLLOWUP_DEADLINE_ALERT_EVENT,
+        data: {
+          date: TODAY_ET,
+          followupId: 'bbbbbbbb-0000-4000-8000-000000000001',
+          channel: 'discord',
+        },
+      },
+    ]);
+  });
+
+  it('omits the company segment and dashboard link gracefully when unknown/unconfigured', async () => {
+    const db = createFakeDb({
+      selectResults: [[], [followupRow({ company: null })], []],
+    });
+    const notify = createNotify();
+    const deps = createDeps({
+      db,
+      notify,
+      config: {
+        DISCORD_ALERT_MENTION_USER_ID: undefined,
+        DASHBOARD_BASE_URL: undefined,
+      },
+    });
+
+    await runDeadlineAlerts(deps, NOW);
+
+    const text = vi.mocked(notify.postChannelMessage).mock.calls[0]?.[1];
+    expect(text).toBe('⏱ Due today: **Assessment — HackerRank invite**');
+  });
+
+  it('a follow-up due another ET day (or already terminal) never alerts', async () => {
+    const rows = [
+      followupRow({ dueDate: new Date('2026-07-19T04:00:00Z') }),
+      followupRow({
+        followupId: 'bbbbbbbb-0000-4000-8000-000000000002',
+        state: 'DONE',
+      }),
+    ];
+    const db = createFakeDb({ selectResults: [[], rows, []] });
+    const notify = createNotify();
+
+    const result = await runDeadlineAlerts(createDeps({ db, notify }), NOW);
+
+    expect(result).toEqual({
+      enabled: true,
+      due: 0,
+      alerted: 0,
+      skipped: 0,
+      calendar: DISABLED_CALENDAR,
+    });
+    expect(notify.postChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it("dedupes per (followupId, today's ET date); other followups and older dates still alert", async () => {
+    const writes: DbWrite[] = [];
+    const rows = [
+      followupRow(),
+      followupRow({ followupId: 'bbbbbbbb-0000-4000-8000-000000000002' }),
+    ];
+    const alertEvents = [
+      // This follow-up already alerted TODAY → skipped.
+      {
+        taskId: 'aaaaaaaa-0000-4000-8000-000000000001',
+        data: {
+          date: TODAY_ET,
+          followupId: 'bbbbbbbb-0000-4000-8000-000000000001',
+          channel: 'discord',
+        },
+      },
+      // The other one alerted on an EARLIER date → alerts again.
+      {
+        taskId: 'aaaaaaaa-0000-4000-8000-000000000001',
+        data: {
+          date: '2026-07-01',
+          followupId: 'bbbbbbbb-0000-4000-8000-000000000002',
+          channel: 'discord',
+        },
+      },
+    ];
+    const db = createFakeDb({
+      selectResults: [[], rows, alertEvents],
+      writes,
+    });
+    const notify = createNotify();
+
+    const result = await runDeadlineAlerts(createDeps({ db, notify }), NOW);
+
+    expect(result).toEqual({
+      enabled: true,
+      due: 2,
+      alerted: 1,
+      skipped: 1,
+      calendar: DISABLED_CALENDAR,
+    });
+    const inserted = writes
+      .filter((w) => w.method === 'insert' && w.table === events)
+      .map((w) => w.arg as { data: { followupId: string } });
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]?.data.followupId).toBe(
+      'bbbbbbbb-0000-4000-8000-000000000002',
+    );
+  });
+
+  it('tasks and follow-ups due the same day combine into one run (shared counters)', async () => {
+    const writes: DbWrite[] = [];
+    const db = createFakeDb({
+      selectResults: [
+        [row({ taskId: 'aaaaaaaa-0000-4000-8000-000000000501' })],
+        [],
+        [followupRow()],
+        [],
+      ],
+      writes,
+    });
+    const notify = createNotify();
+
+    const result = await runDeadlineAlerts(createDeps({ db, notify }), NOW);
+
+    expect(result).toEqual({
+      enabled: true,
+      due: 2,
+      alerted: 2,
+      skipped: 0,
+      calendar: DISABLED_CALENDAR,
+    });
+    expect(notify.postChannelMessage).toHaveBeenCalledTimes(2);
+    const types = writes
+      .filter((w) => w.method === 'insert' && w.table === events)
+      .map((w) => (w.arg as { type: string }).type);
+    expect(types).toEqual([
+      DEADLINE_ALERT_EVENT,
+      FOLLOWUP_DEADLINE_ALERT_EVENT,
+    ]);
+  });
+
+  it('a failed follow-up send is skipped (no event) so the next run retries', async () => {
+    const writes: DbWrite[] = [];
+    const db = createFakeDb({
+      selectResults: [[], [followupRow()], []],
+      writes,
+    });
+    const notify = createNotify();
+    vi.mocked(notify.postChannelMessage).mockRejectedValueOnce(
+      new Error('discord 500'),
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const result = await runDeadlineAlerts(createDeps({ db, notify }), NOW);
+
+    expect(result).toEqual({
+      enabled: true,
+      due: 1,
+      alerted: 0,
+      skipped: 1,
+      calendar: DISABLED_CALENDAR,
+    });
+    expect(writes.filter((w) => w.table === events)).toHaveLength(0);
+    warn.mockRestore();
   });
 });
 

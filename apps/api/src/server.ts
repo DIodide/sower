@@ -33,6 +33,8 @@ import {
   runDiscordIngestPoll,
   type UrlOutcome,
 } from './discord-ingest.js';
+import { registerFollowupRoutes } from './followup-routes.js';
+import { runFollowupInboxPoll } from './inbox-followups.js';
 import { ingestJob } from './ingest.js';
 import { runIngestionPoll } from './ingest-poll.js';
 import { refreshIngestReply } from './ingest-reply.js';
@@ -1777,6 +1779,15 @@ export function buildServer(deps: Deps): FastifyInstance {
     return runDeadlineAlerts(deps);
   });
 
+  // Poll Gmail for post-application follow-up mail (OA invites, interview
+  // requests, offers, rejections) and record matched messages as followups
+  // rows. No-op {enabled:false} until the Gmail OAuth triple
+  // (GMAIL_CLIENT_ID/SECRET/REFRESH_TOKEN) is configured; a re-POST is safe
+  // (per-message dedupe on followups.source_ref).
+  app.post('/inbox/followups/poll', async () => {
+    return runFollowupInboxPoll(deps);
+  });
+
   // --- Workday session bridge (dashboard <-> local headful capture agent) ---
 
   // Request a headful browser-session capture for a parked Workday task's
@@ -1881,6 +1892,11 @@ export function buildServer(deps: Deps): FastifyInstance {
   // /answer-library CRUD (company-scoped answer library; x-api-key like all
   // other routes via the server-wide preHandler above).
   registerAnswerLibraryRoutes(app, deps);
+
+  // Post-application follow-ups: POST /tasks/:taskId/followups,
+  // GET/PATCH /followups/:id, POST /followups/:id/transition (x-api-key via
+  // the same server-wide preHandler).
+  registerFollowupRoutes(app, deps);
 
   // /resumes (list/sync/edit/ask/fork + versions + run polling; x-api-key
   // via the same server-wide preHandler).

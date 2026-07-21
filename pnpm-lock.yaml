@@ -38,6 +38,9 @@ importers:
       '@sower/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@sower/inbox':
+        specifier: workspace:*
+        version: link:../../packages/inbox
       '@sower/notify':
         specifier: workspace:*
         version: link:../../packages/notify
@@ -309,6 +312,10 @@ importers:
         version: 3.2.7(@types/node@22.20.1)(tsx@4.23.0)(yaml@2.9.0)
 
   packages/inbox:
+    dependencies:
+      '@sower/core':
+        specifier: workspace:*
+        version: link:../core
     devDependencies:
       '@types/node':
         specifier: ^22.10.2
