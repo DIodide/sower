@@ -2,6 +2,7 @@ import { type ResumeRun, resumeRuns, resumes, resumeVersions } from '@sower/db';
 import { desc, eq, isNotNull } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { fetchIdToken } from './oidc.js';
 import { runCloudJob } from './run-cloud-job.js';
 import type { Deps } from './types.js';
 
@@ -33,6 +34,12 @@ const editBodySchema = z.object({
 // The natural-language change request for an agent run.
 const askBodySchema = z.object({
   prompt: z.string().trim().min(1).max(4000),
+});
+
+// The editor buffer as-typed, compiled for PREVIEW only — nothing persisted.
+// Same 200k cap as the edit body (and the compile service's own limit).
+const compilePreviewBodySchema = z.object({
+  source: z.string().min(1).max(200_000),
 });
 
 // A fork's new resume name: a filename stem / vault path segment — short,
@@ -195,6 +202,77 @@ export function registerResumeRoutes(app: FastifyInstance, deps: Deps): void {
     }
     const fired = await fireResumeJob(deps, runId);
     return reply.code(200).send({ runId, fired });
+  });
+
+  // Fast compile preview: proxy the in-editor source to the IAM-gated
+  // compile service (the resume-editor image in server mode, reached with a
+  // metadata-server OIDC token) and pass its verdict through — {ok:true,
+  // pdf:<base64>} or {ok:false, log}. Nothing is persisted and no Job runs;
+  // a failed compile is an expected 200, only an unreachable/erroring
+  // service is a 502. Gated on COMPILE_SERVICE_URL alone, not
+  // RESUME_EDITOR_ENABLED: a preview writes nothing, so it is safe without
+  // the Job pipeline. x-api-key comes from the server-wide preHandler.
+  app.post('/resumes/:id/compile-preview', async (request, reply) => {
+    const params = idParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid resume id', issues: params.error.issues });
+    }
+    const body = compilePreviewBodySchema.safeParse(request.body);
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid body', issues: body.error.issues });
+    }
+    const rows = await deps.db
+      .select({ id: resumes.id, name: resumes.name })
+      .from(resumes)
+      .where(eq(resumes.id, params.data.id))
+      .limit(1);
+    const resume = rows[0];
+    if (!resume) {
+      return reply.code(404).send({ error: 'resume not found' });
+    }
+    const serviceUrl = deps.config.COMPILE_SERVICE_URL;
+    if (serviceUrl === undefined || serviceUrl === '') {
+      return reply
+        .code(503)
+        .send({ error: 'compile preview is not configured' });
+    }
+    try {
+      // The audience must be the service's base URL exactly — Cloud Run IAM
+      // rejects tokens minted for anything else.
+      const token = await fetchIdToken(serviceUrl);
+      const upstream = await fetch(`${serviceUrl}/compile`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ source: body.data.source, name: resume.name }),
+        // Above the service's own 90s compile timeout, so ITS verdict
+        // ('compile timed out') arrives instead of an abort here.
+        signal: AbortSignal.timeout(100_000),
+      });
+      if (!upstream.ok) {
+        request.log.error(
+          `compile service answered HTTP ${upstream.status} for resume ${resume.id}`,
+        );
+        return reply.code(502).send({ error: 'compile service unavailable' });
+      }
+      const verdict = (await upstream.json()) as {
+        ok: boolean;
+        pdf?: string;
+        log?: string;
+      };
+      return reply.code(200).send(verdict);
+    } catch (error) {
+      // OIDC mint (no metadata server off-GCP), network, and JSON failures
+      // all land here: detail goes to the log, the client gets an opaque 502.
+      request.log.error({ err: error }, 'compile preview upstream failed');
+      return reply.code(502).send({ error: 'compile service unavailable' });
+    }
   });
 
   // Natural-language change request: the job runs a Claude Agent SDK session

@@ -30,6 +30,11 @@
  * Exit codes: 0 on success (or when the run cannot ever succeed — missing
  * tokens are recorded on the run row, and a Cloud Run retry would not help),
  * 1 on failure so Cloud Run Jobs retries.
+ *
+ * A second role rides in this same image: with RESUME_COMPILE_SERVER=1 (set
+ * by infra ONLY on the compile-preview Cloud Run SERVICE, never on the Job)
+ * the entrypoint starts the HTTP compile server in server.ts instead of the
+ * job flow.
  */
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -213,7 +218,13 @@ const isDirectRun =
   import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isDirectRun) {
-  const code = await run();
-  // Explicit exit: the postgres pool keeps the event loop alive otherwise.
-  process.exit(code);
+  if (process.env.RESUME_COMPILE_SERVER === '1') {
+    // Dynamic import so the Job path loads none of the server machinery.
+    const { startServer } = await import('./server.js');
+    startServer();
+  } else {
+    const code = await run();
+    // Explicit exit: the postgres pool keeps the event loop alive otherwise.
+    process.exit(code);
+  }
 }

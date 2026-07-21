@@ -144,6 +144,54 @@ export async function saveResumeEdit(
   );
 }
 
+export interface CompilePreviewResult {
+  ok: boolean;
+  /** base64 PDF on success. */
+  pdf?: string;
+  /** Plain-text tectonic output (or a transport-level message) on failure. */
+  log?: string;
+}
+
+// Mirrors the api's compile-preview 200 bodies; non-200s (404 unknown resume,
+// 502 service unavailable, 503 not configured) surface through apiRequest's
+// error message and normalize to a failed compile below.
+const previewResponseSchema = z.union([
+  z.object({ ok: z.literal(true), pdf: z.string() }),
+  z.object({ ok: z.literal(false), log: z.string() }),
+]);
+
+/**
+ * Throwaway preview compile for the split-pane editor. Never creates a
+ * version or a run, commits nothing — the api compiles the posted source and
+ * returns the PDF (or the compile log) inline.
+ */
+export async function compileResumePreview(
+  resumeId: string,
+  source: string,
+): Promise<CompilePreviewResult> {
+  const idParsed = idSchema.safeParse(resumeId);
+  if (!idParsed.success) return { ok: false, log: 'invalid resume id.' };
+  const contentParsed = contentSchema.safeParse(source);
+  if (!contentParsed.success) {
+    return {
+      ok: false,
+      log: contentParsed.error.issues[0]?.message ?? 'invalid source',
+    };
+  }
+  const result = await apiRequest(
+    `/resumes/${encodeURIComponent(idParsed.data)}/compile-preview`,
+    { method: 'POST', body: { source: contentParsed.data } },
+  );
+  if (!result.ok) return { ok: false, log: result.message };
+  const parsed = previewResponseSchema.safeParse(result.body);
+  if (!parsed.success) {
+    return { ok: false, log: 'the api returned an unexpected preview shape.' };
+  }
+  return parsed.data.ok
+    ? { ok: true, pdf: parsed.data.pdf }
+    : { ok: false, log: parsed.data.log };
+}
+
 // Mirrors the api's forkBodySchema (and FORK_NAME_RE in the editor job).
 const forkNameSchema = z
   .string()

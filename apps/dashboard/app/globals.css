@@ -2109,16 +2109,110 @@ details.show-more[open] > summary .show-more-open {
   text-decoration: line-through;
 }
 
-/* The raw .tex editor: mono, no wrap, grows with content to 36rem then
-   scrolls (the height is set by the autogrow effect; max-height is the cap). */
-.tex-editor {
+/* ------------------------------------------- latex editor (Edit source tab) */
+
+/* Overleaf-style split: CodeMirror source left, compile preview right. The
+   flex bases stack the panes when the container can't fit both side by side
+   at a useful width (~900px) — the .resume-split idiom. */
+.latex-split {
+  display: flex;
+  align-items: stretch;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 0.375rem;
+}
+
+.latex-pane {
+  flex: 1 1 26rem;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* CodeMirror host: the .field border treatment; stretches to match the
+   preview pane's height (36rem floor). */
+.latex-cm {
+  flex: 1 1 auto;
+  min-height: 36rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-ctl);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.latex-cm:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.latex-cm .cm-editor {
+  height: 100%;
+}
+
+/* the host's focus-within border is the focus ring */
+.latex-cm .cm-editor.cm-focused {
+  outline: none;
+}
+
+.latex-cm .cm-scroller {
   font-family: var(--mono);
   font-size: 0.8125rem;
   line-height: 1.5;
-  min-height: 14rem;
-  max-height: 36rem;
-  overflow: auto;
+}
+
+.latex-cm .cm-gutters {
+  background: var(--well);
+  color: var(--ink-faint);
+  border-right: 1px solid var(--line);
+}
+
+/* compile status strip above the preview frame */
+.latex-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.375rem;
+  font-size: 0.8125rem;
+}
+
+.latex-auto {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: var(--ink-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+/* failed-compile log: capped, scrollable, unwrapped tectonic output */
+.latex-log {
+  margin: 0.375rem 0 0.5rem;
+  padding: 0.5rem 0.625rem;
+  background: var(--well);
+  border: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  line-height: 1.45;
   white-space: pre;
+  overflow: auto;
+  max-height: 14rem;
+}
+
+.latex-frame {
+  display: block;
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 36rem;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.latex-frame-empty {
+  display: grid;
+  place-items: center;
 }
 
 @media (prefers-reduced-motion: reduce) {

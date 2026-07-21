@@ -146,3 +146,16 @@ jobs:
           --project ${{ secrets.GCP_PROJECT_ID }}
           --quiet
           || echo "sower-resume-editor job not created yet — skipping image roll"
+
+      - name: Deploy compile-preview service to Cloud Run
+        # Same image as the resume-editor Job; Terraform-owned env
+        # (RESUME_COMPILE_SERVER=1) flips it into the HTTP compile server.
+        # `services update` (never `deploy`): it must FAIL-and-skip rather
+        # than create a service Terraform doesn't know about.
+        run: >
+          gcloud run services update sower-resume-compile
+          --image us-east1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/sower/resume-editor:${{ github.sha }}
+          --region us-east1
+          --project ${{ secrets.GCP_PROJECT_ID }}
+          --quiet
+          || echo "sower-resume-compile service not created yet — skipping image roll"

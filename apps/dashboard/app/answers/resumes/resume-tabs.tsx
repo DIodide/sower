@@ -1,19 +1,22 @@
 'use client';
 
 // The interactive right pane of a resume: flat tabs for "Ask Claude"
-// (natural-language change request → agent run), "Edit source" (the raw .tex
-// with dirty-tracking + beforeunload guard), "History" (the last runs with
-// expandable transcripts), and "Share" (public …/r/<token> links). One run is
-// polled at a time; Send/Save stay disabled until it settles, and a
-// successful run router.refresh()es so the PDF preview, source, and history
-// all converge on the server's truth.
+// (natural-language change request → agent run), "Edit source" (the
+// split-pane LaTeX editor with throwaway compile previews, dirty-tracking +
+// beforeunload guard), "History" (the last runs with expandable transcripts),
+// and "Share" (public …/r/<token> links). One run is polled at a time;
+// Send/Save stay disabled until it settles, and a successful run
+// router.refresh()es so the PDF preview, source, and history all converge on
+// the server's truth. Preview compiles never create versions or runs — only
+// Save does.
 
 import { useRouter } from 'next/navigation';
-import { useEffect, useRef, useState, useTransition } from 'react';
+import { useEffect, useState, useTransition } from 'react';
 import { truncate } from '../../../lib/format';
 import { Empty, Timestamp } from '../../../lib/ui';
 import { Badge } from '../../tasks/[id]/ui';
 import { askResumeChange, saveResumeEdit } from './actions';
+import { LatexEditor } from './latex-editor';
 import {
   commitUrl,
   KIND_META,
@@ -44,7 +47,6 @@ const TABS: { id: TabId; label: string }[] = [
 /** Where the currently-polled run should render its live view. */
 type RunOrigin = 'ask' | 'edit';
 
-const EDITOR_MAX_PX = 576; // 36rem — then the editor scrolls.
 const PROMPT_MAX = 4000;
 const SOURCE_MAX = 200_000;
 
@@ -130,6 +132,7 @@ export function ResumeTabs({
   history,
   initialRun,
   viewingOldVersion = false,
+  publishedPdfUrl = null,
 }: {
   resume: ResumeClientView;
   /** The resume's last runs (incl. repo-wide syncs), newest first. */
@@ -139,6 +142,8 @@ export function ResumeTabs({
   /** The PDF pane is showing a PRIOR version — the Edit tab warns that
    *  edits always apply to the latest. */
   viewingOldVersion?: boolean;
+  /** The live /documents/<id> PDF — seeds the editor's preview pane. */
+  publishedPdfUrl?: string | null;
 }) {
   const router = useRouter();
   const [tab, setTab] = useState<TabId>('ask');
@@ -194,7 +199,6 @@ export function ResumeTabs({
   const dirty = draft !== baseline;
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savePending, startSave] = useTransition();
-  const editorRef = useRef<HTMLTextAreaElement | null>(null);
 
   // After a refresh lands new source (a run committed), adopt it — unless the
   // user has unsaved edits, which are never clobbered.
@@ -214,16 +218,6 @@ export function ResumeTabs({
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, [dirty]);
-
-  // Autogrow the editor to its content, up to 36rem, then scroll. Re-measure
-  // on every draft change and when the tab becomes visible (hidden panels
-  // measure 0).
-  useEffect(() => {
-    const el = editorRef.current;
-    if (!el || tab !== 'edit' || el.value !== draft) return;
-    el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight + 2, EDITOR_MAX_PX)}px`;
-  }, [tab, draft]);
 
   const save = () => {
     if (draft.trim() === '') {
@@ -342,13 +336,9 @@ export function ResumeTabs({
           </p>
         ) : null}
         <div className="row" style={{ alignItems: 'baseline' }}>
-          <label
-            htmlFor={`tex-${resume.id}`}
-            className="field-label"
-            style={{ margin: 0 }}
-          >
+          <span className="field-label" style={{ margin: 0 }}>
             LaTeX source
-          </label>
+          </span>
           <span className="mono faint" style={{ fontSize: '0.6875rem' }}>
             {resume.texPath}
           </span>
@@ -364,15 +354,14 @@ export function ResumeTabs({
           </p>
         ) : (
           <>
-            <textarea
-              id={`tex-${resume.id}`}
-              ref={editorRef}
-              className="field tex-editor"
-              wrap="off"
-              spellCheck={false}
+            <LatexEditor
+              resumeId={resume.id}
               value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              style={{ marginTop: '0.375rem' }}
+              onChange={setDraft}
+              publishedPdfUrl={publishedPdfUrl}
+              onSave={() => {
+                if (!busy && dirty) save();
+              }}
             />
             <div className="row" style={{ marginTop: '0.625rem' }}>
               <button
@@ -394,6 +383,9 @@ export function ResumeTabs({
               >
                 Cancel
               </button>
+              <span className="hint faint spread">
+                ⌘/Ctrl+Enter compiles · ⌘/Ctrl+S saves
+              </span>
             </div>
           </>
         )}

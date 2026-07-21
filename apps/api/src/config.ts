@@ -122,6 +122,13 @@ const envSchema = z
      */
     RESUME_EDITOR_ENABLED: z.string().optional(),
     /**
+     * Base URL of the IAM-gated compile-preview Cloud Run service (the
+     * resume-editor image running with RESUME_COMPILE_SERVER=1). Doubles as
+     * the OIDC audience for its identity tokens. Optional — unset, POST
+     * /resumes/:id/compile-preview answers 503.
+     */
+    COMPILE_SERVICE_URL: z.string().optional(),
+    /**
      * Public base URL of THIS api service (e.g. https://sower-api-....run.app),
      * used to render resume share-link URLs (/r/<token>). Optional: when
      * unset, link URLs are derived from the incoming request's host — which

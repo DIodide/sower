@@ -154,6 +154,7 @@ export function ResumeWorkspace({
           history={history}
           initialRun={initialRun}
           viewingOldVersion={viewing !== null}
+          publishedPdfUrl={documentId ? `/documents/${documentId}` : null}
         />
       </div>
     </div>

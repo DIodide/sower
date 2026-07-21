@@ -1,6 +1,7 @@
 import { resumeRuns } from '@sower/db';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
+import { resetIdTokenCache } from './oidc.js';
 import { buildServer } from './server.js';
 import type { Deps } from './types.js';
 
@@ -74,11 +75,14 @@ function createFakeDb(
   return db as unknown as Deps['db'];
 }
 
+const COMPILE_URL = 'https://sower-compile-abc.a.run.app';
+
 const baseConfig = {
   INGEST_API_KEY: 'test-key',
   SOWER_ENV: 'test',
   RESUME_EDITOR_JOB_NAME: 'sower-resume-editor',
   RESUME_EDITOR_ENABLED: true,
+  COMPILE_SERVICE_URL: COMPILE_URL,
 } as unknown as Config;
 
 function createDeps(
@@ -592,6 +596,193 @@ describe('/resumes routes', () => {
       headers: { 'x-api-key': 'test-key' },
     });
     expect(invalid.statusCode).toBe(400);
+    await app.close();
+  });
+});
+
+describe('POST /resumes/:id/compile-preview', () => {
+  // The route reaches the outside world through global fetch alone (the OIDC
+  // mint and the compile call), so one stub covers both hops.
+  const fetchMock = vi.fn<typeof fetch>();
+
+  beforeEach(() => {
+    resetIdTokenCache();
+    fetchMock.mockReset();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function armUpstream(compileResponse: () => Promise<Response>): void {
+    fetchMock.mockImplementation(async (input) => {
+      if (String(input).startsWith('http://metadata.google.internal/')) {
+        return new Response('oidc-token');
+      }
+      return compileResponse();
+    });
+  }
+
+  it('requires the api key', async () => {
+    const app = buildServer(createDeps(createFakeDb()));
+    const response = await app.inject({
+      method: 'POST',
+      url: `/resumes/${RESUME_ID}/compile-preview`,
+      payload: { source: '\\x' },
+    });
+    expect(response.statusCode).toBe(401);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('validates the source length (1-200k)', async () => {
+    const app = buildServer(createDeps(createFakeDb()));
+    for (const source of ['', 'x'.repeat(200_001)]) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/resumes/${RESUME_ID}/compile-preview`,
+        headers: { 'x-api-key': 'test-key' },
+        payload: { source },
+      });
+      expect(response.statusCode).toBe(400);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('404s on an unknown resume without calling the compile service', async () => {
+    const db = createFakeDb({ selectResults: [[]] });
+    const app = buildServer(createDeps(db));
+    const response = await app.inject({
+      method: 'POST',
+      url: `/resumes/${RESUME_ID}/compile-preview`,
+      headers: { 'x-api-key': 'test-key' },
+      payload: { source: '\\documentclass{article}' },
+    });
+    expect(response.statusCode).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('503s when COMPILE_SERVICE_URL is unset', async () => {
+    const db = createFakeDb({ selectResults: [[resumeRow]] });
+    const app = buildServer(createDeps(db, { COMPILE_SERVICE_URL: undefined }));
+    const response = await app.inject({
+      method: 'POST',
+      url: `/resumes/${RESUME_ID}/compile-preview`,
+      headers: { 'x-api-key': 'test-key' },
+      payload: { source: '\\documentclass{article}' },
+    });
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toEqual({
+      error: 'compile preview is not configured',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it('mints an OIDC token, POSTs the source with the resume name, and passes the verdict through', async () => {
+    armUpstream(async () => Response.json({ ok: true, pdf: 'JVBERi1mYWtl' }));
+    const db = createFakeDb({ selectResults: [[resumeRow]] });
+    const app = buildServer(createDeps(db));
+    const response = await app.inject({
+      method: 'POST',
+      url: `/resumes/${RESUME_ID}/compile-preview`,
+      headers: { 'x-api-key': 'test-key' },
+      payload: { source: '\\documentclass{article}' },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ok: true, pdf: 'JVBERi1mYWtl' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [metadataUrl, metadataInit] = fetchMock.mock.calls[0] ?? [];
+    expect(String(metadataUrl)).toBe(
+      `http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=${encodeURIComponent(COMPILE_URL)}`,
+    );
+    expect(metadataInit?.headers).toEqual({ 'Metadata-Flavor': 'Google' });
+    const [compileUrl, compileInit] = fetchMock.mock.calls[1] ?? [];
+    expect(String(compileUrl)).toBe(`${COMPILE_URL}/compile`);
+    expect(compileInit?.method).toBe('POST');
+    expect(compileInit?.headers).toMatchObject({
+      authorization: 'Bearer oidc-token',
+      'content-type': 'application/json',
+    });
+    expect(JSON.parse(String(compileInit?.body))).toEqual({
+      source: '\\documentclass{article}',
+      name: 'swe-2027',
+    });
+    expect(compileInit?.signal).toBeInstanceOf(AbortSignal);
+    await app.close();
+  });
+
+  it('passes a compile FAILURE through as a 200 (expected outcome, not a 5xx)', async () => {
+    armUpstream(async () =>
+      Response.json({ ok: false, log: '! Undefined control sequence.' }),
+    );
+    const db = createFakeDb({ selectResults: [[resumeRow]] });
+    const app = buildServer(createDeps(db));
+    const response = await app.inject({
+      method: 'POST',
+      url: `/resumes/${RESUME_ID}/compile-preview`,
+      headers: { 'x-api-key': 'test-key' },
+      payload: { source: '\\bad' },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      ok: false,
+      log: '! Undefined control sequence.',
+    });
+    await app.close();
+  });
+
+  it('502s (opaque) when the compile service answers non-200', async () => {
+    armUpstream(async () => new Response('boom detail', { status: 500 }));
+    const db = createFakeDb({ selectResults: [[resumeRow]] });
+    const app = buildServer(createDeps(db));
+    const response = await app.inject({
+      method: 'POST',
+      url: `/resumes/${RESUME_ID}/compile-preview`,
+      headers: { 'x-api-key': 'test-key' },
+      payload: { source: '\\x' },
+    });
+    expect(response.statusCode).toBe(502);
+    // The raw upstream error never reaches the client.
+    expect(response.json()).toEqual({ error: 'compile service unavailable' });
+    await app.close();
+  });
+
+  it('502s when the compile call fails on the network', async () => {
+    armUpstream(async () => {
+      throw new TypeError('fetch failed');
+    });
+    const db = createFakeDb({ selectResults: [[resumeRow]] });
+    const app = buildServer(createDeps(db));
+    const response = await app.inject({
+      method: 'POST',
+      url: `/resumes/${RESUME_ID}/compile-preview`,
+      headers: { 'x-api-key': 'test-key' },
+      payload: { source: '\\x' },
+    });
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toEqual({ error: 'compile service unavailable' });
+    await app.close();
+  });
+
+  it('502s when the OIDC mint fails (off-GCP) without calling the service', async () => {
+    fetchMock.mockImplementation(async () => {
+      throw new TypeError('ENOTFOUND metadata.google.internal');
+    });
+    const db = createFakeDb({ selectResults: [[resumeRow]] });
+    const app = buildServer(createDeps(db));
+    const response = await app.inject({
+      method: 'POST',
+      url: `/resumes/${RESUME_ID}/compile-preview`,
+      headers: { 'x-api-key': 'test-key' },
+      payload: { source: '\\x' },
+    });
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toEqual({ error: 'compile service unavailable' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     await app.close();
   });
 });
