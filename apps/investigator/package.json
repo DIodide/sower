@@ -12,7 +12,7 @@
     "@sower/db": "workspace:*",
     "@sower/investigate": "workspace:*",
     "@sower/storage": "workspace:*",
-    "drizzle-orm": "^0.44.0"
+    "drizzle-orm": "^0.45.2"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
