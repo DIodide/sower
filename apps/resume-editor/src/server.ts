@@ -150,7 +150,10 @@ export function createRequestHandler(
     res: ServerResponse,
   ): Promise<void> => {
     const url = (req.url ?? '').split('?')[0] ?? '';
-    if (req.method === 'GET' && url === '/healthz') {
+    // '/health', NOT '/healthz': Google's frontend intercepts the literal
+    // /healthz path on run.app hosts and answers its own 404 — the request
+    // never reaches the container (verified live).
+    if (req.method === 'GET' && url === '/health') {
       sendJson(res, 200, { ok: true });
       return;
     }

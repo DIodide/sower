@@ -81,11 +81,11 @@ describe('sanitizeName', () => {
 });
 
 describe('compile server', () => {
-  it('GET /healthz answers ok', async () => {
+  it('GET /health answers ok', async () => {
     const url = await listen(
       createRequestHandler({ compile: fakeCompile([]) }),
     );
-    const response = await fetch(`${url}/healthz`);
+    const response = await fetch(`${url}/health`);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ ok: true });
   });

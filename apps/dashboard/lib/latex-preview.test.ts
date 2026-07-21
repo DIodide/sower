@@ -26,6 +26,26 @@ describe('firstLatexError', () => {
     expect(firstLatexError('warning: something\nall fine')).toBeNull();
     expect(firstLatexError('')).toBeNull();
   });
+
+  // Tectonic's own report shape (the live compile-preview service): no `!`
+  // lines at all — `error: <file>:<line>: <message>` diagnostics followed by
+  // a generic "halted on …" wrap-up that must not win over the real one.
+  it('prefers the file:line tectonic diagnostic over the halt wrap-up', () => {
+    const log = [
+      'compiling resume.tex failed: `tectonic resume.sower-build.tex` failed',
+      'error: resume.sower-build.tex:1: Undefined control sequence',
+      'error: halted on potentially-recoverable error as specified',
+    ].join('\n');
+    expect(firstLatexError(log)).toBe(
+      'error: resume.sower-build.tex:1: Undefined control sequence',
+    );
+  });
+
+  it('falls back to the first error: line when none carries file:line', () => {
+    expect(
+      firstLatexError('noise\nerror: outright failure\nerror: later'),
+    ).toBe('error: outright failure');
+  });
 });
 
 describe('pdfBytesFromBase64', () => {

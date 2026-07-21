@@ -2,13 +2,24 @@
 // app/answers/resumes/) because dashboard unit tests are only collected from
 // lib/ — see vitest.config.ts at the repo root.
 
-/** First `!`-prefixed line of a TeX/tectonic log — the headline error. */
+/**
+ * Headline error of a TeX/tectonic log. Tectonic reports as
+ * `error: <file>:<line>: <message>` (TeX's own `!` lines only appear in
+ * engine passthrough); prefer a `!` line, then the first file:line
+ * diagnostic, then any `error:` line — the "halted on …" wrap-up is a last
+ * resort.
+ */
 export function firstLatexError(log: string): string | null {
+  let firstError: string | null = null;
   for (const line of log.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (trimmed.startsWith('!')) return trimmed;
+    if (trimmed.startsWith('error:')) {
+      if (/\.tex:\d+/.test(trimmed)) return trimmed;
+      firstError ??= trimmed;
+    }
   }
-  return null;
+  return firstError;
 }
 
 /**
