@@ -19,4 +19,10 @@ export {
   type GmailMessageSummary,
   gmailConfigFromEnv,
 } from './gmail.js';
+export {
+  buildMimeMessage,
+  GmailSendScopeError,
+  type OutgoingGmailMessage,
+  sendGmailMessage,
+} from './gmail-send.js';
 export type { InboxReader, OtpQuery, OtpResult } from './types.js';

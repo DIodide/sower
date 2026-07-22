@@ -2358,6 +2358,72 @@ describe('buildServer', () => {
     });
   });
 
+  describe('POST /digest/weekly', () => {
+    it('responds 401 without an api key (guarded like every route)', async () => {
+      const { deps } = createDeps(createFakeDb());
+      const app = buildServer(deps);
+      const res = await app.inject({ method: 'POST', url: '/digest/weekly' });
+      expect(res.statusCode).toBe(401);
+      expect(res.json()).toEqual({ error: 'unauthorized' });
+    });
+
+    it('200s with both legs skipped (and their reasons) until configured', async () => {
+      const { deps } = createDeps(createFakeDb());
+      const app = buildServer(deps);
+      const res = await app.inject({
+        method: 'POST',
+        url: '/digest/weekly',
+        headers: { 'x-api-key': 'test-key' },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        discord: 'skipped: no Discord digest channel configured',
+        email: 'skipped: no digest email recipient configured',
+        week: { submitted: 0, ingested: 0, deadlines: 0, inPlay: 0 },
+      });
+    });
+
+    it('posts the digest to the configured Discord channel (email leg still skipped)', async () => {
+      const writes: DbWrite[] = [];
+      const { deps } = createDeps(createFakeDb({ writes }));
+      deps.config = {
+        ...config,
+        DISCORD_BOT_TOKEN: 'token',
+        DISCORD_ENABLED: true,
+        DISCORD_DIGEST_CHANNEL_ID: 'chan-digest',
+      };
+      const postChannelMessage = vi.fn(
+        async (_channelId: string, _text: string) => ({ id: 'm1' }),
+      );
+      deps.notify = { postChannelMessage } as unknown as NonNullable<
+        Deps['notify']
+      >;
+      const app = buildServer(deps);
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/digest/weekly',
+        headers: { 'x-api-key': 'test-key' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({
+        discord: 'sent',
+        email: 'skipped: no digest email recipient configured',
+        week: { submitted: 0, ingested: 0, deadlines: 0, inPlay: 0 },
+      });
+      expect(postChannelMessage).toHaveBeenCalledTimes(1);
+      const [channelId, message] = postChannelMessage.mock.calls[0] as [
+        string,
+        string,
+      ];
+      expect(channelId).toBe('chan-digest');
+      expect(message).toContain('**Sower weekly**');
+      // Read-only by contract: the digest run never mutates state.
+      expect(writes).toEqual([]);
+    });
+  });
+
   describe('POST /tasks/:id/verify-form', () => {
     const TASK_ID = '7d8e9f10-1112-4314-a516-b71819c2d2e2';
     const discoveredSpec = {

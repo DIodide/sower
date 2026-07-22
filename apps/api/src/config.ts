@@ -99,6 +99,18 @@ const envSchema = z
      */
     DISCORD_ALERT_MENTION_USER_ID: z.string().optional(),
     /**
+     * Channel the weekly digest posts to. Like the alerts channel, unset
+     * keeps the digest's Discord leg dormant: POST /digest/weekly reports
+     * that leg 'skipped' until infra wires the id.
+     */
+    DISCORD_DIGEST_CHANNEL_ID: z.string().optional(),
+    /**
+     * Address the weekly digest email goes to. Optional — unset keeps the
+     * digest's email leg dormant (the Gmail triple below must also be
+     * configured for a send to happen).
+     */
+    DIGEST_EMAIL_TO: z.string().optional(),
+    /**
      * Public base URL of the sower-dashboard Cloud Run service (e.g.
      * https://sower-dashboard-....run.app). Used to render task links in
      * Discord ingest replies; when unset the replies degrade gracefully to

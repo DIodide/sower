@@ -26,6 +26,7 @@ import {
   syncTaskCalendarEvent,
 } from './calendar-sync.js';
 import { runDeadlineAlerts } from './deadline-alerts.js';
+import { runWeeklyDigest } from './digest.js';
 import { markApprovalCardSubmitted, registerDiscordRoutes } from './discord.js';
 import {
   classifyMany,
@@ -1777,6 +1778,17 @@ export function buildServer(deps: Deps): FastifyInstance {
   // No-op {enabled:false} until DISCORD_ALERTS_CHANNEL_ID is wired.
   app.post('/alerts/deadlines', async () => {
     return runDeadlineAlerts(deps);
+  });
+
+  // Weekly pipeline digest: builds the digest ONCE, then delivers it over
+  // two independent legs — the Discord digest channel (needs Discord +
+  // DISCORD_DIGEST_CHANNEL_ID) and a Gmail-sent email (needs DIGEST_EMAIL_TO
+  // + the Gmail OAuth triple). Each leg reports 'sent' | 'skipped: …' |
+  // 'failed: …'; a failed leg never blocks the other and the route always
+  // 200s (failures are logged server-side). Read-only — a manual re-POST
+  // just re-sends the same digest.
+  app.post('/digest/weekly', async () => {
+    return runWeeklyDigest(deps);
   });
 
   // Poll Gmail for post-application follow-up mail (OA invites, interview
