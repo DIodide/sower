@@ -23,14 +23,14 @@ import {
 import type { Deps } from './types.js';
 
 /**
- * Post-application follow-up routes: CRUD + transitions for the things that
- * arrive AFTER an application was sent (OA invites, interview requests,
- * recruiter mail, offers, rejections). Every write annotates the PARENT
- * task's timeline (FOLLOWUP_CREATED/FOLLOWUP_UPDATED/FOLLOWUP_STATE events)
- * without ever touching the parent's state machine, and every due-date /
- * state change re-syncs the follow-up's own Google Calendar event (self-
- * gated, never throws). All routes require x-api-key via the server-wide
- * preHandler.
+ * Post-application follow-up routes: CRUD + transitions + reassignment for
+ * the things that arrive AFTER an application was sent (OA invites,
+ * interview requests, recruiter mail, offers, rejections). Every write
+ * annotates the PARENT task's timeline (FOLLOWUP_CREATED/FOLLOWUP_UPDATED/
+ * FOLLOWUP_STATE/FOLLOWUP_REASSIGNED events) without ever touching the
+ * parent's state machine, and every due-date / state change re-syncs the
+ * follow-up's own Google Calendar event (self-gated, never throws). All
+ * routes require x-api-key via the server-wide preHandler.
  */
 
 const taskParamsSchema = z.object({
@@ -120,6 +120,10 @@ const patchBodySchema = z
 
 const transitionBodySchema = z.object({
   event: z.enum(FOLLOWUP_EVENTS),
+});
+
+const reassignBodySchema = z.object({
+  taskId: z.string().uuid(),
 });
 
 /**
@@ -391,6 +395,71 @@ export function registerFollowupRoutes(app: FastifyInstance, deps: Deps): void {
     // date → noop). Self-gated, never throws.
     const outcome = await syncFollowupCalendarEvent(deps, followupId);
     followup = withSyncedEventId(followup, outcome);
+    return reply.code(200).send({ followup });
+  });
+
+  // Move a follow-up to a DIFFERENT application — the inbox poll's matcher
+  // can pick the wrong same-company task. The target may be in ANY state
+  // (the user is explicitly overriding the matcher); both tasks' timelines
+  // record FOLLOWUP_REASSIGNED so the move is visible from either side.
+  app.post('/followups/:id/reassign', async (request, reply) => {
+    const params = idParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid followup id', issues: params.error.issues });
+    }
+    const body = reassignBodySchema.safeParse(request.body);
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid body', issues: body.error.issues });
+    }
+    const followupId = params.data.id;
+    const rows = await deps.db
+      .select()
+      .from(followups)
+      .where(eq(followups.id, followupId))
+      .limit(1);
+    const existing = rows[0];
+    if (!existing) {
+      return reply.code(404).send({ error: 'followup not found' });
+    }
+    const targetId = body.data.taskId;
+    const targets = await deps.db
+      .select({ id: applicationTasks.id })
+      .from(applicationTasks)
+      .where(eq(applicationTasks.id, targetId))
+      .limit(1);
+    if (!targets[0]) {
+      return reply.code(404).send({ error: 'task not found' });
+    }
+    if (targetId === existing.taskId) {
+      // Already there: succeed without noise events or a pointless sync.
+      return reply.code(200).send({ followup: existing });
+    }
+    const updated = await deps.db
+      .update(followups)
+      .set({ taskId: targetId, updatedAt: new Date() })
+      .where(eq(followups.id, followupId))
+      .returning();
+    let followup = updated[0];
+    if (!followup) {
+      return reply.code(500).send({ error: 'failed to reassign follow-up' });
+    }
+    const data = { followupId, from: existing.taskId, to: targetId };
+    await deps.db
+      .insert(events)
+      .values({ taskId: existing.taskId, type: 'FOLLOWUP_REASSIGNED', data });
+    await deps.db
+      .insert(events)
+      .values({ taskId: targetId, type: 'FOLLOWUP_REASSIGNED', data });
+    if (followup.calendarEventId !== null || followup.dueDate !== null) {
+      // The event summary names the parent's company — rebuild it under
+      // the new task. Self-gated, never throws by contract.
+      const outcome = await syncFollowupCalendarEvent(deps, followupId);
+      followup = withSyncedEventId(followup, outcome);
+    }
     return reply.code(200).send({ followup });
   });
 }

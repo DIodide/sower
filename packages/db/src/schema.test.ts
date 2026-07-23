@@ -136,6 +136,7 @@ describe('schema', () => {
       'kind',
       'notes',
       'source',
+      'source_body',
       'source_ref',
       'state',
       'task_id',
@@ -159,6 +160,8 @@ describe('schema', () => {
     expect(followups.dueDate.columnType).toBe('PgTimestamp');
     // Null for manual rows; the Gmail message id for email-ingested ones.
     expect(followups.sourceRef.notNull).toBe(false);
+    // Null except for email rows, where the ingest stores the plain text.
+    expect(followups.sourceBody.notNull).toBe(false);
     // Absent until the calendar sync creates an event, nulled on delete.
     expect(followups.calendarEventId.notNull).toBe(false);
     expect(followups.createdAt.notNull).toBe(true);

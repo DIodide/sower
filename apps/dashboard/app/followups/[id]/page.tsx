@@ -1,7 +1,7 @@
 import type { FollowupEvent } from '@sower/core';
 import { FOLLOWUP_ALLOWED } from '@sower/core';
 import { applicationTasks, events, followups, jobs } from '@sower/db';
-import { asc, eq } from 'drizzle-orm';
+import { asc, desc, eq, inArray } from 'drizzle-orm';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import type { ReactNode } from 'react';
@@ -26,6 +26,7 @@ import { Badge } from '../../tasks/[id]/ui';
 import { saveFollowupDueDate, saveFollowupNotes } from '../actions';
 import { FollowupKindBadge, FollowupStateBadge } from '../ui';
 import { FollowupActions } from './followup-actions';
+import { ReassignControl } from './reassign-control';
 
 export const dynamic = 'force-dynamic';
 
@@ -118,7 +119,7 @@ export default async function FollowupPage({
   const followup = followupRows[0];
   if (!followup) notFound();
 
-  const [taskRows, eventRows] = await Promise.all([
+  const [taskRows, eventRows, sentRows] = await Promise.all([
     db
       .select({
         id: applicationTasks.id,
@@ -137,9 +138,38 @@ export default async function FollowupPage({
       .from(events)
       .where(eq(events.taskId, followup.taskId))
       .orderBy(asc(events.createdAt)),
+    // Reassign candidates: every sent application (the only tasks a
+    // follow-up sensibly belongs to), newest activity first.
+    db
+      .select({
+        id: applicationTasks.id,
+        jobSpec: applicationTasks.jobSpec,
+        company: jobs.company,
+        title: jobs.title,
+        url: jobs.url,
+      })
+      .from(applicationTasks)
+      .leftJoin(jobs, eq(applicationTasks.jobId, jobs.id))
+      .where(inArray(applicationTasks.state, ['SUBMITTED', 'CONFIRMED']))
+      .orderBy(desc(applicationTasks.updatedAt)),
   ]);
   const task = taskRows[0];
   if (!task) notFound();
+
+  // The current task heads the candidate list even when it is no longer in
+  // a sent state, so the select always shows where the follow-up is now.
+  const candidates = [
+    task,
+    ...sentRows.filter((row) => row.id !== task.id),
+  ].map((row) => ({
+    id: row.id,
+    label: rowLabel({
+      company: row.company,
+      title: row.title,
+      jobSpec: row.jobSpec,
+      url: row.url,
+    }),
+  }));
 
   // This follow-up's slice of the parent task's timeline: the events whose
   // data names it (FOLLOWUP_CREATED / FOLLOWUP_STATE / FOLLOWUP_UPDATED).
@@ -184,7 +214,9 @@ export default async function FollowupPage({
             </Badge>
           ) : null}
         </div>
-        <p className="hint" style={{ margin: '0.375rem 0 0' }}>
+        {/* div, not p: the reassign affordance expands into a form/select,
+            which phrasing content cannot legally contain. */}
+        <div className="hint" style={{ margin: '0.375rem 0 0' }}>
           for{' '}
           <Link href={`/tasks/${task.id}`}>
             {rowLabel({
@@ -194,8 +226,13 @@ export default async function FollowupPage({
               url: task.url,
             })}
           </Link>{' '}
-          <StateBadge state={task.state} />
-        </p>
+          <StateBadge state={task.state} />{' '}
+          <ReassignControl
+            followupId={followup.id}
+            currentTaskId={task.id}
+            candidates={candidates}
+          />
+        </div>
 
         {/* The user's note — the task header's exact treatment: labeled,
             always editable with instant save, in every state. */}
@@ -294,6 +331,19 @@ export default async function FollowupPage({
           ) : null}
         </div>
       </section>
+
+      {/* ---- the email this follow-up was created from, when stored ---- */}
+      {followup.sourceBody ? (
+        <details className="panel">
+          <summary>
+            Source email <span className="hint">as received</span>
+          </summary>
+          <div className="panel-body">
+            {/* UNTRUSTED text: rendered ONLY as a React string, never HTML. */}
+            <pre className="source-email">{followup.sourceBody}</pre>
+          </div>
+        </details>
+      ) : null}
 
       {/* ---- history: the parent timeline's slice about this follow-up ---- */}
       <details className="panel">

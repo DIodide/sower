@@ -7,9 +7,10 @@ import type { Deps } from './types.js';
 /**
  * /followups routes against a fake db: create (parent 404, RECEIVED +
  * source manual, FOLLOWUP_CREATED event, ET-midnight dueDate, calendar
- * sync), detail join shape, PATCH field semantics + FOLLOWUP_UPDATED, and
- * the transition endpoint's 409-with-allowed-events contract. The calendar
- * sync itself is proven in calendar-sync.test.ts and mocked here.
+ * sync), detail join shape, PATCH field semantics + FOLLOWUP_UPDATED, the
+ * transition endpoint's 409-with-allowed-events contract, and reassignment
+ * (both timelines annotated, conditional re-sync). The calendar sync
+ * itself is proven in calendar-sync.test.ts and mocked here.
  */
 
 const calendarState = vi.hoisted(() => ({
@@ -133,6 +134,7 @@ function followupRow(overrides: Partial<Record<string, unknown>> = {}) {
     dueDate: null,
     source: 'manual',
     sourceRef: null,
+    sourceBody: null,
     calendarEventId: null,
     createdAt: new Date('2026-07-18T12:00:00Z'),
     updatedAt: new Date('2026-07-18T12:00:00Z'),
@@ -593,6 +595,142 @@ describe('POST /followups/:id/transition', () => {
     };
     expect(body.followup.state).toBe('ACTION_NEEDED');
     expect(body.followup.calendarEventId).toBe('evt-2');
+    await app.close();
+  });
+});
+
+describe('POST /followups/:id/reassign', () => {
+  const TARGET_TASK_ID = 'aaaaaaaa-0000-4000-8000-000000000002';
+
+  it('rejects a non-uuid target with 400', async () => {
+    const app = buildServer(createDeps(createFakeDb()));
+    const response = await app.inject({
+      method: 'POST',
+      url: `/followups/${FOLLOWUP_ID}/reassign`,
+      headers: AUTH,
+      payload: { taskId: 'not-a-uuid' },
+    });
+    expect(response.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it('404s on an unknown follow-up', async () => {
+    const app = buildServer(createDeps(createFakeDb({ selectResults: [[]] })));
+    const response = await app.inject({
+      method: 'POST',
+      url: `/followups/${FOLLOWUP_ID}/reassign`,
+      headers: AUTH,
+      payload: { taskId: TARGET_TASK_ID },
+    });
+    expect(response.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it('404s on an unknown target task, writing nothing', async () => {
+    const writes: DbWrite[] = [];
+    const app = buildServer(
+      createDeps(
+        createFakeDb({ selectResults: [[followupRow()], []], writes }),
+      ),
+    );
+    const response = await app.inject({
+      method: 'POST',
+      url: `/followups/${FOLLOWUP_ID}/reassign`,
+      headers: AUTH,
+      payload: { taskId: TARGET_TASK_ID },
+    });
+    expect(response.statusCode).toBe(404);
+    expect((response.json() as { error: string }).error).toBe('task not found');
+    expect(writes).toHaveLength(0);
+    await app.close();
+  });
+
+  it('moves the follow-up, annotates BOTH timelines, and skips the sync with no due date or event', async () => {
+    const writes: DbWrite[] = [];
+    const db = createFakeDb({
+      selectResults: [[followupRow()], [{ id: TARGET_TASK_ID }]],
+      updateResults: [[followupRow({ taskId: TARGET_TASK_ID })]],
+      writes,
+    });
+    const app = buildServer(createDeps(db));
+    const response = await app.inject({
+      method: 'POST',
+      url: `/followups/${FOLLOWUP_ID}/reassign`,
+      headers: AUTH,
+      payload: { taskId: TARGET_TASK_ID },
+    });
+    expect(response.statusCode).toBe(200);
+    const update = writes.find((w) => w.method === 'update');
+    expect(update?.table).toBe(followups);
+    expect(update?.arg).toMatchObject({ taskId: TARGET_TASK_ID });
+    const eventWrites = writes.filter(
+      (w) => w.method === 'insert' && w.table === events,
+    );
+    const data = {
+      followupId: FOLLOWUP_ID,
+      from: TASK_ID,
+      to: TARGET_TASK_ID,
+    };
+    expect(eventWrites.map((w) => w.arg)).toEqual([
+      { taskId: TASK_ID, type: 'FOLLOWUP_REASSIGNED', data },
+      { taskId: TARGET_TASK_ID, type: 'FOLLOWUP_REASSIGNED', data },
+    ]);
+    expect(calendarState.calls).toEqual([]);
+    const body = response.json() as { followup: { taskId: string } };
+    expect(body.followup.taskId).toBe(TARGET_TASK_ID);
+    await app.close();
+  });
+
+  it('re-syncs the calendar event when one exists (its summary names the company)', async () => {
+    calendarState.result = { kind: 'updated', eventId: 'evt-1' };
+    const db = createFakeDb({
+      selectResults: [
+        [
+          followupRow({
+            dueDate: new Date('2026-08-04T04:00:00.000Z'),
+            calendarEventId: 'evt-1',
+          }),
+        ],
+        [{ id: TARGET_TASK_ID }],
+      ],
+      updateResults: [
+        [
+          followupRow({
+            taskId: TARGET_TASK_ID,
+            dueDate: new Date('2026-08-04T04:00:00.000Z'),
+            calendarEventId: 'evt-1',
+          }),
+        ],
+      ],
+    });
+    const app = buildServer(createDeps(db));
+    const response = await app.inject({
+      method: 'POST',
+      url: `/followups/${FOLLOWUP_ID}/reassign`,
+      headers: AUTH,
+      payload: { taskId: TARGET_TASK_ID },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(calendarState.calls).toEqual([FOLLOWUP_ID]);
+    await app.close();
+  });
+
+  it('reassigning to the current task is a clean no-op: no update, no events, no sync', async () => {
+    const writes: DbWrite[] = [];
+    const db = createFakeDb({
+      selectResults: [[followupRow()], [{ id: TASK_ID }]],
+      writes,
+    });
+    const app = buildServer(createDeps(db));
+    const response = await app.inject({
+      method: 'POST',
+      url: `/followups/${FOLLOWUP_ID}/reassign`,
+      headers: AUTH,
+      payload: { taskId: TASK_ID },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(writes).toHaveLength(0);
+    expect(calendarState.calls).toEqual([]);
     await app.close();
   });
 });

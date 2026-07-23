@@ -204,6 +204,14 @@ export const followups = pgTable(
      */
     sourceRef: text('source_ref'),
     /**
+     * The source email for source 'email' rows: a From/Subject/Date header
+     * block plus the sanitized PLAIN-TEXT body, capped at 20k chars, so the
+     * dashboard can show what the classifier read. UNTRUSTED text — stored
+     * and rendered as text only, never as HTML. Null for manual/discord
+     * rows (and email rows ingested before the column existed).
+     */
+    sourceBody: text('source_body'),
+    /**
      * Google Calendar event mirroring due_date — upserted by the api's
      * calendar sync, deleted when the follow-up is DONE/DISMISSED or the
      * due date is cleared. Null when no event exists.

@@ -223,6 +223,40 @@ export async function transitionFollowup(
   return { ok: true, message: TRANSITION_MESSAGES[eventParse.data] };
 }
 
+/**
+ * Move a follow-up to a different application via the api service. Both the
+ * old and new tasks' panels change; the detail page, the target task page,
+ * and the home list are revalidated (the client refreshes for the rest).
+ */
+export async function reassignFollowup(
+  followupId: string,
+  taskId: string,
+): Promise<ActionResult> {
+  const idParse = uuidSchema.safeParse(followupId);
+  if (!idParse.success) return { ok: false, message: 'invalid follow-up id.' };
+  const taskParse = uuidSchema.safeParse(taskId);
+  if (!taskParse.success) return { ok: false, message: 'invalid task id.' };
+  const result = await callFollowupApi(
+    `/followups/${idParse.data}/reassign`,
+    'POST',
+    { taskId: taskParse.data },
+  );
+  if (!result.ok) {
+    if (result.status === 404) {
+      return {
+        ok: false,
+        message:
+          'that application no longer exists — refresh and pick another.',
+      };
+    }
+    return { ok: false, message: `move failed: ${result.message}` };
+  }
+  revalidatePath(`/followups/${idParse.data}`);
+  revalidatePath(`/tasks/${taskParse.data}`);
+  revalidatePath('/');
+  return { ok: true, message: 'moved to the selected application.' };
+}
+
 const apiResponseSchema = z.object({
   followup: z.unknown().optional(),
   error: z.string().optional(),

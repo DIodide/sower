@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
 import {
   allowedFollowupUrl,
+  emailBodyToPlainText,
+  emailSourceBody,
   type FollowupMailbox,
   runFollowupInboxPoll,
 } from './inbox-followups.js';
@@ -154,6 +156,13 @@ function akunaMessage(id = 'm1'): GmailMessageSummary {
   };
 }
 
+/** The header + body emailSourceBody derives from akunaMessage(). */
+const AKUNA_SOURCE_BODY =
+  'From: Akuna Capital <no-reply@hackerrankforwork.com>\n' +
+  'Subject: Akuna Capital - Online Assessment Invitation\n' +
+  'Date: 2026-07-18T15:00:00.000Z\n\n' +
+  'Please complete your coding challenge within 7 days: https://www.hackerrankforwork.com/tests/abc123/login';
+
 /** The followups row the fake insert returns. */
 function createdRow(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -167,6 +176,7 @@ function createdRow(overrides: Partial<Record<string, unknown>> = {}) {
     dueDate: new Date('2026-07-25T04:00:00.000Z'),
     source: 'email',
     sourceRef: 'm1',
+    sourceBody: AKUNA_SOURCE_BODY,
     calendarEventId: null,
     createdAt: new Date('2026-07-18T16:00:00Z'),
     updatedAt: new Date('2026-07-18T16:00:00Z'),
@@ -174,7 +184,9 @@ function createdRow(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
-const SENT_TASKS = [{ taskId: TASK_ID, company: 'Akuna Capital' }];
+const SENT_TASKS = [
+  { taskId: TASK_ID, company: 'Akuna Capital', title: 'SWE Intern' },
+];
 
 beforeEach(() => {
   calendarState.calls = [];
@@ -241,6 +253,7 @@ describe('runFollowupInboxPoll', () => {
       dueDate: new Date('2026-07-25T04:00:00.000Z'),
       source: 'email',
       sourceRef: 'm1',
+      sourceBody: AKUNA_SOURCE_BODY,
     });
     const eventWrite = writes.find(
       (w) => w.method === 'insert' && w.table === events,
@@ -344,6 +357,127 @@ describe('runFollowupInboxPoll', () => {
       skipped: 2,
     });
     expect(writes).toHaveLength(0);
+  });
+
+  it('lands generic recruiting mail on the real application, not the fresher same-company event task', async () => {
+    const EVENT_TASK_ID = 'aaaaaaaa-0000-4000-8000-000000000002';
+    // Most-recently-updated first: the event registration would win the old
+    // freshest-task rule (the live Jane Street misfile).
+    const tasks = [
+      {
+        taskId: EVENT_TASK_ID,
+        company: 'Jane Street',
+        title: 'Mystery Planet in NYC (Event Registration)',
+      },
+      {
+        taskId: TASK_ID,
+        company: 'Jane Street',
+        title: 'Software Engineer Internship',
+      },
+    ];
+    const writes: DbWrite[] = [];
+    const db = createFakeDb({
+      selectResults: [tasks, []],
+      insertResults: [[createdRow()], []],
+      writes,
+    });
+    const mailbox = createMailbox([
+      {
+        id: 'm6',
+        subject: 'Jane Street — an update on your application',
+        from: 'Jane Street Recruiting <no-reply@janestreet.com>',
+        receivedAt: new Date('2026-07-18T15:00:00Z'),
+        bodyText: 'A recruiter will reach out with next steps.',
+      },
+    ]);
+
+    const result = await runFollowupInboxPoll(createDeps({ db }), mailbox);
+
+    expect(result.created).toBe(1);
+    const followupWrite = writes.find(
+      (w) => w.method === 'insert' && w.table === followups,
+    );
+    expect(followupWrite?.arg).toMatchObject({ taskId: TASK_ID });
+  });
+
+  it('steers mail naming a role to that application by title overlap, not recency', async () => {
+    const PLATFORM_TASK_ID = 'aaaaaaaa-0000-4000-8000-000000000003';
+    const tasks = [
+      {
+        taskId: TASK_ID,
+        company: 'Initech',
+        title: 'Software Engineer Internship',
+      },
+      {
+        taskId: PLATFORM_TASK_ID,
+        company: 'Initech',
+        title: 'Platform Engineer Internship',
+      },
+    ];
+    const writes: DbWrite[] = [];
+    const db = createFakeDb({
+      selectResults: [tasks, []],
+      insertResults: [[createdRow()], []],
+      writes,
+    });
+    const mailbox = createMailbox([
+      {
+        id: 'm7',
+        subject: 'Interview — Platform Engineer',
+        from: 'recruiting@initech.com',
+        receivedAt: new Date('2026-07-18T15:00:00Z'),
+        bodyText:
+          'We would like to schedule an interview for the Platform Engineer role.',
+      },
+    ]);
+
+    const result = await runFollowupInboxPoll(createDeps({ db }), mailbox);
+
+    expect(result.created).toBe(1);
+    const followupWrite = writes.find(
+      (w) => w.method === 'insert' && w.table === followups,
+    );
+    expect(followupWrite?.arg).toMatchObject({ taskId: PLATFORM_TASK_ID });
+  });
+
+  it('still attaches event mail to the event task when its title overlap strictly wins', async () => {
+    const EVENT_TASK_ID = 'aaaaaaaa-0000-4000-8000-000000000002';
+    const tasks = [
+      {
+        taskId: EVENT_TASK_ID,
+        company: 'Jane Street',
+        title: 'Mystery Planet in NYC (Event Registration)',
+      },
+      {
+        taskId: TASK_ID,
+        company: 'Jane Street',
+        title: 'Software Engineer Internship',
+      },
+    ];
+    const writes: DbWrite[] = [];
+    const db = createFakeDb({
+      selectResults: [tasks, []],
+      insertResults: [[createdRow()], []],
+      writes,
+    });
+    const mailbox = createMailbox([
+      {
+        id: 'm8',
+        subject: 'Mystery Planet in NYC — registration confirmed',
+        from: 'events@janestreet.com',
+        receivedAt: new Date('2026-07-18T15:00:00Z'),
+        bodyText:
+          'Thanks for registering. We look forward to this opportunity to meet you at our Mystery Planet event.',
+      },
+    ]);
+
+    const result = await runFollowupInboxPoll(createDeps({ db }), mailbox);
+
+    expect(result.created).toBe(1);
+    const followupWrite = writes.find(
+      (w) => w.method === 'insert' && w.table === followups,
+    );
+    expect(followupWrite?.arg).toMatchObject({ taskId: EVENT_TASK_ID });
   });
 
   it('treats a lost insert race (ON CONFLICT DO NOTHING) as a skip: no event, no sync, no note', async () => {
@@ -452,6 +586,42 @@ describe('runFollowupInboxPoll', () => {
     expect(result.created).toBe(1);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+describe('emailSourceBody', () => {
+  it('prefixes From/Subject/Date and keeps a plain-text body verbatim', () => {
+    expect(emailSourceBody(akunaMessage())).toBe(AKUNA_SOURCE_BODY);
+  });
+
+  it('caps the stored text at 20k chars', () => {
+    const message = { ...akunaMessage(), bodyText: 'x'.repeat(30_000) };
+    const body = emailSourceBody(message);
+    expect(body).toHaveLength(20_000);
+    expect(body.startsWith('From: Akuna Capital')).toBe(true);
+  });
+
+  it('reports a missing receivedAt as unknown', () => {
+    const body = emailSourceBody({ ...akunaMessage(), receivedAt: null });
+    expect(body).toContain('Date: unknown\n');
+  });
+});
+
+describe('emailBodyToPlainText', () => {
+  it('strips tags (style/script wholesale), decodes entities, and collapses blank runs', () => {
+    expect(
+      emailBodyToPlainText(
+        '<div style="font-family: Arial"><p>You&#39;re invited &amp; welcome.</p><br>' +
+          '<p>See you &lt;soon&gt;&nbsp;&mdash; the team</p>' +
+          '<style>p { color: red }</style><script>alert("x")</script></div>',
+      ),
+    ).toBe("You're invited & welcome.\n\nSee you <soon> — the team");
+  });
+
+  it('leaves unknown entities and invalid numeric references intact', () => {
+    expect(emailBodyToPlainText('a &bogus; b &#xdddddddd; c')).toBe(
+      'a &bogus; b &#xdddddddd; c',
+    );
   });
 });
 

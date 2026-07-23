@@ -343,6 +343,7 @@ const EVENT_LABELS: Record<string, string> = {
   FOLLOWUP_CREATED: 'Follow-up added',
   FOLLOWUP_STATE: 'Follow-up state changed',
   FOLLOWUP_UPDATED: 'Follow-up edited',
+  FOLLOWUP_REASSIGNED: 'Follow-up moved to a different application',
 };
 
 /**

@@ -30,9 +30,11 @@ import type { Deps } from './types.js';
  * followups rows. Fully dormant until the Gmail OAuth triple
  * (GMAIL_CLIENT_ID/SECRET/REFRESH_TOKEN) is configured.
  *
- * Email content is UNTRUSTED input: only the classifier's extracted fields
- * (kind/title/url/dueDate) are ever stored — never raw bodies or HTML —
- * and the url is re-validated here against the same host allowlists.
+ * Email content is UNTRUSTED input: the classifier's extracted fields
+ * (kind/title/url/dueDate) are re-validated (url against the same host
+ * allowlists), and the message itself is stored ONLY as sanitized plain
+ * TEXT in source_body (tags stripped, never HTML) for the dashboard's
+ * "Source email" view.
  */
 
 /** Simple-on-purpose: recent primary-inbox mail; matching happens here. */
@@ -104,15 +106,19 @@ function normalizeText(text: string): string {
 }
 
 /**
- * Company-name tokens usable for matching: lowercased, punctuation
- * stripped, and ≥4 chars — short tokens ("ai", "the", "inc") match far too
- * much mail to be evidence of anything.
+ * Company-name / job-title tokens usable for matching: lowercased,
+ * punctuation stripped, deduped, and ≥4 chars — short tokens ("ai", "the",
+ * "inc") match far too much mail to be evidence of anything.
  */
-function companyTokens(company: string): string[] {
-  return company
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter((token) => token.length >= 4);
+function matchTokens(text: string): string[] {
+  return [
+    ...new Set(
+      text
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+        .filter((token) => token.length >= 4),
+    ),
+  ];
 }
 
 /** The sender's domain as addressed (dots intact), lowercased. */
@@ -150,17 +156,35 @@ function fromDomainFlat(from: string): string {
 interface SentTask {
   taskId: string;
   company: string;
+  /** Company tokens — the sender-anchored gate. */
   tokens: string[];
+  /** Job-title tokens (same normalization) — the overlap tiebreaker. */
+  titleTokens: string[];
+  /** Title marks a non-application (event registration, newsletter, …). */
+  nonApplication: boolean;
 }
 
 /**
- * Match one message to a sent application. Two paths, both anchored on the
- * SENDER, never on message content alone:
+ * Titles that mark a task as something other than a real application. Such
+ * a task only wins the match on a STRICTLY higher title-overlap score —
+ * never on a zero-zero tie, where generic recruiting mail must land on a
+ * real application, not the company's freshest event registration.
+ */
+const NON_APPLICATION_TITLE_RE =
+  /\b(?:event|registration|newsletter|kickoff)\b/i;
+
+/**
+ * Match one message to a sent application. The sender gate first — two
+ * paths, both anchored on the SENDER, never on message content alone:
  *  - the company token appears in the from-domain (the company's own mail),
  *  - or the sender is a trusted assessment/scheduling/ATS domain, in which
  *    case a whole-word company token in the subject/body attaches it.
- * Tasks arrive most-recently-updated first, so ambiguity resolves to the
- * freshest application. Null when nothing matches — unmatched mail is
+ * Among the gated company's tasks the message then lands on the highest
+ * job-title-token overlap with the subject+body, so "Platform Engineer"
+ * mail reaches the Platform Engineer application rather than whichever
+ * task was updated last; ties resolve to the most recently updated (the
+ * array order), except that a non-application task never wins a tie (see
+ * NON_APPLICATION_TITLE_RE). Null when nothing matches — unmatched mail is
  * never stored.
  */
 function matchTask(
@@ -174,20 +198,110 @@ function matchTask(
   // Trust is judged on the dotted domain (exact host or dot-suffix match);
   // the flattened form exists only for company-token containment.
   const trustedSender = isTrustedSenderDomain(fromDomain(message.from));
-  const text = trustedSender
-    ? normalizeText(`${message.subject}\n${message.bodyText}`)
-    : '';
+  const text = normalizeText(`${message.subject}\n${message.bodyText}`);
+  let best: SentTask | null = null;
+  let bestScore = -1;
   for (const task of tasks) {
-    for (const token of task.tokens) {
-      if (
+    const gated = task.tokens.some(
+      (token) =>
         domain.includes(token) ||
-        (trustedSender && text.includes(` ${token} `))
-      ) {
-        return task;
-      }
+        (trustedSender && text.includes(` ${token} `)),
+    );
+    if (!gated) {
+      continue;
+    }
+    const score = task.titleTokens.filter((token) =>
+      text.includes(` ${token} `),
+    ).length;
+    if (
+      best === null ||
+      score > bestScore ||
+      (score === bestScore && best.nonApplication && !task.nonApplication)
+    ) {
+      best = task;
+      bestScore = score;
     }
   }
-  return null;
+  return best;
+}
+
+/** source_body cap — mirrors the notes cap; ample for any real email. */
+const SOURCE_BODY_MAX_CHARS = 20_000;
+
+/** The named entities that actually occur in recruiting mail markup. */
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  apos: "'",
+  nbsp: ' ',
+  rsquo: '’',
+  lsquo: '‘',
+  rdquo: '”',
+  ldquo: '“',
+  mdash: '—',
+  ndash: '–',
+  hellip: '…',
+  copy: '©',
+  reg: '®',
+  trade: '™',
+};
+
+/**
+ * Reduce a Gmail bodyText blob to plain text. collectBodies (@sower/inbox)
+ * joins EVERY decoded text/* part — text/html included — so residual
+ * markup is expected: drop style/script/comment blocks wholesale, turn
+ * breaks and block closers into newlines, strip every remaining tag,
+ * decode the common entities, and collapse blank runs. The output is still
+ * UNTRUSTED text — safe only because it is stored and rendered as TEXT.
+ */
+export function emailBodyToPlainText(bodyText: string): string {
+  const stripped = bodyText
+    .replace(/<(style|script)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(?:p|div|tr|li|h[1-6]|table|ul|ol|blockquote)\s*>/gi, '\n')
+    .replace(/<[^>]*>/g, ' ');
+  const decoded = stripped.replace(
+    /&(#x?[0-9a-f]+|[a-z]+);/gi,
+    (whole, entity: string) => {
+      if (entity.startsWith('#')) {
+        const code =
+          entity[1]?.toLowerCase() === 'x'
+            ? Number.parseInt(entity.slice(2), 16)
+            : Number.parseInt(entity.slice(1), 10);
+        return Number.isNaN(code) || code < 0 || code > 0x10ffff
+          ? whole
+          : String.fromCodePoint(code);
+      }
+      return NAMED_ENTITIES[entity.toLowerCase()] ?? whole;
+    },
+  );
+  return decoded
+    .replace(/\r/g, '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/ ?\n ?/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
+ * What a created follow-up stores as its source_body: a small
+ * From/Subject/Date header block plus the sanitized plain-text body,
+ * capped. Verbatim untrusted TEXT — the dashboard renders it as a string,
+ * never as HTML.
+ */
+export function emailSourceBody(message: GmailMessageSummary): string {
+  const header = [
+    `From: ${message.from}`,
+    `Subject: ${message.subject}`,
+    `Date: ${message.receivedAt ? message.receivedAt.toISOString() : 'unknown'}`,
+  ].join('\n');
+  return `${header}\n\n${emailBodyToPlainText(message.bodyText)}`.slice(
+    0,
+    SOURCE_BODY_MAX_CHARS,
+  );
 }
 
 /**
@@ -285,7 +399,11 @@ export async function runFollowupInboxPoll(
   // Most-recently-updated first so an ambiguous match lands on the
   // freshest application.
   const taskRows = await db
-    .select({ taskId: applicationTasks.id, company: jobs.company })
+    .select({
+      taskId: applicationTasks.id,
+      company: jobs.company,
+      title: jobs.title,
+    })
     .from(applicationTasks)
     .innerJoin(jobs, eq(applicationTasks.jobId, jobs.id))
     .where(inArray(applicationTasks.state, [...SENT_STATES]))
@@ -296,9 +414,16 @@ export async function runFollowupInboxPoll(
     if (!company) {
       continue;
     }
-    const tokens = companyTokens(company);
+    const tokens = matchTokens(company);
     if (tokens.length > 0) {
-      tasks.push({ taskId: row.taskId, company, tokens });
+      const title = row.title ?? '';
+      tasks.push({
+        taskId: row.taskId,
+        company,
+        tokens,
+        titleTokens: matchTokens(title),
+        nonApplication: NON_APPLICATION_TITLE_RE.test(title),
+      });
     }
   }
 
@@ -361,6 +486,7 @@ export async function runFollowupInboxPoll(
         dueDate,
         source: 'email',
         sourceRef: id,
+        sourceBody: emailSourceBody(message),
       })
       .onConflictDoNothing()
       .returning();

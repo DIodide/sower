@@ -2091,6 +2091,38 @@ details.show-more[open] > summary .show-more-open {
   }
 }
 
+/* the follow-up detail page's stored source email: untrusted plain text,
+   wrapped, scroll-capped (the .latex-log idiom, but prose wraps) */
+.source-email {
+  margin: 0;
+  padding: 0.5rem 0.625rem;
+  background: var(--well);
+  border: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: auto;
+  max-height: 20rem;
+}
+
+/* the header's quiet "wrong application?" reassign affordance */
+button.reassign-hint {
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: 0.75rem;
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+
+button.reassign-hint:hover {
+  color: var(--accent-deep);
+  text-decoration: underline;
+}
+
 /* --------------------------------------------------------- resume workspace */
 
 /* Two panes — the compiled PDF and the tabbed editor — that stack when the
