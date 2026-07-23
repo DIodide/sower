@@ -183,6 +183,8 @@ function createNotify(): Notifier {
     addReaction: vi.fn(async () => {}),
     postChannelMessage: vi.fn(async () => ({ id: 'reply-1' })),
     editChannelMessage: vi.fn(async () => {}),
+    getChannelMessage: vi.fn(async () => ({ id: 'reply-1' })),
+    deleteChannelMessage: vi.fn(async () => {}),
   };
 }
 

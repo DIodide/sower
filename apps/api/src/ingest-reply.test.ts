@@ -1,7 +1,13 @@
 import type { JobSpec } from '@sower/core';
 import type { Job } from '@sower/db';
+import type { ChannelMessagePayload, DiscordEmbed } from '@sower/notify';
 import { describe, expect, it, vi } from 'vitest';
-import { refreshIngestReply, renderTaskLine } from './ingest-reply.js';
+import { INGEST_QUOTE_FIELD } from './discord-ingest.js';
+import {
+  refreshEmbedTitle,
+  refreshIngestReply,
+  renderTaskLine,
+} from './ingest-reply.js';
 import type { Deps } from './types.js';
 
 const CHANNEL = 'chan-1';
@@ -40,14 +46,36 @@ function fakeDeps(selectResults: unknown[][]) {
   const results = [...selectResults];
   const select = vi.fn(() => chain(results.shift() ?? []));
   const editChannelMessage = vi.fn(
-    async (_channelId: string, _messageId: string, _content: string) => {},
+    async (
+      _channelId: string,
+      _messageId: string,
+      _message: string | ChannelMessagePayload,
+    ) => {},
   );
+  const getChannelMessage = vi.fn(async () => ({ id: MESSAGE }));
   const deps = {
     db: { select },
-    notify: { editChannelMessage },
+    notify: { editChannelMessage, getChannelMessage },
     config: { DASHBOARD_BASE_URL: BASE_URL },
   } as unknown as Deps;
-  return { deps, select, editChannelMessage };
+  return { deps, select, editChannelMessage, getChannelMessage };
+}
+
+/** The embed the refresh PATCHed (edits are always `{content, embeds}`). */
+function editedPayload(
+  editChannelMessage: ReturnType<typeof fakeDeps>['editChannelMessage'],
+): { content: string; embeds: DiscordEmbed[] } {
+  return editChannelMessage.mock.calls[0]?.[2] as {
+    content: string;
+    embeds: DiscordEmbed[];
+  };
+}
+
+/** The refreshed embed's description (the per-task reply lines). */
+function editedText(
+  editChannelMessage: ReturnType<typeof fakeDeps>['editChannelMessage'],
+): string {
+  return editedPayload(editChannelMessage).embeds[0]?.description ?? '';
 }
 
 /** A sibling row as the join select returns it (only read fields matter). */
@@ -161,9 +189,14 @@ describe('refreshIngestReply', () => {
     expect(editChannelMessage).toHaveBeenCalledWith(
       CHANNEL,
       MESSAGE,
-      expect.any(String),
+      // Plain content cleared; `components` omitted so buttons are untouched.
+      { content: '', embeds: [expect.any(Object)] },
     );
-    const text = editChannelMessage.mock.calls[0]?.[2] as string;
+    const payload = editedPayload(editChannelMessage);
+    expect('components' in payload).toBe(false);
+    // Multi-task replies title with the first line's emoji + a count.
+    expect(payload.embeds[0]?.title).toBe('✅ 7 links');
+    const text = editedText(editChannelMessage);
     expect(text.split('\n')).toEqual([
       `✅ [boards.greenhouse.io/acme/jobs/1](${BASE_URL}/tasks/queued-1) · queued · greenhouse · ${DATE}`,
       `🔎 [${URL_LABEL}](${BASE_URL}/tasks/invest-1) · discovering form… · ${DATE}`,
@@ -193,7 +226,7 @@ describe('refreshIngestReply', () => {
 
     await refreshIngestReply(deps, TASK_ID);
 
-    const text = editChannelMessage.mock.calls[0]?.[2] as string;
+    const text = editedText(editChannelMessage);
     expect(text).toContain('· discovering form…');
     expect(text).not.toContain('no form found');
   });
@@ -225,7 +258,7 @@ describe('refreshIngestReply', () => {
     // ref + siblings + runs + discard events (the last one only because a
     // discarded row exists).
     expect(select).toHaveBeenCalledTimes(4);
-    const text = editChannelMessage.mock.calls[0]?.[2] as string;
+    const text = editedText(editChannelMessage);
     expect(text.split('\n')).toEqual([
       `🗑️ [${URL_LABEL}](${BASE_URL}/tasks/disc-1xx) · discarded — listing (2 jobs added) · ${DATE}`,
       `⚠️ [${URL_LABEL}](${BASE_URL}/tasks/plain-1x) · recorded (unsupported) · ${DATE}`,
@@ -251,7 +284,7 @@ describe('refreshIngestReply', () => {
 
     await refreshIngestReply(deps, TASK_ID);
 
-    const text = editChannelMessage.mock.calls[0]?.[2] as string;
+    const text = editedText(editChannelMessage);
     expect(text).toContain('· discarded ·');
     expect(text).not.toContain('listing (2 jobs added)');
   });
@@ -261,6 +294,72 @@ describe('refreshIngestReply', () => {
     await refreshIngestReply(deps, TASK_ID);
     // ref + siblings + runs only.
     expect(select).toHaveBeenCalledTimes(3);
+  });
+
+  it('preserves the quoted-original field across a refresh (the deleted message lives only there)', async () => {
+    const { deps, editChannelMessage, getChannelMessage } = fakeDeps([
+      REF_ROW,
+      [row('plain-1x')],
+      [],
+    ]);
+    getChannelMessage.mockResolvedValueOnce({
+      id: MESSAGE,
+      embeds: [
+        {
+          title: '⚠️ weirdats.example/jobs/1',
+          description: 'old line',
+          fields: [
+            { name: INGEST_QUOTE_FIELD, value: 'apply here: https://x/1' },
+          ],
+        },
+      ],
+    } as never);
+
+    await refreshIngestReply(deps, TASK_ID);
+
+    expect(getChannelMessage).toHaveBeenCalledWith(CHANNEL, MESSAGE);
+    const embed = editedPayload(editChannelMessage).embeds[0];
+    expect(embed?.fields).toEqual([
+      { name: INGEST_QUOTE_FIELD, value: 'apply here: https://x/1' },
+    ]);
+  });
+
+  it('still refreshes (without the quote) when the message fetch fails', async () => {
+    const { deps, editChannelMessage, getChannelMessage } = fakeDeps([
+      REF_ROW,
+      [row('plain-1x')],
+      [],
+    ]);
+    getChannelMessage.mockRejectedValueOnce(new Error('discord down'));
+
+    await refreshIngestReply(deps, TASK_ID);
+
+    expect(editChannelMessage).toHaveBeenCalledTimes(1);
+    const embed = editedPayload(editChannelMessage).embeds[0];
+    expect(embed?.fields).toBeUndefined();
+    expect(embed?.description).toContain('recorded (unsupported)');
+  });
+
+  it('upgrades a lone task reply title to Company — Title once the parse knows them', async () => {
+    const { deps, editChannelMessage } = fakeDeps([
+      REF_ROW,
+      [
+        row('lone-1xx', {
+          title: 'Account Executive',
+          company: 'Vercel',
+          platform: 'greenhouse',
+          tenant: 'acme',
+          url: 'https://boards.greenhouse.io/acme/jobs/9',
+        }),
+      ],
+      [],
+    ]);
+
+    await refreshIngestReply(deps, TASK_ID);
+
+    expect(editedPayload(editChannelMessage).embeds[0]?.title).toBe(
+      '✅ Vercel — Account Executive',
+    );
   });
 
   it('swallows a Discord edit rejection (never throws into the caller)', async () => {
@@ -563,5 +662,33 @@ describe('renderTaskLine (link labels)', () => {
     expect(line).toBe(
       `⚠️ [${URL_LABEL}](${BASE_URL}/tasks/lbl-8) · recorded (unsupported)`,
     );
+  });
+});
+
+describe('refreshEmbedTitle', () => {
+  const asRows = (...rows: ReturnType<typeof row>[]) =>
+    rows as unknown as Parameters<typeof refreshEmbedTitle>[0];
+
+  it('titles a lone task with the line emoji + Company — Title', () => {
+    const rows = asRows(row('t-1', { title: 'SWE', company: 'Acme' }));
+    expect(refreshEmbedTitle(rows, ['✅ some line'])).toBe('✅ Acme — SWE');
+  });
+
+  it('falls back to the lone known part, the spec, then the shortened URL', () => {
+    expect(
+      refreshEmbedTitle(asRows(row('t-2', { title: 'SWE' })), ['⚠️ line']),
+    ).toBe('⚠️ SWE');
+    expect(
+      refreshEmbedTitle(asRows(row('t-3', {}, discoveredSpec())), ['🔎 line']),
+    ).toBe('🔎 WeirdCo — Platform Intern');
+    expect(refreshEmbedTitle(asRows(row('t-4')), ['⚠️ line'])).toBe(
+      `⚠️ ${URL_LABEL}`,
+    );
+  });
+
+  it('titles a multi-task reply with a count', () => {
+    expect(
+      refreshEmbedTitle(asRows(row('t-5'), row('t-6')), ['✅ a', '⚠️ b']),
+    ).toBe('✅ 2 links');
   });
 });

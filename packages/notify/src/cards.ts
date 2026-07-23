@@ -36,6 +36,8 @@ export interface DiscordEmbed {
   color?: number;
   fields?: DiscordEmbedField[];
   footer?: { text: string };
+  /** ISO-8601 timestamp Discord renders in the embed footer. */
+  timestamp?: string;
 }
 
 export interface DiscordButton {

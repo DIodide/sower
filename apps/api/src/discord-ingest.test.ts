@@ -1,14 +1,21 @@
+import type { ChannelMessagePayload } from '@sower/notify';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
 import type { MessageIngestSummary, UrlOutcome } from './discord-ingest.js';
 import {
   announcedTaskIds,
+  buildIngestEmbed,
   classifyMany,
   formatEasternDate,
+  INGEST_QUOTE_FIELD,
+  ingestActionRows,
   ingestMessageLinks,
+  ingestReplyTitle,
+  quotedMessageValue,
   reactionFor,
   replyFor,
   runDiscordIngestPoll,
+  singleActionTaskId,
   taskLabel,
 } from './discord-ingest.js';
 import type { Deps } from './types.js';
@@ -1189,7 +1196,8 @@ describe('runDiscordIngestPoll', () => {
     options: { updateThrows?: boolean } = {},
   ) {
     const reactions: { id: string; emoji: string }[] = [];
-    const replies: string[] = [];
+    const replies: ChannelMessagePayload[] = [];
+    const deletions: { channelId: string; messageId: string }[] = [];
     const inserted: Record<string, unknown>[] = [];
     const updated: Record<string, unknown>[] = [];
     const notify = {
@@ -1197,11 +1205,18 @@ describe('runDiscordIngestPoll', () => {
       addReaction: vi.fn(async (_c: string, id: string, emoji: string) => {
         reactions.push({ id, emoji });
       }),
-      postChannelMessage: vi.fn(async (_c: string, text: string) => {
-        replies.push(text);
-        return { id: `reply-${replies.length}` };
-      }),
+      postChannelMessage: vi.fn(
+        async (_c: string, payload: ChannelMessagePayload) => {
+          replies.push(payload);
+          return { id: `reply-${replies.length}` };
+        },
+      ),
       editChannelMessage: vi.fn(async () => {}),
+      deleteChannelMessage: vi.fn(
+        async (channelId: string, messageId: string) => {
+          deletions.push({ channelId, messageId });
+        },
+      ),
     };
     // Minimal db: captures the documents rows screenshot ingest inserts and
     // the application_tasks reply-ref updates the poll performs.
@@ -1233,7 +1248,12 @@ describe('runDiscordIngestPoll', () => {
       notify,
       db,
     } as unknown as Deps;
-    return { deps, notify, reactions, replies, inserted, updated };
+    return { deps, notify, reactions, replies, deletions, inserted, updated };
+  }
+
+  /** The nth reply's outcome lines (the embed's description). */
+  function replyText(replies: ChannelMessagePayload[], index = 0): string {
+    return replies[index]?.embeds?.[0]?.description ?? '';
   }
 
   it('processes fresh messages with links from any author; skips reacted + no-link', async () => {
@@ -1322,7 +1342,8 @@ describe('runDiscordIngestPoll', () => {
           attachments: [IMAGE_ATTACHMENT],
         },
       ];
-      const { deps, reactions, replies, inserted } = fakeDeps(messages);
+      const { deps, reactions, replies, deletions, inserted } =
+        fakeDeps(messages);
 
       const result = await runDiscordIngestPoll(deps);
 
@@ -1331,7 +1352,7 @@ describe('runDiscordIngestPoll', () => {
       expect(reactions).toEqual([{ id: 'm-shot', emoji: '🖼️' }]);
       expect(replies).toHaveLength(1);
       // The reply links the parked task on the dashboard under its filename.
-      expect(replies[0]).toContain(
+      expect(replyText(replies)).toContain(
         `🖼️ [shot.png](https://dash.test/tasks/task-1) · screenshot recorded · ${TODAY}`,
       );
       // Parked via ingestJob and linked to the job via a documents row.
@@ -1342,6 +1363,9 @@ describe('runDiscordIngestPoll', () => {
         filename: 'shot.png',
         jobId: 'job-1',
       });
+      // The attachment's CDN URL must survive: a message with attachments is
+      // never deleted, even though its caption fit the quote field.
+      expect(deletions).toEqual([]);
     } finally {
       fetchSpy.mockRestore();
     }
@@ -1376,10 +1400,10 @@ describe('runDiscordIngestPoll', () => {
       // The queued link wins the reaction; the reply itemizes both outcomes,
       // each linked to its dashboard task.
       expect(reactions).toEqual([{ id: 'm-mixed', emoji: '✅' }]);
-      expect(replies[0]).toContain(
+      expect(replyText(replies)).toContain(
         `✅ [gh/1](https://dash.test/tasks/task-1) · queued · greenhouse · ${TODAY}`,
       );
-      expect(replies[0]).toContain(
+      expect(replyText(replies)).toContain(
         `🖼️ [shot.png](https://dash.test/tasks/task-1) · screenshot recorded · ${TODAY}`,
       );
       // Both the text link and the attachment went through ingestJob.
@@ -1427,7 +1451,7 @@ describe('runDiscordIngestPoll', () => {
     const messages = [
       { id: 'm-fresh', content: 'https://gh/1', author: { id: 'u' } },
     ];
-    const { deps, notify, updated } = fakeDeps(messages);
+    const { deps, notify, deletions, updated } = fakeDeps(messages);
     notify.postChannelMessage.mockRejectedValueOnce(new Error('discord down'));
 
     const result = await runDiscordIngestPoll(deps);
@@ -1436,6 +1460,8 @@ describe('runDiscordIngestPoll', () => {
     expect(result).toMatchObject({ enabled: true, processed: 1 });
     // ...and no reply ref was written (there is no message to edit later).
     expect(updated).toEqual([]);
+    // No embed reply carries the quote → the original message must survive.
+    expect(deletions).toEqual([]);
   });
 
   it('never fails the poll when storing the reply ref throws (best-effort)', async () => {
@@ -1453,5 +1479,362 @@ describe('runDiscordIngestPoll', () => {
 
     expect(result).toMatchObject({ enabled: true, scanned: 1, processed: 1 });
     expect(replies).toHaveLength(1);
+  });
+
+  it('posts an embed reply (title + quote field + buttons) and deletes the quoted original', async () => {
+    platformState.byUrl['https://gh/1'] = {
+      platform: 'greenhouse',
+      tenant: 'a',
+      externalId: '1',
+    };
+    const messages = [
+      {
+        id: 'm-fresh',
+        content: 'please add https://gh/1',
+        author: { id: 'u' },
+      },
+    ];
+    const { deps, replies, deletions } = fakeDeps(messages);
+
+    await runDiscordIngestPoll(deps);
+
+    expect(replies).toHaveLength(1);
+    const payload = replies[0];
+    const embed = payload?.embeds?.[0];
+    expect(embed).toMatchObject({
+      title: '✅ gh/1',
+      color: 0x5865f2,
+    });
+    expect(embed?.description).toContain(
+      `✅ [gh/1](https://dash.test/tasks/task-1) · queued · greenhouse · ${TODAY}`,
+    );
+    // The original content is quoted VERBATIM in its own field…
+    expect(embed?.fields).toEqual([
+      { name: INGEST_QUOTE_FIELD, value: 'please add https://gh/1' },
+    ]);
+    // …the lone created task gets the two action buttons…
+    expect(payload?.components).toEqual([
+      {
+        type: 1,
+        components: [
+          expect.objectContaining({
+            style: 3,
+            label: 'Mark as Complete',
+            custom_id: 'ingest_mark:task-1',
+          }),
+          expect.objectContaining({
+            style: 4,
+            label: 'Discard',
+            custom_id: 'ingest_discard:task-1',
+          }),
+        ],
+      },
+    ]);
+    // …and the quoted original is deleted (content preserved in the embed).
+    expect(deletions).toEqual([{ channelId: 'chan-1', messageId: 'm-fresh' }]);
+  });
+
+  it('keeps the original (no quote field) when its content exceeds 1024 chars', async () => {
+    platformState.byUrl['https://gh/1'] = {
+      platform: 'greenhouse',
+      tenant: 'a',
+      externalId: '1',
+    };
+    const messages = [
+      {
+        id: 'm-long',
+        content: `https://gh/1 ${'x'.repeat(1100)}`,
+        author: { id: 'u' },
+      },
+    ];
+    const { deps, reactions, replies, deletions } = fakeDeps(messages);
+
+    await runDiscordIngestPoll(deps);
+
+    // The embed posts without the quote field; the original + its reaction
+    // stay exactly as today.
+    expect(replies[0]?.embeds?.[0]?.fields).toBeUndefined();
+    expect(deletions).toEqual([]);
+    expect(reactions).toEqual([{ id: 'm-long', emoji: '✅' }]);
+  });
+
+  it('leaves the original silently when the delete is forbidden (403, warned once)', async () => {
+    platformState.byUrl['https://gh/1'] = {
+      platform: 'greenhouse',
+      tenant: 'a',
+      externalId: '1',
+    };
+    // Two quoted messages → two delete attempts, ONE warning (403 = a config
+    // gap, not per-message news).
+    const messages = [
+      { id: 'm-one', content: 'https://gh/1', author: { id: 'u' } },
+      { id: 'm-two', content: 'https://gh/1', author: { id: 'u' } },
+    ];
+    const { deps, notify, replies } = fakeDeps(messages);
+    notify.deleteChannelMessage.mockRejectedValue(
+      new Error(
+        'Discord API DELETE /channels/chan-1/messages/m failed: 403 Missing Permissions',
+      ),
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const result = await runDiscordIngestPoll(deps);
+
+      // Never throws; both messages still processed and replied to.
+      expect(result).toMatchObject({ enabled: true, processed: 2 });
+      expect(replies).toHaveLength(2);
+      const deleteWarns = warn.mock.calls.filter((call) =>
+        String(call[0]).includes('deleting the original message failed'),
+      );
+      expect(deleteWarns).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('attaches no buttons to a multi-link reply', async () => {
+    platformState.byUrl['https://gh/1'] = {
+      platform: 'greenhouse',
+      tenant: 'a',
+      externalId: '1',
+    };
+    platformState.byUrl['https://gh/2'] = {
+      platform: 'greenhouse',
+      tenant: 'a',
+      externalId: '2',
+    };
+    const messages = [
+      {
+        id: 'm-two',
+        content: 'https://gh/1 https://gh/2',
+        author: { id: 'u' },
+      },
+    ];
+    const { deps, replies } = fakeDeps(messages);
+
+    await runDiscordIngestPoll(deps);
+
+    expect(replies).toHaveLength(1);
+    expect(replies[0]?.components).toBeUndefined();
+    // The multi-outcome title is the tally, not a single label.
+    expect(replies[0]?.embeds?.[0]?.title).toBe('✅ 2 queued');
+  });
+
+  it('attaches no buttons to a directory reply', async () => {
+    platformState.byUrl['https://dir/list'] = {
+      platform: 'unknown',
+      tenant: null,
+      externalId: null,
+    };
+    platformState.byUrl['https://gh/2'] = {
+      platform: 'greenhouse',
+      tenant: 'a',
+      externalId: '2',
+    };
+    dirState.byUrl['https://dir/list'] = ['https://gh/2'];
+    const messages = [
+      { id: 'm-dir', content: 'board: https://dir/list', author: { id: 'u' } },
+    ];
+    const { deps, replies } = fakeDeps(messages);
+
+    await runDiscordIngestPoll(deps);
+
+    expect(replies[0]?.components).toBeUndefined();
+  });
+});
+
+describe('ingest embed helpers', () => {
+  const base: MessageIngestSummary = {
+    urls: 1,
+    ingested: 0,
+    duplicates: 0,
+    unsupported: 0,
+    directories: 0,
+    errors: 0,
+    screenshots: 0,
+    outcomes: [],
+    screenshotOutcomes: [],
+  };
+  const ingestedOutcome = (taskId: string): UrlOutcome => ({
+    url: 'https://gh/1',
+    kind: 'ingested',
+    platform: 'greenhouse',
+    jobId: 'j1',
+    taskId,
+  });
+
+  it('quotedMessageValue: verbatim when ≤1024 chars, null when blank or over', () => {
+    expect(quotedMessageValue('add https://gh/1 pls')).toBe(
+      'add https://gh/1 pls',
+    );
+    expect(quotedMessageValue('x'.repeat(1024))).toBe('x'.repeat(1024));
+    expect(quotedMessageValue('x'.repeat(1025))).toBeNull();
+    expect(quotedMessageValue('')).toBeNull();
+    expect(quotedMessageValue('   ')).toBeNull();
+    expect(quotedMessageValue(undefined)).toBeNull();
+  });
+
+  it('singleActionTaskId: exactly one created/matched task', () => {
+    expect(
+      singleActionTaskId({
+        ...base,
+        ingested: 1,
+        outcomes: [ingestedOutcome('task-a')],
+      }),
+    ).toBe('task-a');
+    // A duplicate MATCHED exactly one existing task.
+    expect(
+      singleActionTaskId({
+        ...base,
+        duplicates: 1,
+        outcomes: [
+          {
+            url: 'https://gh/1',
+            kind: 'duplicate',
+            jobId: 'j1',
+            taskId: 'task-orig',
+            originalSource: 'discord',
+            originalCreatedAt: new Date('2026-07-13T19:47:00Z'),
+          },
+        ],
+      }),
+    ).toBe('task-orig');
+    // A lone screenshot task counts too.
+    expect(
+      singleActionTaskId({
+        ...base,
+        urls: 0,
+        screenshots: 1,
+        screenshotOutcomes: [
+          {
+            kind: 'screenshot',
+            jobId: 'j2',
+            taskId: 'task-shot',
+            filename: 'shot.png',
+            stored: true,
+          },
+        ],
+      }),
+    ).toBe('task-shot');
+  });
+
+  it('singleActionTaskId: none for multi/directory/error/taskless outcomes', () => {
+    // Two outcomes.
+    expect(
+      singleActionTaskId({
+        ...base,
+        urls: 2,
+        ingested: 2,
+        outcomes: [ingestedOutcome('task-a'), ingestedOutcome('task-b')],
+      }),
+    ).toBeNull();
+    // A directory (even alone) never gets buttons.
+    expect(
+      singleActionTaskId({
+        ...base,
+        directories: 1,
+        outcomes: [{ url: 'https://dir', kind: 'directory', children: [] }],
+      }),
+    ).toBeNull();
+    // An error outcome has no task.
+    expect(
+      singleActionTaskId({
+        ...base,
+        errors: 1,
+        outcomes: [{ url: 'https://x', kind: 'error', error: 'boom' }],
+      }),
+    ).toBeNull();
+    // A link outcome + a screenshot = two outcomes.
+    expect(
+      singleActionTaskId({
+        ...base,
+        ingested: 1,
+        screenshots: 1,
+        outcomes: [ingestedOutcome('task-a')],
+        screenshotOutcomes: [
+          {
+            kind: 'screenshot',
+            jobId: 'j2',
+            taskId: 'task-shot',
+            filename: 'shot.png',
+            stored: true,
+          },
+        ],
+      }),
+    ).toBeNull();
+  });
+
+  it('ingestReplyTitle: lone outcome label vs multi tally vs empty', () => {
+    expect(
+      ingestReplyTitle({
+        ...base,
+        ingested: 1,
+        outcomes: [ingestedOutcome('task-a')],
+      }),
+    ).toBe('✅ gh/1');
+    expect(
+      ingestReplyTitle({
+        ...base,
+        urls: 3,
+        ingested: 2,
+        unsupported: 1,
+        outcomes: [
+          ingestedOutcome('task-a'),
+          ingestedOutcome('task-b'),
+          { url: 'https://weird/x', kind: 'unsupported', jobId: 'j3' },
+        ],
+      }),
+    ).toBe('✅ 2 queued · 1 recorded');
+    expect(ingestReplyTitle({ ...base, urls: 0 })).toBe(
+      '❌ No job links found',
+    );
+  });
+
+  it('buildIngestEmbed: clamps the title, caps lines, and drops an unquotable field', () => {
+    const embed = buildIngestEmbed(`✅ ${'t'.repeat(300)}`, ['line 1'], 'hi');
+    expect(embed.title).toHaveLength(256);
+    expect(embed.title?.endsWith('…')).toBe(true);
+    expect(embed.description).toBe('line 1');
+    expect(embed.fields).toEqual([{ name: INGEST_QUOTE_FIELD, value: 'hi' }]);
+
+    // 40 long lines collapse exactly like the plain reply (…+N more, ≤2000).
+    const big = buildIngestEmbed(
+      '✅ 40 queued',
+      Array.from({ length: 40 }, (_, i) => `✅ line number ${i}`),
+    );
+    expect(big.description?.length).toBeLessThanOrEqual(2000);
+    expect(big.description).toContain('…+30 more');
+    expect(big.fields).toBeUndefined();
+
+    // An over-cap quote never produces an invalid field.
+    const over = buildIngestEmbed('✅ x', ['line'], 'x'.repeat(1025));
+    expect(over.fields).toBeUndefined();
+
+    // No lines at all still renders a valid description.
+    expect(buildIngestEmbed('❌ x', []).description).toBe(
+      'No job links found in that message.',
+    );
+  });
+
+  it('ingestActionRows: one row, mark + discard custom_ids', () => {
+    expect(ingestActionRows('task-9')).toEqual([
+      {
+        type: 1,
+        components: [
+          {
+            type: 2,
+            style: 3,
+            label: 'Mark as Complete',
+            custom_id: 'ingest_mark:task-9',
+          },
+          {
+            type: 2,
+            style: 4,
+            label: 'Discard',
+            custom_id: 'ingest_discard:task-9',
+          },
+        ],
+      },
+    ]);
   });
 });

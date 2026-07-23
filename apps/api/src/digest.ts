@@ -9,7 +9,10 @@ import { applicationTasks, events, followups, jobs } from '@sower/db';
 import { GmailSendScopeError, sendGmailMessage } from '@sower/inbox';
 import { and, eq, gte, inArray, isNotNull, notInArray, or } from 'drizzle-orm';
 import { easternDateOf } from './deadline-alerts.js';
-import { renderDigestDiscord, renderDigestEmail } from './digest-render.js';
+import {
+  renderDigestDiscordEmbed,
+  renderDigestEmail,
+} from './digest-render.js';
 import type { Db, Deps } from './types.js';
 
 /**
@@ -376,9 +379,10 @@ export interface WeeklyDigestRunResult {
 }
 
 /**
- * Discord leg: post the rendered digest to the digest channel. Self-gates
- * on Discord + the channel id; a send failure is logged and reported in the
- * outcome string, never thrown — the email leg must still run.
+ * Discord leg: post the rendered digest embed to the digest channel.
+ * Self-gates on Discord + the channel id; a send failure is logged and
+ * reported in the outcome string, never thrown — the email leg must still
+ * run.
  */
 async function sendDigestToDiscord(
   deps: Deps,
@@ -390,10 +394,9 @@ async function sendDigestToDiscord(
     return 'skipped: no Discord digest channel configured';
   }
   try {
-    await notify.postChannelMessage(
-      channelId,
-      renderDigestDiscord(digest, config.DASHBOARD_BASE_URL),
-    );
+    await notify.postChannelMessage(channelId, {
+      embeds: [renderDigestDiscordEmbed(digest, config.DASHBOARD_BASE_URL)],
+    });
     return 'sent';
   } catch (error) {
     console.warn('[sower] weekly digest Discord post failed:', error);

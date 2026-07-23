@@ -1,3 +1,4 @@
+import type { DiscordEmbed } from '@sower/notify';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from './config.js';
 import { buildWeeklyDigest, runWeeklyDigest } from './digest.js';
@@ -514,10 +515,17 @@ describe('runWeeklyDigest', () => {
     });
     expect(notify.postChannelMessage).toHaveBeenCalledTimes(1);
     const [channelId, message] = vi.mocked(notify.postChannelMessage).mock
-      .calls[0] as [string, string];
+      .calls[0] as [string, { embeds: DiscordEmbed[] }];
     expect(channelId).toBe('chan-digest');
-    expect(message).toContain('📤 **Submitted** (2)');
-    expect(message.length).toBeLessThanOrEqual(1900);
+    // The Discord leg posts the digest as ONE rich embed.
+    const embed = message.embeds[0];
+    expect(message.embeds).toHaveLength(1);
+    expect(embed?.title).toContain('Sower weekly');
+    expect(embed?.color).toBe(0x5865f2);
+    expect(embed?.timestamp).toBe(NOW.toISOString());
+    expect(
+      embed?.fields?.some((field) => field.name === '📤 Submitted (2)'),
+    ).toBe(true);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 

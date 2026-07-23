@@ -11,8 +11,10 @@ import {
 import { getAdapter } from '@sower/platforms';
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import {
+  buildIngestEmbed,
   formatEasternDate,
-  renderReplyLines,
+  INGEST_QUOTE_FIELD,
+  shortenUrlForLabel,
   taskLabel,
   taskLink,
 } from './discord-ingest.js';
@@ -20,9 +22,12 @@ import { isIngestableJobUrl } from './link-extract.js';
 import type { Deps } from './types.js';
 
 /**
- * Re-render a #ingest reply from CURRENT DB state and edit (PATCH) the
- * Discord message, so the reply keeps telling the truth as tasks advance:
- * the investigator Job discovers a form, a human verifies it, and so on.
+ * Re-render a #ingest reply's EMBED from CURRENT DB state and edit (PATCH)
+ * the Discord message, so the reply keeps telling the truth as tasks
+ * advance: the investigator Job discovers a form, a human verifies it, and
+ * so on. The edit preserves the embed's quoted-original field (fetched from
+ * the live message — the deleted #ingest message survives only there) and
+ * never touches `components`, so button state carries across refreshes.
  *
  * Loop-safe: the edited message keeps the bot as author, so the ingest
  * poll's app-id self-skip still ignores it. Failure-safe: NOTHING in here
@@ -146,6 +151,32 @@ export function renderTaskLine(
 }
 
 /**
+ * The refreshed embed's title: the outcome emoji (lifted off the first
+ * rendered line) + `Company — Title` once the parse knows them (spec values
+ * as the fallback, exactly like the line labels), else the shortened URL; a
+ * multi-task reply keeps a count. Embed titles render no markdown, so
+ * nothing is escaped.
+ */
+export function refreshEmbedTitle(
+  rows: ReplyTaskRow[],
+  lines: string[],
+): string {
+  const emoji = lines[0]?.split(' ')[0] ?? '❌';
+  const only = rows.length === 1 ? rows[0] : undefined;
+  if (only) {
+    const title = only.job.title?.trim() || only.task.jobSpec?.title?.trim();
+    const company =
+      only.job.company?.trim() || only.task.jobSpec?.company?.trim();
+    const label =
+      company && title
+        ? `${company} — ${title}`
+        : company || title || shortenUrlForLabel(only.job.url);
+    return `${emoji} ${label}`;
+  }
+  return `${emoji} ${rows.length} links`;
+}
+
+/**
  * Re-render the #ingest reply that announced `taskId` and edit the Discord
  * message in place. No-op when the task carries no reply ref (it did not
  * arrive via #ingest, or storing the ref failed). Never throws.
@@ -239,21 +270,37 @@ export async function refreshIngestReply(
       }
     }
 
-    const text = renderReplyLines(
-      rows.map((row) =>
-        renderTaskLine(
-          row,
-          latestRuns.get(row.task.id),
-          config.DASHBOARD_BASE_URL,
-          discardNotes.get(row.task.id),
-        ),
+    const lines = rows.map((row) =>
+      renderTaskLine(
+        row,
+        latestRuns.get(row.task.id),
+        config.DASHBOARD_BASE_URL,
+        discardNotes.get(row.task.id),
       ),
     );
-    await notify.editChannelMessage(
-      ref.ingestChannelId,
-      ref.ingestMessageId,
-      text,
-    );
+
+    // The quoted original lives ONLY in the posted embed (its source message
+    // may be deleted), so read it off the live message before re-rendering.
+    // A failed fetch refreshes without the quote rather than not at all.
+    let quote: string | undefined;
+    try {
+      const current = await notify.getChannelMessage(
+        ref.ingestChannelId,
+        ref.ingestMessageId,
+      );
+      quote = current.embeds?.[0]?.fields?.find(
+        (field) => field.name === INGEST_QUOTE_FIELD,
+      )?.value;
+    } catch {
+      // Message fetch failed (deleted, permissions, ...): refresh anyway.
+    }
+
+    await notify.editChannelMessage(ref.ingestChannelId, ref.ingestMessageId, {
+      // Clearing `content` migrates pre-embed plain replies to the embed;
+      // omitting `components` leaves any action buttons exactly as they are.
+      content: '',
+      embeds: [buildIngestEmbed(refreshEmbedTitle(rows, lines), lines, quote)],
+    });
   } catch (error) {
     console.warn(
       `[sower] discord ingest: reply refresh failed for task ${taskId}:`,

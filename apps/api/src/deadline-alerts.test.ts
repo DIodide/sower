@@ -457,7 +457,8 @@ describe('runDeadlineAlerts', () => {
 
     await runDeadlineAlerts(deps, NOW);
 
-    const text = vi.mocked(notify.postChannelMessage).mock.calls[0]?.[1] ?? '';
+    const text = (vi.mocked(notify.postChannelMessage).mock.calls[0]?.[1] ??
+      '') as string;
     expect(text).toContain('Acme \\[Labs\\]');
     expect(text.length).toBeLessThanOrEqual(2000);
   });

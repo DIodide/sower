@@ -5,6 +5,8 @@ import type {
   ApprovalCardRef,
   ApprovalMessagePayload,
   ApprovalVerdict,
+  ChannelMessageDetail,
+  ChannelMessagePayload,
   DiscordChannelMessage,
   OtpRequestCard,
 } from '@sower/notify';
@@ -57,14 +59,24 @@ export interface Notifier {
     messageId: string,
     emoji: string,
   ): Promise<void>;
-  /** Post a plain-text message to a specific channel id (returns its id). */
-  postChannelMessage(channelId: string, text: string): Promise<{ id: string }>;
+  /** Post a message (plain string or payload) to a channel id (returns its id). */
+  postChannelMessage(
+    channelId: string,
+    message: string | ChannelMessagePayload,
+  ): Promise<{ id: string }>;
   /** Edit a previously posted channel message (the #ingest reply refresh). */
   editChannelMessage(
     channelId: string,
     messageId: string,
-    content: string,
+    message: string | ChannelMessagePayload,
   ): Promise<void>;
+  /** Fetch one message's editable payload (the #ingest embed refresh). */
+  getChannelMessage(
+    channelId: string,
+    messageId: string,
+  ): Promise<ChannelMessageDetail>;
+  /** Delete a channel message (the #ingest quoted-original cleanup). */
+  deleteChannelMessage(channelId: string, messageId: string): Promise<void>;
 }
 
 export interface Deps {

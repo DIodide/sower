@@ -2393,7 +2393,7 @@ describe('buildServer', () => {
         DISCORD_DIGEST_CHANNEL_ID: 'chan-digest',
       };
       const postChannelMessage = vi.fn(
-        async (_channelId: string, _text: string) => ({ id: 'm1' }),
+        async (_channelId: string, _message: unknown) => ({ id: 'm1' }),
       );
       deps.notify = { postChannelMessage } as unknown as NonNullable<
         Deps['notify']
@@ -2415,10 +2415,12 @@ describe('buildServer', () => {
       expect(postChannelMessage).toHaveBeenCalledTimes(1);
       const [channelId, message] = postChannelMessage.mock.calls[0] as [
         string,
-        string,
+        { embeds: Array<{ title?: string }> },
       ];
       expect(channelId).toBe('chan-digest');
-      expect(message).toContain('**Sower weekly**');
+      // The Discord leg posts the digest as ONE rich embed.
+      expect(message.embeds).toHaveLength(1);
+      expect(message.embeds[0]?.title).toContain('Sower weekly');
       // Read-only by contract: the digest run never mutates state.
       expect(writes).toEqual([]);
     });

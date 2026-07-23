@@ -5,6 +5,8 @@ import {
   applyVerdict,
   buildApprovalMessage,
   buildOtpRequestMessage,
+  type DiscordActionRow,
+  type DiscordEmbed,
   type OtpRequestCard,
 } from './cards.js';
 import {
@@ -29,7 +31,7 @@ interface DiscordMessageResponse extends Partial<ApprovalMessagePayload> {
  * DISCORD_BOT_TOKEN env var and is redacted from any thrown error.
  */
 async function discordRequest(
-  method: 'GET' | 'POST' | 'PATCH' | 'PUT',
+  method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
   path: string,
   body?: unknown,
 ): Promise<unknown> {
@@ -197,35 +199,91 @@ export async function addReaction(
 }
 
 /**
- * Post a plain-text message to a specific channel id (not platform-keyed).
- * Returns the created message's id so the caller can edit it later (the
- * ingest poll stores it on the tasks the message announced).
+ * A message payload beyond plain text: embeds and button rows. Keys left
+ * undefined are omitted from the request body, so a PATCH carrying only
+ * `embeds` leaves the message's existing components untouched.
  */
-export async function postChannelMessage(
-  channelId: string,
-  text: string,
-): Promise<{ id: string }> {
-  const message = (await discordRequest(
-    'POST',
-    `/channels/${channelId}/messages`,
-    { content: text },
-  )) as DiscordMessageResponse;
-  return { id: message.id };
+export interface ChannelMessagePayload {
+  content?: string;
+  embeds?: DiscordEmbed[];
+  components?: DiscordActionRow[];
+}
+
+/** A fetched message, trimmed to the payload keys an edit can round-trip. */
+export interface ChannelMessageDetail extends ChannelMessagePayload {
+  id: string;
+}
+
+/** Plain-string callers keep posting `{content}`; payloads pass through. */
+function toMessageBody(
+  message: string | ChannelMessagePayload,
+): ChannelMessagePayload {
+  return typeof message === 'string' ? { content: message } : message;
 }
 
 /**
- * Edit a previously posted channel message's text content (the #ingest reply
- * refresh). The edited message keeps the bot as author, so the ingest poll's
+ * Post a message to a specific channel id (not platform-keyed): a plain
+ * string, or a `{content?, embeds?, components?}` payload. Returns the
+ * created message's id so the caller can edit it later (the ingest poll
+ * stores it on the tasks the message announced).
+ */
+export async function postChannelMessage(
+  channelId: string,
+  message: string | ChannelMessagePayload,
+): Promise<{ id: string }> {
+  const created = (await discordRequest(
+    'POST',
+    `/channels/${channelId}/messages`,
+    toMessageBody(message),
+  )) as DiscordMessageResponse;
+  return { id: created.id };
+}
+
+/**
+ * Edit a previously posted channel message (the #ingest reply refresh): a
+ * plain string patches `{content}`, a payload patches exactly the keys it
+ * carries (omitting `components` preserves the message's buttons). The
+ * edited message keeps the bot as author, so the ingest poll's app-id
  * self-skip still ignores it — editing is loop-safe.
  */
 export async function editChannelMessage(
   channelId: string,
   messageId: string,
-  content: string,
+  message: string | ChannelMessagePayload,
 ): Promise<void> {
   await discordRequest(
     'PATCH',
     `/channels/${channelId}/messages/${messageId}`,
-    { content },
+    toMessageBody(message),
+  );
+}
+
+/**
+ * Fetch one message's editable payload (content/embeds/components) — the
+ * #ingest refresh reads the current embed to preserve its quoted-message
+ * field across re-renders.
+ */
+export async function getChannelMessage(
+  channelId: string,
+  messageId: string,
+): Promise<ChannelMessageDetail> {
+  return (await discordRequest(
+    'GET',
+    `/channels/${channelId}/messages/${messageId}`,
+  )) as ChannelMessageDetail;
+}
+
+/**
+ * Delete a channel message. Deleting a message the bot did not author needs
+ * the Manage Messages permission — a missing grant surfaces as a thrown 403
+ * the caller must treat as "leave the message". Returns 204, no body.
+ */
+export async function deleteChannelMessage(
+  channelId: string,
+  messageId: string,
+): Promise<void> {
+  await discordRequest(
+    'DELETE',
+    `/channels/${channelId}/messages/${messageId}`,
   );
 }

@@ -3,6 +3,7 @@ import {
   OPEN_FOLLOWUP_STATES,
   TASK_PRIORITY_LABELS,
 } from '@sower/core';
+import type { DiscordEmbed } from '@sower/notify';
 import type { DigestInPlayItem, WeeklyDigest } from './digest.js';
 import { escapeLabel, formatEasternDate } from './discord-ingest.js';
 
@@ -67,16 +68,14 @@ function renderSection(section: DiscordSection, limit: number): string[] {
 }
 
 /**
- * ONE markdown message for the digest channel. Compact emoji-headed
- * sections, each itemizing at most a handful of lines; when even that
- * overflows the cap, whole sections shrink together (… and N more) until
- * the message fits — headers and counts always survive.
+ * The six digest sections as Discord markdown (headers with counts, one
+ * bullet per item), shared by the plain-text renderer and the embed
+ * renderer — both keep identical per-section lines.
  */
-export function renderDigestDiscord(
+function buildDiscordSections(
   digest: WeeklyDigest,
-  dashboardBaseUrl?: string,
-): string {
-  const base = dashboardBaseUrl?.replace(/\/+$/, '');
+  base?: string,
+): DiscordSection[] {
   const link = (
     company: string | null,
     title: string | null,
@@ -84,7 +83,7 @@ export function renderDigestDiscord(
   ): string =>
     markdownLink(escapeLabel(companyTitleLabel(company, title)), path, base);
 
-  const sections: DiscordSection[] = [
+  return [
     {
       header: `📤 **Submitted** (${digest.submitted.count})`,
       items: digest.submitted.items.map(
@@ -133,6 +132,23 @@ export function renderDigestDiscord(
       ),
     },
   ];
+}
+
+/**
+ * ONE markdown message for the digest channel. Compact emoji-headed
+ * sections, each itemizing at most a handful of lines; when even that
+ * overflows the cap, whole sections shrink together (… and N more) until
+ * the message fits — headers and counts always survive. Kept alongside the
+ * embed renderer as the plain-text fallback.
+ */
+export function renderDigestDiscord(
+  digest: WeeklyDigest,
+  dashboardBaseUrl?: string,
+): string {
+  const sections = buildDiscordSections(
+    digest,
+    dashboardBaseUrl?.replace(/\/+$/, ''),
+  );
 
   const render = (limit: number): string =>
     [
@@ -148,6 +164,83 @@ export function renderDigestDiscord(
   }
   // Unreachable in practice (limit 0 is a handful of header lines) — belt.
   return `${render(0).slice(0, DISCORD_DIGEST_MAX_CHARS - 1)}…`;
+}
+
+/** Discord embed hard caps: field values 1024; ~6000 across the embed. */
+const EMBED_FIELD_VALUE_MAX = 1024;
+/** Headroom under Discord's 6000-char embed total so we can never 400. */
+const EMBED_TOTAL_MAX = 5800;
+/** Neutral blurple accent for the weekly digest embed. */
+const DIGEST_EMBED_COLOR = 0x5865f2;
+
+/**
+ * One section as an embed field value: at most `limit` item lines plus
+ * "… and N more", shrunk further (never truncated mid-line) until it fits
+ * the 1024-char field cap. Empty sections render an em dash — Discord
+ * rejects empty field values.
+ */
+function embedFieldValue(section: DiscordSection, limit: number): string {
+  const shown = section.items.slice(0, limit);
+  let rest = section.items.length - shown.length;
+  const render = (): string => {
+    const lines = [...shown, ...(rest > 0 ? [`… and ${rest} more`] : [])];
+    return lines.length === 0 ? '—' : lines.join('\n');
+  };
+  let value = render();
+  while (value.length > EMBED_FIELD_VALUE_MAX && shown.length > 0) {
+    shown.pop();
+    rest += 1;
+    value = render();
+  }
+  // Pathological single line ("… and N more" always fits): hard-truncate.
+  return value.length > EMBED_FIELD_VALUE_MAX
+    ? `${value.slice(0, EMBED_FIELD_VALUE_MAX - 1)}…`
+    : value;
+}
+
+/**
+ * The digest as ONE rich embed: a field per section (values reuse the exact
+ * per-section markdown lines — embeds still render markdown), each value
+ * under the 1024-char field cap, the whole embed under the 6000-char total
+ * (whole sections shrink together until it fits, headers and counts always
+ * survive). Field names render no markdown, so the bold markers are
+ * stripped there.
+ */
+export function renderDigestDiscordEmbed(
+  digest: WeeklyDigest,
+  dashboardBaseUrl?: string,
+): DiscordEmbed {
+  const sections = buildDiscordSections(
+    digest,
+    dashboardBaseUrl?.replace(/\/+$/, ''),
+  );
+  const title = `Sower weekly — ${formatEasternDate(digest.now)}`;
+
+  const build = (limit: number): DiscordEmbed => ({
+    title,
+    color: DIGEST_EMBED_COLOR,
+    timestamp: digest.now.toISOString(),
+    fields: sections.map((section) => ({
+      name: section.header.replace(/\*\*/g, ''),
+      value: embedFieldValue(section, limit),
+    })),
+  });
+
+  const size = (embed: DiscordEmbed): number =>
+    (embed.title?.length ?? 0) +
+    (embed.fields ?? []).reduce(
+      (sum, field) => sum + field.name.length + field.value.length,
+      0,
+    );
+
+  for (let limit = MAX_SECTION_ITEMS; limit >= 0; limit -= 1) {
+    const embed = build(limit);
+    if (size(embed) <= EMBED_TOTAL_MAX) {
+      return embed;
+    }
+  }
+  // Unreachable in practice (limit 0 is six short headers + dashes) — belt.
+  return build(0);
 }
 
 /** Escape every HTML-special character — scraped titles are untrusted. */

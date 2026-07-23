@@ -299,6 +299,8 @@ function createNotify(options: { verified?: boolean } = {}) {
     addReaction: vi.fn(async () => {}),
     postChannelMessage: vi.fn(async () => ({ id: 'reply-1' })),
     editChannelMessage: vi.fn(async () => {}),
+    getChannelMessage: vi.fn(async () => ({ id: 'reply-1' })),
+    deleteChannelMessage: vi.fn(async () => {}),
   } satisfies Notifier;
   return notify;
 }
@@ -325,6 +327,30 @@ function cardMessage() {
         components: [
           { type: 2, style: 3, custom_id: `approve:${TASK_ID}` },
           { type: 2, style: 4, custom_id: `reject:${TASK_ID}` },
+        ],
+      },
+    ],
+  };
+}
+
+/** The #ingest reply embed the mark/discard buttons live on (echoed back). */
+function ingestCardMessage() {
+  return {
+    embeds: [
+      {
+        title: '✅ gh/1',
+        color: 0x5865f2,
+        description:
+          '✅ [gh/1](https://dash.test/tasks/task-1) · queued · greenhouse · Jul 18',
+        fields: [{ name: 'Your message', value: 'please add https://gh/1' }],
+      },
+    ],
+    components: [
+      {
+        type: 1,
+        components: [
+          { type: 2, style: 3, custom_id: `ingest_mark:${TASK_ID}` },
+          { type: 2, style: 4, custom_id: `ingest_discard:${TASK_ID}` },
         ],
       },
     ],
@@ -566,7 +592,13 @@ describe('POST /discord/interactions', () => {
     const { deps } = createDeps(state, { notify });
     const app = buildServer(deps);
 
-    for (const customId of ['nuke:everything', 'approve:not-a-uuid', '']) {
+    for (const customId of [
+      'nuke:everything',
+      'approve:not-a-uuid',
+      'ingest_mark:not-a-uuid',
+      'ingest_discard:not-a-uuid',
+      '',
+    ]) {
       const res = await postInteraction(app, {
         type: 3,
         data: { custom_id: customId },
@@ -584,6 +616,210 @@ describe('POST /discord/interactions', () => {
     const res = await postInteraction(app, { type: 2 });
 
     expect(res.statusCode).toBe(400);
+  });
+
+  it('ingest_mark button: MARK_SUBMITTED transition, type-7 edit appends the status and removes the buttons', async () => {
+    const notify = createNotify();
+    const state = createState({ state: 'NEEDS_INPUT' });
+    const { deps } = createDeps(state, { notify });
+    const app = buildServer(deps);
+
+    const res = await postInteraction(app, {
+      type: 3,
+      data: { custom_id: `ingest_mark:${TASK_ID}` },
+      message: ingestCardMessage(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      type: number;
+      data: {
+        embeds: Array<{
+          title?: string;
+          description?: string;
+          fields?: Array<{ name: string; value: string }>;
+        }>;
+        components: unknown[];
+      };
+    };
+    expect(body.type).toBe(7); // UPDATE_MESSAGE: edits the reply in place
+
+    // The exact same transition path as POST /tasks/:id/mark-applied.
+    expect(state.task?.state).toBe('SUBMITTED');
+    expect(state.events).toEqual([
+      expect.objectContaining({
+        taskId: TASK_ID,
+        type: 'MARK_SUBMITTED',
+        fromState: 'NEEDS_INPUT',
+        toState: 'SUBMITTED',
+        data: { reason: 'manual' },
+      }),
+    ]);
+
+    // The embed is preserved (title, quote field) with the status appended…
+    const embed = body.data.embeds[0];
+    expect(embed?.title).toBe('✅ gh/1');
+    expect(embed?.description?.endsWith('\n✅ Marked applied')).toBe(true);
+    expect(embed?.fields).toEqual([
+      { name: 'Your message', value: 'please add https://gh/1' },
+    ]);
+    // …and the buttons are REMOVED (not merely disabled).
+    expect(body.data.components).toEqual([]);
+  });
+
+  it('ingest_mark on an already-sent task: friendly type-7 line, no new event', async () => {
+    const notify = createNotify();
+    const state = createState({ state: 'SUBMITTED' });
+    const { deps } = createDeps(state, { notify });
+    const app = buildServer(deps);
+
+    const res = await postInteraction(app, {
+      type: 3,
+      data: { custom_id: `ingest_mark:${TASK_ID}` },
+      message: ingestCardMessage(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      type: number;
+      data: { embeds: Array<{ description?: string }>; components: unknown[] };
+    };
+    expect(body.type).toBe(7);
+    expect(body.data.embeds[0]?.description).toContain(
+      '✅ Already marked applied',
+    );
+    expect(body.data.components).toEqual([]);
+    expect(state.task?.state).toBe('SUBMITTED');
+    expect(state.events).toHaveLength(0);
+  });
+
+  it('ingest_mark on an archived task: ephemeral notice, nothing changes', async () => {
+    const notify = createNotify();
+    const state = createState({ state: 'DISCARDED' });
+    const { deps } = createDeps(state, { notify });
+    const app = buildServer(deps);
+
+    const res = await postInteraction(app, {
+      type: 3,
+      data: { custom_id: `ingest_mark:${TASK_ID}` },
+      message: ingestCardMessage(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      type: number;
+      data: { flags: number; content: string };
+    };
+    expect(body.type).toBe(4);
+    expect(body.data.flags).toBe(64);
+    expect(body.data.content).toContain('DISCARDED');
+    expect(state.task?.state).toBe('DISCARDED');
+    expect(state.events).toHaveLength(0);
+  });
+
+  it('ingest_mark on a missing task: ephemeral not-found notice', async () => {
+    const notify = createNotify();
+    const state = createState();
+    state.task = null;
+    const { deps } = createDeps(state, { notify });
+    const app = buildServer(deps);
+
+    const res = await postInteraction(app, {
+      type: 3,
+      data: { custom_id: `ingest_mark:${TASK_ID}` },
+      message: ingestCardMessage(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      type: number;
+      data: { flags: number; content: string };
+    };
+    expect(body.type).toBe(4);
+    expect(body.data.flags).toBe(64);
+    expect(body.data.content).toContain('was not found');
+  });
+
+  it('ingest_discard button: DISCARD transition, type-7 edit appends the status and removes the buttons', async () => {
+    const notify = createNotify();
+    const state = createState({ state: 'NEEDS_INPUT' });
+    const { deps } = createDeps(state, { notify });
+    const app = buildServer(deps);
+
+    const res = await postInteraction(app, {
+      type: 3,
+      data: { custom_id: `ingest_discard:${TASK_ID}` },
+      message: ingestCardMessage(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      type: number;
+      data: { embeds: Array<{ description?: string }>; components: unknown[] };
+    };
+    expect(body.type).toBe(7);
+    expect(state.task?.state).toBe('DISCARDED');
+    expect(state.events).toEqual([
+      expect.objectContaining({
+        taskId: TASK_ID,
+        type: 'DISCARD',
+        fromState: 'NEEDS_INPUT',
+        toState: 'DISCARDED',
+        data: { reason: 'manual' },
+      }),
+    ]);
+    expect(body.data.embeds[0]?.description?.endsWith('\n🗑 Discarded')).toBe(
+      true,
+    );
+    expect(body.data.components).toEqual([]);
+  });
+
+  it('ingest_discard tolerates an already-discarded task with a friendly type-7 line', async () => {
+    const notify = createNotify();
+    const state = createState({ state: 'DISCARDED' });
+    const { deps } = createDeps(state, { notify });
+    const app = buildServer(deps);
+
+    const res = await postInteraction(app, {
+      type: 3,
+      data: { custom_id: `ingest_discard:${TASK_ID}` },
+      message: ingestCardMessage(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      type: number;
+      data: { embeds: Array<{ description?: string }>; components: unknown[] };
+    };
+    expect(body.type).toBe(7);
+    expect(body.data.embeds[0]?.description).toContain('🗑 Already discarded');
+    expect(body.data.components).toEqual([]);
+    expect(state.task?.state).toBe('DISCARDED');
+    expect(state.events).toHaveLength(0);
+  });
+
+  it('ingest_discard on a sent application: ephemeral notice, state untouched', async () => {
+    const notify = createNotify();
+    const state = createState({ state: 'SUBMITTED' });
+    const { deps } = createDeps(state, { notify });
+    const app = buildServer(deps);
+
+    const res = await postInteraction(app, {
+      type: 3,
+      data: { custom_id: `ingest_discard:${TASK_ID}` },
+      message: ingestCardMessage(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      type: number;
+      data: { flags: number; content: string };
+    };
+    expect(body.type).toBe(4);
+    expect(body.data.flags).toBe(64);
+    expect(body.data.content).toContain('SUBMITTED');
+    expect(state.task?.state).toBe('SUBMITTED');
+    expect(state.events).toHaveLength(0);
   });
 
   it('otp button: opens a modal (type 9) with a single code input, no state change', async () => {

@@ -1,10 +1,14 @@
 import type { ResolutionResult, TaskState } from '@sower/core';
 import { applicationTasks, events } from '@sower/db';
-import type { ApprovalCard, ApprovalMessagePayload } from '@sower/notify';
+import type {
+  ApprovalCard,
+  ApprovalMessagePayload,
+  DiscordEmbed,
+} from '@sower/notify';
 import { eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { submitOtp } from './otp-actions.js';
-import { approveTask } from './task-actions.js';
+import { approveTask, discardTask, markTaskApplied } from './task-actions.js';
 import type { Db, Deps } from './types.js';
 
 /**
@@ -17,9 +21,11 @@ import type { Db, Deps } from './types.js';
  *
  * SAFETY: the approve button reuses approveTask, which performs a DRY-RUN
  * submit only — the payload is constructed and recorded, never sent to any
- * apply/submit endpoint. Interaction responses (type 7) edit the card without
- * any outbound Discord call, so the whole handler stays inside Discord's 3s
- * response window. The bot token is never read or logged here.
+ * apply/submit endpoint. The #ingest buttons reuse markTaskApplied/
+ * discardTask — pure state bookkeeping, no submission of any kind.
+ * Interaction responses (type 7) edit the card without any outbound Discord
+ * call, so the whole handler stays inside Discord's 3s response window. The
+ * bot token is never read or logged here.
  */
 
 /** Discord interaction request types (subset handled here). */
@@ -133,7 +139,16 @@ export function buildInteractionsHandler(
   };
 }
 
-/** Dispatch an approve:/reject:/otp: button click. */
+/** The button actions this handler dispatches, by custom_id prefix. */
+const COMPONENT_ACTIONS = new Set([
+  'approve',
+  'reject',
+  'otp',
+  'ingest_mark',
+  'ingest_discard',
+]);
+
+/** Dispatch an approve:/reject:/otp:/ingest_mark:/ingest_discard: click. */
 async function handleComponent(
   deps: Deps,
   interaction: DiscordInteraction,
@@ -142,10 +157,7 @@ async function handleComponent(
   const separator = customId.indexOf(':');
   const action = separator === -1 ? customId : customId.slice(0, separator);
   const taskId = separator === -1 ? '' : customId.slice(separator + 1);
-  if (
-    (action !== 'approve' && action !== 'reject' && action !== 'otp') ||
-    !UUID_RE.test(taskId)
-  ) {
+  if (!COMPONENT_ACTIONS.has(action) || !UUID_RE.test(taskId)) {
     return {
       status: 400,
       body: { error: `unsupported component custom_id '${customId}'` },
@@ -156,6 +168,12 @@ async function handleComponent(
   }
   if (action === 'otp') {
     return otpModal(taskId);
+  }
+  if (action === 'ingest_mark') {
+    return ingestMarkInteraction(deps, taskId, interaction);
+  }
+  if (action === 'ingest_discard') {
+    return ingestDiscardInteraction(deps, taskId, interaction);
   }
   return rejectInteraction(deps, taskId, interaction);
 }
@@ -219,6 +237,97 @@ async function rejectInteraction(
       `task left in ${state}`,
     ),
   );
+}
+
+/**
+ * Mark-as-Complete button on a #ingest reply: the exact same MARK_SUBMITTED
+ * path as POST /tasks/:id/mark-applied (markTaskApplied — no submission of
+ * any kind, the human already applied out of band). An already-sent task is
+ * tolerated with a friendly line; archived states get an ephemeral notice.
+ * The type-7 response appends the status line and removes the buttons.
+ */
+async function ingestMarkInteraction(
+  deps: Deps,
+  taskId: string,
+  interaction: DiscordInteraction,
+): Promise<InteractionReply> {
+  const outcome = await markTaskApplied(deps, taskId);
+  if (outcome.kind === 'not_found') {
+    return ephemeral(`Task ${taskId} was not found.`);
+  }
+  if (outcome.kind === 'skipped') {
+    return ephemeral(
+      `Task is in state ${outcome.state}; restore it before marking it applied.`,
+    );
+  }
+  return updateIngestReply(
+    interaction,
+    outcome.kind === 'already'
+      ? '✅ Already marked applied'
+      : '✅ Marked applied',
+  );
+}
+
+/**
+ * Discard button on a #ingest reply: the exact same DISCARD path as POST
+ * /tasks/:id/discard (discardTask). An already-discarded task is tolerated
+ * with a friendly line; a sent application gets an ephemeral notice. The
+ * type-7 response appends the status line and removes the buttons.
+ */
+async function ingestDiscardInteraction(
+  deps: Deps,
+  taskId: string,
+  interaction: DiscordInteraction,
+): Promise<InteractionReply> {
+  const outcome = await discardTask(deps, taskId);
+  if (outcome.kind === 'not_found') {
+    return ephemeral(`Task ${taskId} was not found.`);
+  }
+  if (outcome.kind === 'skipped') {
+    return ephemeral(
+      `Task is in state ${outcome.state}; a sent application cannot be discarded.`,
+    );
+  }
+  return updateIngestReply(
+    interaction,
+    outcome.kind === 'already' ? '🗑 Already discarded' : '🗑 Discarded',
+  );
+}
+
+/** Discord caps embed descriptions at 4096 chars. */
+const EMBED_DESCRIPTION_MAX = 4096;
+
+/**
+ * Type-7 edit for a #ingest reply button: append the status line to the
+ * embed's description and REMOVE the buttons (unlike approval cards, which
+ * keep theirs disabled). Everything else on the embed — title, color, the
+ * quoted-original field — is preserved from the clicked message.
+ */
+function updateIngestReply(
+  interaction: DiscordInteraction,
+  statusLine: string,
+): InteractionReply {
+  const [first, ...rest] = interaction.message?.embeds ?? [];
+  const base: DiscordEmbed = first ?? { title: 'Ingest reply' };
+  let description = base.description
+    ? `${base.description}\n${statusLine}`
+    : statusLine;
+  if (description.length > EMBED_DESCRIPTION_MAX) {
+    // Trim from the FRONT so the just-appended status line stays visible.
+    description = `…${description.slice(
+      description.length - (EMBED_DESCRIPTION_MAX - 1),
+    )}`;
+  }
+  return {
+    status: 200,
+    body: {
+      type: RESPONSE_UPDATE_MESSAGE,
+      data: {
+        embeds: [{ ...base, description }, ...rest],
+        components: [],
+      },
+    },
+  };
 }
 
 /**

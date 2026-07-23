@@ -64,7 +64,12 @@ import {
   recordAgentHeartbeat,
   startSessionCapture,
 } from './sessions-actions.js';
-import { approveTask, requeueTask } from './task-actions.js';
+import {
+  approveTask,
+  discardTask,
+  markTaskApplied,
+  requeueTask,
+} from './task-actions.js';
 import { transitionTask } from './transitions.js';
 import type { Deps } from './types.js';
 
@@ -552,35 +557,16 @@ export function buildServer(deps: Deps): FastifyInstance {
     }
     const note = body.data?.note;
     const taskId = parsed.data.id;
-    const rows = await deps.db
-      .select({ state: applicationTasks.state })
-      .from(applicationTasks)
-      .where(eq(applicationTasks.id, taskId))
-      .limit(1);
-    const row = rows[0];
-    if (!row) {
+    // Shared with the #ingest reply's Discard button (Discord interactions).
+    const outcome = await discardTask(deps, taskId, note);
+    if (outcome.kind === 'not_found') {
       return reply.code(404).send({ error: 'task not found' });
     }
-    if (row.state === 'DISCARDED') {
-      // Already discarded — still refresh the #ingest reply (recovers a line
-      // whose earlier edit failed). Never throws.
-      await refreshIngestReply(deps, taskId);
-      return reply.code(200).send({ ok: true });
-    }
-    if (!canTransition(row.state, 'DISCARD')) {
+    if (outcome.kind === 'skipped') {
       return reply
         .code(409)
-        .send({ error: `cannot discard a task in state '${row.state}'` });
+        .send({ error: `cannot discard a task in state '${outcome.state}'` });
     }
-    await transitionTask(deps.db, taskId, row.state, 'DISCARD', {
-      reason: 'manual',
-      // Omit the key entirely when absent/blank — event data stays minimal.
-      ...(note ? { note } : {}),
-    });
-    // Best-effort: the reply line for this task flips to "discarded", and a
-    // discarded task needs no calendar event (both never throw).
-    await refreshIngestReply(deps, taskId);
-    await syncTaskCalendarEvent(deps, taskId);
     return reply.code(200).send({ ok: true });
   });
 
@@ -645,32 +631,17 @@ export function buildServer(deps: Deps): FastifyInstance {
     }
     const note = body.data?.note;
     const taskId = parsed.data.id;
-    const rows = await deps.db
-      .select({ state: applicationTasks.state })
-      .from(applicationTasks)
-      .where(eq(applicationTasks.id, taskId))
-      .limit(1);
-    const row = rows[0];
-    if (!row) {
+    // Shared with the #ingest reply's Mark-as-Complete button (Discord
+    // interactions). 'already' is the sent no-op — a double-click never errors.
+    const outcome = await markTaskApplied(deps, taskId, note);
+    if (outcome.kind === 'not_found') {
       return reply.code(404).send({ error: 'task not found' });
     }
-    if (row.state === 'SUBMITTED' || row.state === 'CONFIRMED') {
-      return reply.code(200).send({ ok: true });
+    if (outcome.kind === 'skipped') {
+      return reply.code(409).send({
+        error: `cannot mark a task applied in state '${outcome.state}'`,
+      });
     }
-    if (!canTransition(row.state, 'MARK_SUBMITTED')) {
-      return reply
-        .code(409)
-        .send({ error: `cannot mark a task applied in state '${row.state}'` });
-    }
-    await transitionTask(deps.db, taskId, row.state, 'MARK_SUBMITTED', {
-      reason: 'manual',
-      // Omit the key entirely when absent/blank — event data stays minimal.
-      ...(note ? { note } : {}),
-    });
-    // Best-effort: the reply line flips to "applied", and a submitted task
-    // needs no calendar event anymore (both never throw).
-    await refreshIngestReply(deps, taskId);
-    await syncTaskCalendarEvent(deps, taskId);
     return reply.code(200).send({ ok: true });
   });
 

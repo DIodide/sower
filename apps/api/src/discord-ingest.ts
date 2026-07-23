@@ -1,7 +1,11 @@
 import type { PlatformRef } from '@sower/core';
 import { canonicalizeUrl } from '@sower/core';
 import { applicationTasks } from '@sower/db';
-import type { DiscordChannelMessage } from '@sower/notify';
+import type {
+  DiscordActionRow,
+  DiscordChannelMessage,
+  DiscordEmbed,
+} from '@sower/notify';
 import {
   deriveGreenhouseTenant,
   detectPlatform,
@@ -625,16 +629,15 @@ function lineForScreenshot(
 }
 
 /**
- * A per-outcome reply for the channel: every outcome gets one line linking it
- * to its dashboard task under a human-meaningful label (markdown links when
- * DASHBOARD_BASE_URL is set, bold labels otherwise — never the raw task id),
- * capped at MAX_REPLY_ITEMS lines + a "…+N more" summary so the whole message
- * stays under Discord's 2000-char limit.
+ * One reply line per outcome, linking each to its dashboard task under a
+ * human-meaningful label (markdown links when DASHBOARD_BASE_URL is set,
+ * bold labels otherwise — never the raw task id). Shared by the plain reply
+ * renderer and the embed reply's description.
  */
-export function replyFor(
+export function replyLines(
   summary: MessageIngestSummary,
   dashboardBaseUrl?: string,
-): string {
+): string[] {
   const lines = summary.outcomes.map((outcome) =>
     lineForOutcome(outcome, dashboardBaseUrl),
   );
@@ -648,6 +651,19 @@ export function replyFor(
       `🖼️ ${extra} screenshot${extra === 1 ? '' : 's'} recorded — triage on dashboard`,
     );
   }
+  return lines;
+}
+
+/**
+ * A per-outcome reply for the channel, capped at MAX_REPLY_ITEMS lines + a
+ * "…+N more" summary so the whole message stays under Discord's 2000-char
+ * limit. Kept as the plain-text fallback beside the embed reply.
+ */
+export function replyFor(
+  summary: MessageIngestSummary,
+  dashboardBaseUrl?: string,
+): string {
+  const lines = replyLines(summary, dashboardBaseUrl);
   if (lines.length === 0) return 'No job links found in that message.';
   return renderReplyLines(lines);
 }
@@ -674,6 +690,156 @@ export function renderReplyLines(lines: string[]): string {
     reply = `${reply.slice(0, DISCORD_REPLY_MAX_CHARS - 1)}…`;
   }
   return reply;
+}
+
+/** Neutral blurple accent for the #ingest reply embed. */
+export const INGEST_EMBED_COLOR = 0x5865f2;
+/** The embed field quoting the user's original (possibly deleted) message. */
+export const INGEST_QUOTE_FIELD = 'Your message';
+/** Discord embed hard caps: title 256, field value 1024. */
+const EMBED_TITLE_MAX = 256;
+const EMBED_FIELD_VALUE_MAX = 1024;
+
+/**
+ * The verbatim quote of the user's original message for the embed field, or
+ * null when it cannot be quoted (blank, or over the 1024-char field cap) —
+ * null also means the original message must be left in place.
+ */
+export function quotedMessageValue(content: string | undefined): string | null {
+  if (!content || content.trim() === '') return null;
+  return content.length <= EMBED_FIELD_VALUE_MAX ? content : null;
+}
+
+/**
+ * The single task the reply's action buttons act on: exactly one outcome
+ * that created (ingested/unsupported/screenshot) or matched (duplicate)
+ * exactly one task. Multi-link, directory, and error outcomes get none.
+ */
+export function singleActionTaskId(
+  summary: MessageIngestSummary,
+): string | null {
+  if (summary.outcomes.length + summary.screenshotOutcomes.length !== 1) {
+    return null;
+  }
+  const outcome = summary.outcomes[0];
+  if (outcome) {
+    if (outcome.kind === 'ingested' || outcome.kind === 'unsupported') {
+      return outcome.taskId ?? null;
+    }
+    if (outcome.kind === 'duplicate') {
+      return outcome.taskId;
+    }
+    return null;
+  }
+  return summary.screenshotOutcomes[0]?.taskId ?? null;
+}
+
+/**
+ * The embed title at post time: outcome emoji + a compact label. Company —
+ * role is never known this early (the ATS parse runs async), so a lone
+ * outcome shows its shortened URL / filename and refreshIngestReply
+ * upgrades the title once the parse lands; multiple outcomes show a tally.
+ * Embed titles render no markdown, so nothing is escaped here.
+ */
+export function ingestReplyTitle(summary: MessageIngestSummary): string {
+  const emoji = reactionFor(summary);
+  if (summary.outcomes.length + summary.screenshotOutcomes.length === 1) {
+    const outcome = summary.outcomes[0];
+    const label = outcome
+      ? shortenUrlForLabel(outcome.url)
+      : (summary.screenshotOutcomes[0]?.filename ?? '');
+    if (label !== '') {
+      return `${emoji} ${label}`;
+    }
+  }
+  const parts: string[] = [];
+  if (summary.ingested > 0) parts.push(`${summary.ingested} queued`);
+  if (summary.duplicates > 0) {
+    parts.push(
+      `${summary.duplicates} duplicate${summary.duplicates === 1 ? '' : 's'}`,
+    );
+  }
+  if (summary.unsupported > 0) parts.push(`${summary.unsupported} recorded`);
+  if (summary.directories > 0) {
+    parts.push(
+      `${summary.directories} director${summary.directories === 1 ? 'y' : 'ies'}`,
+    );
+  }
+  if (summary.screenshots > 0) {
+    parts.push(
+      `${summary.screenshots} screenshot${summary.screenshots === 1 ? '' : 's'}`,
+    );
+  }
+  if (summary.errors > 0) {
+    parts.push(`${summary.errors} error${summary.errors === 1 ? '' : 's'}`);
+  }
+  return parts.length === 0
+    ? `${emoji} No job links found`
+    : `${emoji} ${parts.join(' · ')}`;
+}
+
+/**
+ * The #ingest reply embed: title = the outcome line, description = the
+ * per-outcome lines (renderReplyLines keeps it under 2000 chars, well
+ * inside the 4096 description cap), plus the quoted-original field when the
+ * quote fits. Worst case ≈ 256 + 2000 + 1024 chars — comfortably under
+ * Discord's 6000-char embed total, so no further shrinking is needed.
+ */
+export function buildIngestEmbed(
+  title: string,
+  lines: string[],
+  quote?: string,
+): DiscordEmbed {
+  const embed: DiscordEmbed = {
+    title:
+      title.length > EMBED_TITLE_MAX
+        ? `${title.slice(0, EMBED_TITLE_MAX - 1)}…`
+        : title,
+    color: INGEST_EMBED_COLOR,
+    description:
+      lines.length === 0
+        ? 'No job links found in that message.'
+        : renderReplyLines(lines),
+  };
+  if (
+    quote !== undefined &&
+    quote !== '' &&
+    quote.length <= EMBED_FIELD_VALUE_MAX
+  ) {
+    embed.fields = [{ name: INGEST_QUOTE_FIELD, value: quote }];
+  }
+  return embed;
+}
+
+/** Discord button styles: 3 = green/success, 4 = red/danger. */
+const BUTTON_STYLE_SUCCESS = 3;
+const BUTTON_STYLE_DANGER = 4;
+
+/**
+ * The action row for a single-task reply: Mark as Complete / Discard,
+ * custom_ids handled by POST /discord/interactions (ingest_mark:/
+ * ingest_discard:, mirroring the approval card's approve:/reject:).
+ */
+export function ingestActionRows(taskId: string): DiscordActionRow[] {
+  return [
+    {
+      type: 1,
+      components: [
+        {
+          type: 2,
+          style: BUTTON_STYLE_SUCCESS,
+          label: 'Mark as Complete',
+          custom_id: `ingest_mark:${taskId}`,
+        },
+        {
+          type: 2,
+          style: BUTTON_STYLE_DANGER,
+          label: 'Discard',
+          custom_id: `ingest_discard:${taskId}`,
+        },
+      ],
+    },
+  ];
 }
 
 export interface DiscordPollResult {
@@ -706,11 +872,44 @@ export function announcedTaskIds(summary: MessageIngestSummary): string[] {
   return [...ids];
 }
 
+/** 403 (missing Manage Messages) is a config gap: warned once per process. */
+let warnedDeleteForbidden = false;
+
+/**
+ * Delete the user's original #ingest message once its content lives on in
+ * the reply embed. Best-effort by contract: the bot did not author the
+ * message, so a missing Manage Messages grant surfaces as a 403 — logged
+ * once, the original (and its reaction) simply stays. NEVER throws.
+ */
+async function deleteOriginalMessage(
+  notify: NonNullable<Deps['notify']>,
+  channelId: string,
+  messageId: string,
+): Promise<void> {
+  try {
+    await notify.deleteChannelMessage(channelId, messageId);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const forbidden = /\b403\b/.test(detail);
+    if (forbidden && warnedDeleteForbidden) {
+      return;
+    }
+    if (forbidden) {
+      warnedDeleteForbidden = true;
+    }
+    console.warn(
+      '[sower] discord ingest: deleting the original message failed (leaving it in place):',
+      detail,
+    );
+  }
+}
+
 /**
  * Poll the #ingest channel: for each fresh message with links OR image
  * attachments (any author), classify + ingest, then react (the emoji doubles
- * as the processed marker so re-polls skip it) and post a concise reply.
- * No-op when Discord/channel unset.
+ * as the processed marker so re-polls skip it) and post an embed reply
+ * (quoting + deleting the original when it fits, with action buttons for a
+ * lone task). No-op when Discord/channel unset.
  */
 export async function runDiscordIngestPoll(
   deps: Deps,
@@ -750,15 +949,35 @@ export async function runDiscordIngestPoll(
       .catch((error) =>
         console.warn('[sower] discord ingest: react failed:', error),
       );
+    const embed = buildIngestEmbed(
+      ingestReplyTitle(summary),
+      replyLines(summary, config.DASHBOARD_BASE_URL),
+      quotedMessageValue(message.content) ?? undefined,
+    );
+    const actionTaskId = singleActionTaskId(summary);
     const reply = await notify
-      .postChannelMessage(
-        channelId,
-        replyFor(summary, config.DASHBOARD_BASE_URL),
-      )
+      .postChannelMessage(channelId, {
+        embeds: [embed],
+        ...(actionTaskId === null
+          ? {}
+          : { components: ingestActionRows(actionTaskId) }),
+      })
       .catch((error) => {
         console.warn('[sower] discord ingest: reply failed:', error);
         return null;
       });
+    // The original message is deleted ONLY when its full content survives as
+    // the embed's quote field AND the embed reply actually posted — and never
+    // when it carries attachments (deleting would kill the CDN URLs the
+    // screenshot tasks/vault fallbacks still point at). A kept original keeps
+    // its reaction as the processed marker; a deleted one can't re-poll.
+    if (
+      reply?.id &&
+      embed.fields?.some((field) => field.name === INGEST_QUOTE_FIELD) &&
+      (message.attachments ?? []).length === 0
+    ) {
+      await deleteOriginalMessage(notify, channelId, message.id);
+    }
     // Remember which reply announced each fresh task, so refreshIngestReply
     // can re-render + edit it as tasks advance. Best-effort: a failed write
     // must never fail the poll (the tasks themselves are already safe).

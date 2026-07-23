@@ -7,7 +7,9 @@ import {
   CARD_COLORS,
 } from './cards.js';
 import {
+  deleteChannelMessage,
   editChannelMessage,
+  getChannelMessage,
   notifyText,
   postApprovalCard,
   postChannelMessage,
@@ -232,6 +234,26 @@ describe('discord REST driver', () => {
       expect(init.method).toBe('POST');
       expect(JSON.parse(init.body as string)).toEqual({ content: '✅ queued' });
     });
+
+    it('POSTs an embed + components payload as-is (string callers unchanged)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ id: 'msg-6' }));
+
+      const payload = {
+        embeds: [{ title: '✅ gh/1', description: 'line', color: 0x5865f2 }],
+        components: [
+          {
+            type: 1 as const,
+            components: [
+              { type: 2 as const, style: 3, custom_id: 'ingest_mark:t-1' },
+            ],
+          },
+        ],
+      };
+      const message = await postChannelMessage('chan-9', payload);
+
+      expect(message).toEqual({ id: 'msg-6' });
+      expect(JSON.parse(fetchCall(0).init.body as string)).toEqual(payload);
+    });
   });
 
   describe('editChannelMessage', () => {
@@ -250,11 +272,81 @@ describe('discord REST driver', () => {
       });
     });
 
+    it('PATCHes an embed payload without touching components (key omitted)', async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ id: 'msg-5' }));
+
+      await editChannelMessage('chan-9', 'msg-5', {
+        content: '',
+        embeds: [{ title: '✅ Acme — SWE', description: 'line' }],
+      });
+
+      const body = JSON.parse(fetchCall(0).init.body as string);
+      expect(body).toEqual({
+        content: '',
+        embeds: [{ title: '✅ Acme — SWE', description: 'line' }],
+      });
+      // `components` absent from the body → Discord leaves the buttons alone.
+      expect('components' in body).toBe(false);
+    });
+
     it('throws a redacted error when the PATCH fails', async () => {
       fetchMock.mockResolvedValueOnce(
         new Response('nope: test-token-from-env', { status: 403 }),
       );
       const error = await editChannelMessage('chan-9', 'msg-5', 'x').catch(
+        (e: Error) => e,
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain('403');
+      expect((error as Error).message).not.toContain('test-token-from-env');
+    });
+  });
+
+  describe('getChannelMessage', () => {
+    it('GETs the message and returns its editable payload', async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          id: 'msg-5',
+          content: '',
+          embeds: [{ title: '✅ gh/1' }],
+          components: [],
+        }),
+      );
+
+      const message = await getChannelMessage('chan-9', 'msg-5');
+
+      expect(message).toMatchObject({
+        id: 'msg-5',
+        embeds: [{ title: '✅ gh/1' }],
+      });
+      const { url, init } = fetchCall(0);
+      expect(url).toBe(
+        'https://discord.com/api/v10/channels/chan-9/messages/msg-5',
+      );
+      expect(init.method).toBe('GET');
+    });
+  });
+
+  describe('deleteChannelMessage', () => {
+    it('DELETEs the message (204 No Content is fine)', async () => {
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+      await deleteChannelMessage('chan-9', 'msg-5');
+
+      const { url, init } = fetchCall(0);
+      expect(url).toBe(
+        'https://discord.com/api/v10/channels/chan-9/messages/msg-5',
+      );
+      expect(init.method).toBe('DELETE');
+    });
+
+    it('throws a redacted error on a 403 (missing Manage Messages)', async () => {
+      fetchMock.mockResolvedValueOnce(
+        new Response('Missing Permissions test-token-from-env', {
+          status: 403,
+        }),
+      );
+      const error = await deleteChannelMessage('chan-9', 'msg-5').catch(
         (e: Error) => e,
       );
       expect(error).toBeInstanceOf(Error);

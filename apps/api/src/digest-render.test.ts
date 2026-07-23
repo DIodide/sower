@@ -3,6 +3,7 @@ import type { WeeklyDigest } from './digest.js';
 import {
   EMAIL_DASHBOARD_BASE_URL,
   renderDigestDiscord,
+  renderDigestDiscordEmbed,
   renderDigestEmail,
 } from './digest-render.js';
 
@@ -176,6 +177,120 @@ describe('renderDigestDiscord', () => {
     expect(text).toContain('… and ');
     // The section header (with its full count) always survives.
     expect(text).toContain('⏰ **Deadlines this week** (40)');
+  });
+});
+
+describe('renderDigestDiscordEmbed', () => {
+  /** Total chars Discord counts toward the 6000-char embed cap. */
+  function embedSize(embed: ReturnType<typeof renderDigestDiscordEmbed>) {
+    return (
+      (embed.title?.length ?? 0) +
+      (embed.fields ?? []).reduce(
+        (sum, field) => sum + field.name.length + field.value.length,
+        0,
+      )
+    );
+  }
+
+  it('renders one field per section with the same lines as the text digest', () => {
+    const embed = renderDigestDiscordEmbed(
+      filledDigest(),
+      'https://dash.example/',
+    );
+
+    expect(embed.title).toBe('Sower weekly — Jul 18');
+    expect(embed.color).toBe(0x5865f2);
+    expect(embed.timestamp).toBe(NOW.toISOString());
+    // One field per section; names carry counts but no markdown bold.
+    expect(embed.fields?.map((field) => field.name)).toEqual([
+      '📤 Submitted (2)',
+      '📥 New — 12 ingested · 3 auto-discarded',
+      '⏳ Waiting on you (4)',
+      '⏰ Deadlines this week (2)',
+      '🎯 In play (2)',
+      '🕸 Going stale (1)',
+    ]);
+    const submitted = embed.fields?.[0]?.value ?? '';
+    // Field values keep the markdown links + escaping (embeds render them).
+    expect(submitted).toContain(`(https://dash.example/tasks/${T1})`);
+    expect(submitted).toContain('SWE Intern \\[2027\\] \\*special\\*');
+    const waiting = embed.fields?.[2]?.value ?? '';
+    expect(waiting).not.toContain('@everyone');
+    expect(waiting).toContain('@​everyone');
+    const inPlay = embed.fields?.[4]?.value ?? '';
+    expect(inPlay).toContain(`(https://dash.example/followups/${F1})`);
+  });
+
+  it('renders an empty pipeline with placeholder values (never an empty field)', () => {
+    const embed = renderDigestDiscordEmbed(
+      emptyDigest(),
+      'https://dash.example',
+    );
+    expect(embed.fields).toHaveLength(6);
+    for (const field of embed.fields ?? []) {
+      expect(field.value.length).toBeGreaterThan(0);
+    }
+    expect(embed.fields?.[0]).toEqual({ name: '📤 Submitted (0)', value: '—' });
+    expect(JSON.stringify(embed)).not.toContain('undefined');
+  });
+
+  it('keeps every field value ≤1024 (… and N more) and the total ≤5800', () => {
+    const digest = filledDigest();
+    const longTitle = 'Very Long Software Engineering Internship Title'.repeat(
+      3,
+    );
+    digest.deadlines = Array.from({ length: 40 }, (_, i) => ({
+      kind: 'task' as const,
+      id: `aaaaaaaa-0000-4000-8000-${String(i).padStart(12, '0')}`,
+      company: `Company Number ${i}`,
+      title: longTitle,
+      due: new Date('2026-07-20T04:00:00Z'),
+    }));
+
+    const embed = renderDigestDiscordEmbed(digest, 'https://dash.example');
+
+    for (const field of embed.fields ?? []) {
+      expect(field.value.length).toBeLessThanOrEqual(1024);
+    }
+    expect(embedSize(embed)).toBeLessThanOrEqual(5800);
+    const deadlines = embed.fields?.[3];
+    // The full count survives in the name; the value collapses.
+    expect(deadlines?.name).toBe('⏰ Deadlines this week (40)');
+    expect(deadlines?.value).toContain('… and ');
+  });
+
+  it('shrinks EVERY section together when the embed total would overflow', () => {
+    const digest = filledDigest();
+    const longTitle = 'T'.repeat(180);
+    const many = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        taskId: `aaaaaaaa-0000-4000-8000-${String(i).padStart(12, '0')}`,
+        company: `C${i}`,
+        title: longTitle,
+        at: new Date('2026-07-15T12:00:00Z'),
+      }));
+    digest.submitted = { count: 30, items: many(30) };
+    digest.deadlines = many(30).map((item) => ({
+      kind: 'task' as const,
+      id: item.taskId,
+      company: item.company,
+      title: item.title,
+      due: new Date('2026-07-20T04:00:00Z'),
+    }));
+    digest.stale = {
+      count: 30,
+      oldest: many(30).map((item) => ({
+        taskId: item.taskId,
+        company: item.company,
+        title: item.title,
+        days: 10,
+      })),
+    };
+
+    const embed = renderDigestDiscordEmbed(digest, 'https://dash.example');
+
+    expect(embedSize(embed)).toBeLessThanOrEqual(5800);
+    expect(embed.fields).toHaveLength(6);
   });
 });
 

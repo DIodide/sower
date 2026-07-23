@@ -5,7 +5,7 @@ import type {
   ResolutionResult,
   TaskState,
 } from '@sower/core';
-import { transition } from '@sower/core';
+import { canTransition, transition } from '@sower/core';
 import { applicationTasks, documents, events, jobs } from '@sower/db';
 import type {
   CalypsoFillResult,
@@ -20,6 +20,8 @@ import {
   workdayJobSlug,
 } from '@sower/platforms';
 import { and, desc, eq, inArray } from 'drizzle-orm';
+import { syncTaskCalendarEvent } from './calendar-sync.js';
+import { refreshIngestReply } from './ingest-reply.js';
 import { createTaskRecorder } from './recorder.js';
 import { transitionTask } from './transitions.js';
 import type { Db, Deps } from './types.js';
@@ -82,6 +84,108 @@ export async function requeueTask(
   });
   await queue.enqueueProcess(taskId);
   return { kind: 'requeued', state: toState };
+}
+
+export type MarkAppliedOutcome =
+  | { kind: 'not_found' }
+  /** Already SUBMITTED/CONFIRMED — the idempotent no-op. */
+  | { kind: 'already'; state: TaskState }
+  | { kind: 'skipped'; state: string }
+  | { kind: 'marked'; state: TaskState };
+
+/**
+ * Mark a task applied out of band (the human completed the application
+ * themselves): the MARK_SUBMITTED transition straight to SUBMITTED. Shared
+ * by POST /tasks/:id/mark-applied and the #ingest reply's Mark-as-Complete
+ * button. Already-sent tasks (SUBMITTED/CONFIRMED) are a tolerant no-op;
+ * the archived DISCARDED/DUPLICATE states are skipped (restore first). The
+ * optional note ("where/how") lands on the event's data. After the
+ * transition the #ingest reply line flips to "applied" and the calendar
+ * event is dropped (both best-effort, never throw).
+ */
+export async function markTaskApplied(
+  deps: Deps,
+  taskId: string,
+  note?: string,
+): Promise<MarkAppliedOutcome> {
+  const rows = await deps.db
+    .select({ state: applicationTasks.state })
+    .from(applicationTasks)
+    .where(eq(applicationTasks.id, taskId))
+    .limit(1);
+  const row = rows[0];
+  if (!row) {
+    return { kind: 'not_found' };
+  }
+  const state = row.state as TaskState;
+  if (state === 'SUBMITTED' || state === 'CONFIRMED') {
+    return { kind: 'already', state };
+  }
+  if (!canTransition(state, 'MARK_SUBMITTED')) {
+    return { kind: 'skipped', state };
+  }
+  const toState = await transitionTask(
+    deps.db,
+    taskId,
+    state,
+    'MARK_SUBMITTED',
+    {
+      reason: 'manual',
+      // Omit the key entirely when absent/blank — event data stays minimal.
+      ...(note ? { note } : {}),
+    },
+  );
+  await refreshIngestReply(deps, taskId);
+  await syncTaskCalendarEvent(deps, taskId);
+  return { kind: 'marked', state: toState };
+}
+
+export type DiscardOutcome =
+  | { kind: 'not_found' }
+  /** Already DISCARDED — the idempotent no-op (still refreshes the reply). */
+  | { kind: 'already' }
+  | { kind: 'skipped'; state: string }
+  | { kind: 'discarded'; state: TaskState };
+
+/**
+ * Discard a task (terminal DISCARDED state). Shared by POST
+ * /tasks/:id/discard and the #ingest reply's Discard button. Allowed from
+ * every non-terminal state except SUBMITTED/CONFIRMED (an application
+ * already sent can't be "removed from the queue"); re-discarding is a
+ * tolerant no-op that still refreshes the reply (recovers a line whose
+ * earlier edit failed). The optional note ("why") lands on the event's
+ * data. Reply refresh + calendar drop are best-effort, never throw.
+ */
+export async function discardTask(
+  deps: Deps,
+  taskId: string,
+  note?: string,
+): Promise<DiscardOutcome> {
+  const rows = await deps.db
+    .select({ state: applicationTasks.state })
+    .from(applicationTasks)
+    .where(eq(applicationTasks.id, taskId))
+    .limit(1);
+  const row = rows[0];
+  if (!row) {
+    return { kind: 'not_found' };
+  }
+  const state = row.state as TaskState;
+  if (state === 'DISCARDED') {
+    await refreshIngestReply(deps, taskId);
+    return { kind: 'already' };
+  }
+  if (!canTransition(state, 'DISCARD')) {
+    return { kind: 'skipped', state };
+  }
+  const toState = await transitionTask(deps.db, taskId, state, 'DISCARD', {
+    reason: 'manual',
+    // Omit the key entirely when absent/blank — event data stays minimal.
+    ...(note ? { note } : {}),
+  });
+  await refreshIngestReply(deps, taskId);
+  await syncTaskCalendarEvent(deps, taskId);
+  return { kind: 'discarded', state: toState };
 }
 
 export type ApproveOutcome =
