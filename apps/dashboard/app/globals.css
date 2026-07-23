@@ -1717,11 +1717,17 @@ button.due-cell-btn:hover {
 }
 
 /* read-only note display (sent/archived tasks on the detail header) */
+/* Read-only rows show only the note's first line, ellipsized exactly like
+   the editable .note-btn — full text in the tooltip / on the task page. */
 .note-static {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
   font-size: 0.8125rem;
   color: var(--ink-muted);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .note-edit {

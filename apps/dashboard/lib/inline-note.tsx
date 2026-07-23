@@ -158,10 +158,18 @@ export function InlineNote({
     setEditing(true);
   };
 
-  // Read-only display (after all hooks): the note text as-is, or nothing.
+  // Read-only display (after all hooks): the FIRST LINE only, like the
+  // editable button — a Sent row's note is often a whole cover letter, and
+  // the full text would blow the row open (it lives in the title tooltip
+  // and on the task page). Nothing renders when there is no note.
   if (readOnly) {
     if (value.trim() === '') return null;
-    return <span className="note-static">{value}</span>;
+    const staticFirstLine = value.split('\n', 1)[0] ?? '';
+    return (
+      <span className="note-static" title={value}>
+        {staticFirstLine === '' ? '…' : staticFirstLine}
+      </span>
+    );
   }
 
   const dirty = value.trim() !== savedValue.trim();
