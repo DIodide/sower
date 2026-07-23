@@ -52,6 +52,17 @@ const NOISE_FROM_DOMAINS: readonly string[] = [
 const NOISE_SUBJECT_RE =
   /newsletter|digest|job alert|jobs? (?:for you|you may|picked for)|weekly (?:update|roundup)/i;
 
+/**
+ * Transactional/ops mail that is NEVER a follow-up, whatever else the body
+ * says (live false positives from the first prod sweep): OTP/verification
+ * codes (the OTP reader's domain, not ours), application-received
+ * confirmations, and billing/quota alerts (a GCP "90% of budget reached"
+ * mail from google.com classified as a REJECTION on the Google
+ * application). Checked on the subject only — bodies quote too much.
+ */
+const NOISE_TRANSACTIONAL_SUBJECT_RE =
+  /security code|verification code|one.?time (?:code|passcode)|verify your|thank(?:s| you) for (?:applying|your (?:application|interest))|application (?:has been )?received|we(?:'ve| have) received your application|budget|billing|invoice|payment/i;
+
 const REJECTION_RE =
   /\bunfortunately\b|not (?:be )?moving forward|not to move forward|other candidates|will not be (?:progressing|proceeding)/i;
 
@@ -268,6 +279,9 @@ export function classifyFollowupMail(
     return null;
   }
   if (NOISE_SUBJECT_RE.test(input.subject)) {
+    return null;
+  }
+  if (NOISE_TRANSACTIONAL_SUBJECT_RE.test(input.subject)) {
     return null;
   }
 

@@ -174,6 +174,38 @@ describe('classifyFollowupMail — recruiter fallback and noise', () => {
     expect(result?.title).toBe('Recruiter — Your application at Datadog');
   });
 
+  it('returns null for transactional mail even when the body carries follow-up phrases (live false positives)', () => {
+    // Each of these was ingested as a follow-up in the first prod sweep.
+    const cases = [
+      {
+        subject: 'Security code for your application to The Trade Desk',
+        bodyText: 'Your one-time code is 123456. It expires in 10 minutes.',
+      },
+      {
+        subject: 'Thank You for Applying to The Trade Desk, Ibraheem',
+        bodyText:
+          'We received your application. You may receive an online assessment as a next step.',
+      },
+      {
+        subject: 'Thank you for your interest in Akuna Capital!',
+        bodyText:
+          'We look forward to reviewing your application. Interview questions are confidential.',
+      },
+      {
+        // A GCP billing alert from google.com attached to the Google
+        // application as a REJECTION before this rule existed.
+        subject: '90% of budget reached',
+        bodyText:
+          'Your billing account has reached 90% of the budget. Unfortunately you may incur charges.',
+      },
+    ];
+    for (const c of cases) {
+      expect(
+        classifyFollowupMail(mail({ ...c, from: 'no-reply@example.com' })),
+      ).toBeNull();
+    }
+  });
+
   it('returns null for LinkedIn noise (job digests)', () => {
     expect(
       classifyFollowupMail(
