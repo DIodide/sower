@@ -66,7 +66,7 @@ export async function processTask(
   deps: Deps,
   taskId: string,
 ): Promise<ProcessOutcome> {
-  const { db, config } = deps;
+  const { db } = deps;
 
   const rows = await db
     .select({ task: applicationTasks, job: jobs })
@@ -251,87 +251,15 @@ export async function processTask(
       };
     }
 
-    // DB-first profile: the profiles row wins; config.PROFILE_PATH is only
-    // the dev fallback. NEVER throws — an unconfigured profile resolves as
-    // the empty profile (nothing profile-derived resolves; see the note
-    // below) instead of burning attempts with "Failed to read profile file".
-    const profile = await getProfile(db, config.PROFILE_PATH);
-    // The curated answer bank (loaded once at startup, on deps), the answers
-    // bank (user-entered values keyed by normalized label), and stored
-    // documents (resume/cover letter files) extend the profile as answer
-    // sources. Truthfulness is preserved: nothing is ever guessed.
-    //
-    // The user bank is COMPANY-AWARE: each row carries its company scope
-    // ('' = global) and resolveAnswers matches this job's companyKey — a
-    // company-scoped answer resolves ONLY for its own company, and wins over
-    // a global answer for the same question (isolation invariant).
-    const bankRows = await db
-      .select({
-        normalizedLabel: answers.normalizedLabel,
-        value: answers.value,
-        company: answers.company,
-      })
-      .from(answers);
-    const documentRows = await db
-      .select({
-        kind: documents.kind,
-        storagePath: documents.storagePath,
-        filename: documents.filename,
-      })
-      .from(documents);
-    // This job's companyKey: the ingest-recorded company, else the discovered
-    // spec's (a raw-URL ingest records none), normalized like bank scopes.
-    const companyKey = (job.company ?? jobSpec.company ?? '')
-      .toLowerCase()
-      .trim();
-    const { resolved, missing } = await resolveAnswers(
-      jobSpec.questions,
-      profile,
-      {
-        bank: bankRows.map((row) => ({
-          normalizedLabel: row.normalizedLabel,
-          value: row.value as BankValue,
-          company: row.company,
-        })),
-        documents: documentRows,
-        answerBank: deps.answerBank,
-        company: companyKey,
-      },
-    );
-    // REVIEW gates on REQUIRED answers only; optional gaps never block.
-    const requiredMissing = missing.filter((question) => question.required);
-    // 'account-required' specs (workday) have NO discoverable questions at this
-    // tier — the form is behind an account + browser session. Such a task must
-    // NOT flow to REVIEW (which implies "ready to approve & submit"); it parks
-    // in NEEDS_INPUT until the account/browser tier can fill it.
+    const resolution = await computeResolution(deps, job, jobSpec);
     const accountRequired = jobSpec.formAccess === 'account-required';
-    const resolution: ResolutionResult = {
-      resolved,
-      missing,
-      requiredMissingCount: requiredMissing.length,
-      optionalMissingCount: missing.length - requiredMissing.length,
-    };
-    const notes: string[] = [];
-    if (accountRequired) {
-      notes.push(
-        'Applying to this Workday job requires a per-tenant candidate account and a browser session, which the account/browser tier has not run yet. The title, company, and description are captured; the application form is not yet automatable.',
-      );
-    }
-    if (isEmptyProfile(profile)) {
-      notes.push(
-        'No profile configured — set one up in Answers → Profile. Resolution ran without profile facts (only saved answers and documents could auto-fill).',
-      );
-    }
-    if (notes.length > 0) {
-      resolution.note = notes.join(' ');
-    }
     await db
       .update(applicationTasks)
       .set({ resolution, updatedAt: new Date() })
       .where(eq(applicationTasks.id, taskId));
 
     const event =
-      requiredMissing.length === 0 && !accountRequired
+      resolution.requiredMissingCount === 0 && !accountRequired
         ? 'RESOLVED_ALL'
         : 'RESOLVED_PARTIAL';
     currentState = await transitionTask(
@@ -340,12 +268,11 @@ export async function processTask(
       currentState,
       event,
       {
-        resolved: resolved.length,
-        missing: missing.length,
-        requiredMissing: requiredMissing.length,
+        resolved: resolution.resolved.length,
+        missing: resolution.missing.length,
+        requiredMissing: resolution.requiredMissingCount,
       },
-      // The pass completed without failure: clear any lastError left by a
-      // previous FAILED attempt in the SAME update that persists the outcome
+      // A completed (non-failing) pass: clear any stale lastError alongside
       // (live case: Aquatic resolved fine but kept showing an old ENOENT).
       { lastError: null },
     );
@@ -372,8 +299,8 @@ export async function processTask(
     return {
       kind: 'processed',
       state: currentState,
-      resolved: resolved.length,
-      missing: missing.length,
+      resolved: resolution.resolved.length,
+      missing: resolution.missing.length,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -651,4 +578,135 @@ export async function recordJobDescription(
     content,
     contentHash,
   });
+}
+
+/**
+ * Resolution over a jobSpec's questions from every answer source (DB-first
+ * profile, curated + user answer banks, stored documents) — the exact pass
+ * processTask runs, extracted so agent-DISCOVERED specs (unknown-platform
+ * tasks, which have no adapter and never flow through processTask) resolve
+ * too. Truthfulness invariant unchanged: nothing is ever guessed.
+ */
+export async function computeResolution(
+  deps: Deps,
+  job: { company: string | null },
+  jobSpec: JobSpec,
+): Promise<ResolutionResult> {
+  const { db, config } = deps;
+  // DB-first profile: the profiles row wins; config.PROFILE_PATH is only
+  // the dev fallback. NEVER throws — an unconfigured profile resolves as
+  // the empty profile instead of burning attempts.
+  const profile = await getProfile(db, config.PROFILE_PATH);
+  // The user bank is COMPANY-AWARE: each row carries its company scope
+  // ('' = global); a company-scoped answer resolves ONLY for its own
+  // company and wins over a global answer for the same question.
+  const bankRows = await db
+    .select({
+      normalizedLabel: answers.normalizedLabel,
+      value: answers.value,
+      company: answers.company,
+    })
+    .from(answers);
+  const documentRows = await db
+    .select({
+      kind: documents.kind,
+      storagePath: documents.storagePath,
+      filename: documents.filename,
+    })
+    .from(documents);
+  const companyKey = (job.company ?? jobSpec.company ?? '')
+    .toLowerCase()
+    .trim();
+  const { resolved, missing } = await resolveAnswers(
+    jobSpec.questions,
+    profile,
+    {
+      bank: bankRows.map((row) => ({
+        normalizedLabel: row.normalizedLabel,
+        value: row.value as BankValue,
+        company: row.company,
+      })),
+      documents: documentRows,
+      answerBank: deps.answerBank,
+      company: companyKey,
+    },
+  );
+  const requiredMissing = missing.filter((question) => question.required);
+  const resolution: ResolutionResult = {
+    resolved,
+    missing,
+    requiredMissingCount: requiredMissing.length,
+    optionalMissingCount: missing.length - requiredMissing.length,
+  };
+  const notes: string[] = [];
+  if (jobSpec.formAccess === 'account-required') {
+    notes.push(
+      'Applying to this Workday job requires a per-tenant candidate account and a browser session, which the account/browser tier has not run yet. The title, company, and description are captured; the application form is not yet automatable.',
+    );
+  }
+  if (isEmptyProfile(profile)) {
+    notes.push(
+      'No profile configured — set one up in Answers → Profile. Resolution ran without profile facts (only saved answers and documents could auto-fill).',
+    );
+  }
+  if (notes.length > 0) {
+    resolution.note = notes.join(' ');
+  }
+  return resolution;
+}
+
+export type DiscoveredResolveOutcome =
+  | { kind: 'not_found' }
+  | { kind: 'no_questions' }
+  | { kind: 'resolved'; resolution: ResolutionResult };
+
+/**
+ * Resolution for a task whose questions arrived via the investigation agent
+ * rather than an adapter (unknown platform, parked NEEDS_INPUT — never
+ * enqueued, so processTask never runs). Writes the resolution IN PLACE and
+ * records a RESOLVED_* event row; the state is deliberately untouched — a
+ * parked task stays parked, it just becomes answerable.
+ */
+export async function resolveDiscoveredTask(
+  deps: Deps,
+  taskId: string,
+): Promise<DiscoveredResolveOutcome> {
+  const rows = await deps.db
+    .select({ task: applicationTasks, job: jobs })
+    .from(applicationTasks)
+    .innerJoin(jobs, eq(applicationTasks.jobId, jobs.id))
+    .where(eq(applicationTasks.id, taskId))
+    .limit(1);
+  const row = rows[0];
+  if (!row) {
+    return { kind: 'not_found' };
+  }
+  const jobSpec = row.task.jobSpec;
+  if (
+    !jobSpec ||
+    !Array.isArray(jobSpec.questions) ||
+    jobSpec.questions.length === 0
+  ) {
+    return { kind: 'no_questions' };
+  }
+  const resolution = await computeResolution(deps, row.job, jobSpec);
+  await deps.db
+    .update(applicationTasks)
+    .set({ resolution, updatedAt: new Date() })
+    .where(eq(applicationTasks.id, taskId));
+  await deps.db.insert(events).values({
+    taskId,
+    type:
+      resolution.requiredMissingCount === 0 &&
+      jobSpec.formAccess !== 'account-required'
+        ? 'RESOLVED_ALL'
+        : 'RESOLVED_PARTIAL',
+    data: {
+      resolved: resolution.resolved.length,
+      missing: resolution.missing.length,
+      requiredMissing: resolution.requiredMissingCount,
+      source: 'discovered-spec',
+    },
+  });
+  return { kind: 'resolved', resolution };
 }

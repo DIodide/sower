@@ -1227,6 +1227,9 @@ describe('buildServer', () => {
           selectResults: [
             [{ id: 'run-1' }], // latest run
             [joinRow], // task+job join
+            // resolveDiscoveredTask's own task+job re-select: this fixture
+            // row carries no jobSpec, so resolution no-ops after one read.
+            [joinRow],
             // Latest stored description for the job: version 2, other content.
             [{ version: 2, contentHash: 'someotherhash' }],
           ],

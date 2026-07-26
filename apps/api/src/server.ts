@@ -46,6 +46,7 @@ import {
   persistJobDeadline,
   processTask,
   recordJobDescription,
+  resolveDiscoveredTask,
 } from './process.js';
 import { registerProfileRoutes } from './profile-routes.js';
 import {
@@ -1025,6 +1026,34 @@ export function buildServer(deps: Deps): FastifyInstance {
   // from a screenshot (a kind='screenshot' document exists for it).
   // triggerInvestigation self-gates on config and never throws; `fired`
   // reports whether a run actually started.
+  // Re-run answer resolution over a task's EXISTING jobSpec — the backfill
+  // for agent-discovered specs that predate resolve-on-discovery (and a
+  // manual retrigger after profile/bank edits on parked tasks). No state
+  // change; adapter-flowing tasks should Retry/Re-ingest instead.
+  app.post('/tasks/:id/resolve', async (request, reply) => {
+    const params = z
+      .object({ id: z.string().uuid() })
+      .safeParse(request.params);
+    if (!params.success) {
+      return reply.code(400).send({ error: 'invalid task id' });
+    }
+    const outcome = await resolveDiscoveredTask(deps, params.data.id);
+    if (outcome.kind === 'not_found') {
+      return reply.code(404).send({ error: 'task not found' });
+    }
+    if (outcome.kind === 'no_questions') {
+      return reply
+        .code(409)
+        .send({ error: 'task has no discovered questions to resolve' });
+    }
+    return reply.code(200).send({
+      ok: true,
+      resolved: outcome.resolution.resolved.length,
+      missing: outcome.resolution.missing.length,
+      requiredMissing: outcome.resolution.requiredMissingCount,
+    });
+  });
+
   app.post('/tasks/:id/investigate', async (request, reply) => {
     const parsed = taskParamsSchema.safeParse(request.params);
     if (!parsed.success) {
@@ -1268,6 +1297,16 @@ export function buildServer(deps: Deps): FastifyInstance {
               title: spec.title,
               confidence: result.confidence,
             },
+          });
+          // Parked unknown-platform tasks never reach processTask, so the
+          // discovered questions would stay unresolved — and unanswerable on
+          // the dashboard ("Not resolved yet"). Resolve in place, best-effort:
+          // a resolution hiccup must not lose the persisted spec.
+          await resolveDiscoveredTask(deps, taskId).catch((error) => {
+            request.log.error(
+              { err: error },
+              'discovered-spec resolution failed',
+            );
           });
         } else {
           await deps.db.insert(events).values({
