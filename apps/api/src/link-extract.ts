@@ -87,8 +87,14 @@ export function isIngestableJobUrl(platform: string, url: string): boolean {
  * gh_jid, no board host), so this is the candidate id the VERIFIED tenant
  * probe (deriveGreenhouseTenant) can confirm against the fixed boards API.
  * Pure extraction — a false candidate merely costs the probe a few 404s.
+ *
+ * LEADING ids too: greenhouse's hosted careers pages put the id FIRST
+ * (careers.appian.com/jobs/8041243-product-manager-intern), which produced
+ * live duplicates — the careers URL keyed by URL while the board URL keyed
+ * greenhouse:appian:8041243. Trailing wins when both shapes match.
  */
 const TRAILING_NUMERIC_ID_RE = /^(?:.*-)?(\d{6,})$/;
+const LEADING_NUMERIC_ID_RE = /^(\d{6,})(?:-.*)?$/;
 
 export function trailingNumericJobId(url: string): string | null {
   let pathname: string;
@@ -104,7 +110,11 @@ export function trailingNumericJobId(url: string): string | null {
   if (!last) {
     return null;
   }
-  return TRAILING_NUMERIC_ID_RE.exec(last)?.[1] ?? null;
+  return (
+    TRAILING_NUMERIC_ID_RE.exec(last)?.[1] ??
+    LEADING_NUMERIC_ID_RE.exec(last)?.[1] ??
+    null
+  );
 }
 
 /** Extract distinct http(s) URLs from message text (trailing punctuation trimmed). */

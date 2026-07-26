@@ -9,7 +9,7 @@ import {
 } from '@sower/platforms';
 import { computeDedupeKey } from '@sower/sources';
 import { asc, eq } from 'drizzle-orm';
-import { isIngestableJobUrl } from './link-extract.js';
+import { isIngestableJobUrl, trailingNumericJobId } from './link-extract.js';
 import { transitionTask } from './transitions.js';
 import type { Deps } from './types.js';
 
@@ -143,6 +143,23 @@ export async function ingestJob(
       resolvedUrl = `https://job-boards.greenhouse.io/${tenant}/jobs/${ref.externalId}`;
       canonicalUrl = canonicalizeUrl(resolvedUrl);
       ref = detectPlatform(canonicalUrl);
+    }
+  }
+  // Unknown-platform URLs with a greenhouse-shaped numeric id in the final
+  // segment (leading OR trailing — careers.appian.com/jobs/8041243-slug)
+  // get the same verified probe: a hit rewrites to the canonical board URL
+  // so the ingest COLLIDES with any board-hosted ingest of the same posting
+  // instead of minting a URL-keyed duplicate (live: two Appian roles each
+  // ingested twice). A null probe changes nothing — the task parks as before.
+  if (ref.platform === 'unknown') {
+    const candidateId = trailingNumericJobId(resolvedUrl);
+    if (candidateId !== null) {
+      const tenant = await deriveGreenhouseTenant(resolvedUrl, candidateId);
+      if (tenant !== null) {
+        resolvedUrl = `https://job-boards.greenhouse.io/${tenant}/jobs/${candidateId}`;
+        canonicalUrl = canonicalizeUrl(resolvedUrl);
+        ref = detectPlatform(canonicalUrl);
+      }
     }
   }
   const dedupeKey = computeDedupeKey(ref, canonicalUrl);

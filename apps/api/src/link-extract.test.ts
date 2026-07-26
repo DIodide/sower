@@ -20,6 +20,18 @@ describe('trailingNumericJobId', () => {
     ).toBe('7011263002');
   });
 
+  it('extracts a LEADING id (greenhouse hosted careers pages — live appian shape)', () => {
+    expect(
+      trailingNumericJobId(
+        'https://careers.appian.com/jobs/8041243-product-manager-intern-2027-graduates',
+      ),
+    ).toBe('8041243');
+    // Trailing wins when both shapes could match.
+    expect(
+      trailingNumericJobId('https://acme.com/jobs/123456-role-789012'),
+    ).toBe('789012');
+  });
+
   it('extracts a purely numeric final segment', () => {
     expect(trailingNumericJobId('https://acme.com/careers/8018853')).toBe(
       '8018853',
