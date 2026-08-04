@@ -245,7 +245,9 @@ describe('GmailInboxReader.searchMessageIds / readMessage', () => {
       .find((url) => url.includes('/messages?'));
     expect(listCall).toContain('maxResults=50');
     expect(listCall).toContain(
-      encodeURIComponent('newer_than:7d in:inbox (category:primary OR category:updates)'),
+      encodeURIComponent(
+        'newer_than:7d in:inbox (category:primary OR category:updates)',
+      ),
     );
   });
 
