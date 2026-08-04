@@ -144,14 +144,16 @@ const MONTH_NAME_RE =
 const RELATIVE_DUE_RE =
   /\b(?:within|in)\s+(?:the\s+next\s+)?(\d{1,3})\s+days?\b/i;
 
-/** "by August 4" / "by Aug 4th, 2026" — a named month + day (+ year). */
+/** "by/before/on or before August 4" (live miss: Capital One's "must be
+ * completed before August 13, 2026") — a named month + day (+ year). */
 const BY_MONTH_DAY_RE = new RegExp(
-  `\\bby\\s+(?:end of day\\s+|eod\\s+)?(${MONTH_NAME_RE})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s+(\\d{4}))?\\b`,
+  `\\b(?:by|before|on or before)\\s+(?:end of day\\s+|eod\\s+)?(${MONTH_NAME_RE})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s+(\\d{4}))?\\b`,
   'i',
 );
 
 /** "by 08/04" / "by 8/4/2026" — US month-first numeric form. */
-const BY_NUMERIC_RE = /\bby\s+(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/;
+const BY_NUMERIC_RE =
+  /\b(?:by|before|on or before)\s+(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/;
 
 /** "september"/"Sept."/"jul" → month number, or undefined when unknown. */
 function monthNumber(name: string): number | undefined {

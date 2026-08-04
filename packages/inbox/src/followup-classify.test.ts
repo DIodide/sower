@@ -174,6 +174,20 @@ describe('classifyFollowupMail — recruiter fallback and noise', () => {
     expect(result?.title).toBe('Recruiter — Your application at Datadog');
   });
 
+  it("parses 'before <date>' phrasing (live Capital One shape)", () => {
+    const result = classifyFollowupMail(
+      mail({
+        subject:
+          'One step closer! What\u2019s next for your Capital One application',
+        from: 'careers@careers.capitalone.com',
+        bodyText:
+          'Both assessments must be completed before August 13, 2026 in order for your application to be considered. Online assessment details follow.',
+      }),
+    );
+    expect(result?.kind).toBe('assessment');
+    expect(result?.dueDate).toBe('2026-08-13');
+  });
+
   it('returns null for transactional mail even when the body carries follow-up phrases (live false positives)', () => {
     // Each of these was ingested as a follow-up in the first prod sweep.
     const cases = [
