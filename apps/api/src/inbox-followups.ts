@@ -37,8 +37,15 @@ import type { Deps } from './types.js';
  * "Source email" view.
  */
 
-/** Simple-on-purpose: recent primary-inbox mail; matching happens here. */
-export const FOLLOWUP_SEARCH_QUERY = 'newer_than:7d in:inbox category:primary';
+/**
+ * Recent inbox mail from the primary AND updates tabs — ATS/no-reply mail
+ * routinely classifies as Updates (live miss: a Capital One OA invite from
+ * careers.capitalone.com landed in CATEGORY_UPDATES and was never scanned).
+ * Promotions/social/forums stay excluded; the sender-anchored matcher and
+ * the classifier absorb the extra Updates noise.
+ */
+export const FOLLOWUP_SEARCH_QUERY =
+  'newer_than:7d in:inbox (category:primary OR category:updates)';
 
 /** Message ids examined per run (Gmail's newest-first ordering). */
 const MAX_MESSAGES_PER_RUN = 100;

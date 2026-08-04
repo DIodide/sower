@@ -235,7 +235,7 @@ describe('GmailInboxReader.searchMessageIds / readMessage', () => {
     const fetchMock = createSearchFetch();
     const reader = new GmailInboxReader(config, fetchMock);
     const ids = await reader.searchMessageIds(
-      'newer_than:7d in:inbox category:primary',
+      'newer_than:7d in:inbox (category:primary OR category:updates)',
       50,
     );
     expect(ids).toEqual(['m1', 'm2']);
@@ -245,7 +245,7 @@ describe('GmailInboxReader.searchMessageIds / readMessage', () => {
       .find((url) => url.includes('/messages?'));
     expect(listCall).toContain('maxResults=50');
     expect(listCall).toContain(
-      encodeURIComponent('newer_than:7d in:inbox category:primary'),
+      encodeURIComponent('newer_than:7d in:inbox (category:primary OR category:updates)'),
     );
   });
 
