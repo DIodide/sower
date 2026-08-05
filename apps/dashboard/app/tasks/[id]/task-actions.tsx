@@ -1,7 +1,7 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useActionState } from 'react';
+import { useActionState, useEffect } from 'react';
 import { SECTIONS } from '../../../lib/format';
 import type { ActionResult } from './actions';
 import {
@@ -124,14 +124,18 @@ export function TaskActions({ taskId, mode }: { taskId: string; mode: Mode }) {
       }
       return requeueTask(taskId);
     };
-    const outcome = await run();
-    // The action's revalidatePath alone can leave THIS page's banner/badge
-    // stale (the restore-from-archive bug); an explicit client refresh makes
-    // every state change land without a manual reload. Reingest included:
-    // the reset happens in place, so this page IS the (same) task.
-    if (outcome.ok) router.refresh();
-    return outcome;
+    return run();
   }, null);
+
+  // The refresh must fire AFTER the action's transition settles: calling
+  // router.refresh() inside the useActionState reducer runs while the form
+  // transition is still pending, and the refetch gets absorbed — the page
+  // kept its stale banner/badge until a manual reload (live: Mark applied).
+  // The action's revalidatePath alone is not enough either (the
+  // restore-from-archive bug); this effect makes every state change land.
+  useEffect(() => {
+    if (result?.ok) router.refresh();
+  }, [result, router]);
 
   const label = LABELS[mode];
   const noteMode = NOTE_MODES[mode];
