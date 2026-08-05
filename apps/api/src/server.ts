@@ -40,6 +40,7 @@ import { ingestJob } from './ingest.js';
 import { runIngestionPoll } from './ingest-poll.js';
 import { refreshIngestReply } from './ingest-reply.js';
 import { triggerInvestigation } from './investigate-trigger.js';
+import { registerMobileRoutes } from './mobile-routes.js';
 import { requestOtp, submitOtp } from './otp-actions.js';
 import {
   backfillJobFields,
@@ -1919,6 +1920,12 @@ export function buildServer(deps: Deps): FastifyInstance {
   // GET/PATCH /followups/:id, POST /followups/:id/transition (x-api-key via
   // the same server-wide preHandler).
   registerFollowupRoutes(app, deps);
+
+  // Compact READ-ONLY endpoints for the iPhone app (GET /mobile/overview,
+  // /mobile/tasks/:id, /mobile/followups/:id — the dashboard reads the DB
+  // directly, a phone cannot). Zero writes; x-api-key via the same
+  // server-wide preHandler.
+  registerMobileRoutes(app, deps);
 
   // /resumes (list/sync/edit/ask/fork + versions + run polling; x-api-key
   // via the same server-wide preHandler).
