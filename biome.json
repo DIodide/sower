@@ -11,7 +11,8 @@
       "!**/node_modules",
       "!**/.next",
       "!**/dist",
-      "!packages/db/drizzle"
+      "!packages/db/drizzle",
+      "!ios"
     ]
   },
   "formatter": {
