@@ -399,6 +399,8 @@ describe('discoverForm', () => {
       'Grep',
       'Glob',
       'Skill',
+      'WebSearch',
+      'WebFetch',
     ]);
     expect(call.options.allowedTools).toEqual([
       'Bash',
@@ -408,6 +410,8 @@ describe('discoverForm', () => {
       'Grep',
       'Glob',
       'Skill',
+      'WebSearch',
+      'WebFetch',
       'ToolSearch',
     ]);
     expect(call.options.permissionMode).toBe('dontAsk');

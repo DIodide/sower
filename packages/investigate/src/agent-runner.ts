@@ -61,14 +61,12 @@ export const DENIED_TOOLS = [
 
 /**
  * Interpretation-agent denial list: the interpretation agent gets a local
- * scratch workspace (Bash/Read/Write/Edit/Grep/Glob/Skill under a
- * per-run mkdtemp cwd), so only web access, subagent spawning, REPL, and
- * notebook editing stay removed outright — a prompt-injected job page must
- * never reach the network or fan out into subagents from this run.
+ * scratch workspace (Bash/Read/Write/Edit/Grep/Glob/Skill under a per-run
+ * mkdtemp cwd) AND web tools (user-directed, 2026-08-09: research beats
+ * isolation here — the env-starved subprocess remains the secret boundary).
+ * Only subagent spawning, REPL, and notebook editing stay removed.
  */
 export const INTERPRET_DENIED_TOOLS = [
-  'WebSearch',
-  'WebFetch',
   'Task',
   'Agent',
   'REPL',

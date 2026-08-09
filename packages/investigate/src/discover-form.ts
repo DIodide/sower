@@ -198,8 +198,8 @@ const INTERPRET_MODEL = 'claude-fable-5';
 const INTERPRET_EFFORT = 'medium';
 /**
  * The interpretation agent's workspace tools: local shell/file/search/skill
- * work inside its per-run scratch cwd. No web, no subagents (see
- * INTERPRET_DENIED_TOOLS in agent-runner.ts).
+ * work inside its per-run scratch cwd, plus web research. No subagents
+ * (see INTERPRET_DENIED_TOOLS in agent-runner.ts).
  */
 const INTERPRET_TOOLS = [
   'Bash',
@@ -209,6 +209,8 @@ const INTERPRET_TOOLS = [
   'Grep',
   'Glob',
   'Skill',
+  'WebSearch',
+  'WebFetch',
 ];
 const MAX_EXTRACTION_JSON_CHARS = 24_000;
 const MAX_DESCRIPTION_MARKDOWN_CHARS = 20_000;
