@@ -19,8 +19,13 @@ const FLASH_MS = 1_500;
 const NOTE_MAX_CHARS = 20_000;
 
 /** JS autogrow fallback for browsers without `field-sizing: content`.
- *  Exported for the job-notes panel, which shares the .note-edit idiom. */
+ *  Exported for the job-notes panel, which shares the .note-edit idiom.
+ *  A box the user has hand-resized (data-manual-size) is never re-grown —
+ *  their chosen size wins over the content. */
 export function autogrow(el: HTMLTextAreaElement): void {
+  if (el.dataset.manualSize === '1') {
+    return;
+  }
   if (typeof CSS !== 'undefined' && CSS.supports('field-sizing', 'content')) {
     return; // the stylesheet already handles it
   }

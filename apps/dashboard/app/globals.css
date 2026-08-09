@@ -1825,6 +1825,16 @@ button.due-cell-btn:hover {
 
 .jn-row .note-edit {
   font-size: 0.875rem;
+  /* User-resizable both ways: autogrow (12rem cap) until the corner is
+     dragged; the panel then lifts max-height and pins the chosen size
+     (data-manual-size), so shrink and grow both stick. */
+  resize: vertical;
+  min-height: 1.5rem;
+}
+
+.jn-row .note-edit[data-manual-size="1"] {
+  max-height: none;
+  field-sizing: fixed;
 }
 
 .jn-row .note-edit::placeholder {

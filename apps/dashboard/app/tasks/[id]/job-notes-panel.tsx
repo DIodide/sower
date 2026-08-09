@@ -509,6 +509,22 @@ function NoteRow({
         onFocus={onFocus}
         onBlur={onBlur}
         onKeyDown={onKeyDown}
+        // A drag on the native resize corner pins the user's chosen size:
+        // height changed between pointerdown/up (typing can't do that while
+        // the pointer is held) → mark manual, and autogrow steps aside.
+        onPointerDown={(event) => {
+          event.currentTarget.dataset.dragStartHeight = String(
+            event.currentTarget.offsetHeight,
+          );
+        }}
+        onPointerUp={(event) => {
+          const el = event.currentTarget;
+          const started = Number(el.dataset.dragStartHeight ?? '0');
+          if (started > 0 && el.offsetHeight !== started) {
+            el.dataset.manualSize = '1';
+            el.style.maxHeight = 'none';
+          }
+        }}
       />
       <div className="jn-meta">
         <select
