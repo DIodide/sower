@@ -8,6 +8,7 @@
 // run, then auto-filled answers — so the eye lands on what still needs doing.
 import type { Tone } from '../../../lib/format';
 import { Empty, ExpandableText } from '../../../lib/ui';
+import { CountedTextarea, CountedTextInput } from './counted-input';
 import { Badge } from './ui';
 
 export interface QuestionOptionView {
@@ -283,15 +284,11 @@ function MissingInput({
   if (view.type === 'textarea') {
     return (
       <div>
-        <textarea
-          id={inputId}
+        <CountedTextarea
+          inputId={inputId}
           name={`q:${view.id}`}
-          rows={4}
-          maxLength={20000}
           defaultValue={view.savedInput?.[0]}
-          aria-required={view.required}
-          className="field"
-          style={{ maxWidth: '34rem' }}
+          required={view.required}
         />
         {scopeCompany ? (
           <EssayScopeChoice questionId={view.id} company={scopeCompany} />
@@ -302,15 +299,11 @@ function MissingInput({
 
   return (
     <div>
-      <input
-        id={inputId}
+      <CountedTextInput
+        inputId={inputId}
         name={`q:${view.id}`}
-        type="text"
-        maxLength={20000}
         defaultValue={view.savedInput?.[0]}
-        aria-required={view.required}
-        className="field"
-        style={{ maxWidth: '34rem' }}
+        required={view.required}
       />
       {scopeCompany ? (
         <EssayScopeChoice questionId={view.id} company={scopeCompany} />
