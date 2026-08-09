@@ -40,6 +40,7 @@ import { ingestJob } from './ingest.js';
 import { runIngestionPoll } from './ingest-poll.js';
 import { refreshIngestReply } from './ingest-reply.js';
 import { triggerInvestigation } from './investigate-trigger.js';
+import { registerJobNoteRoutes } from './job-notes.js';
 import { registerMobileRoutes } from './mobile-routes.js';
 import { requestOtp, submitOtp } from './otp-actions.js';
 import {
@@ -1927,6 +1928,12 @@ export function buildServer(deps: Deps): FastifyInstance {
   // GET/PATCH /followups/:id, POST /followups/:id/transition (x-api-key via
   // the same server-wide preHandler).
   registerFollowupRoutes(app, deps);
+
+  // Job-notes scratchpad: POST /tasks/:id/job-notes and
+  // POST /tasks/:id/job-notes/:noteId/delete (x-api-key via the same
+  // server-wide preHandler); every mutation re-mirrors the portfolio
+  // scratchpad file.
+  registerJobNoteRoutes(app, deps);
 
   // Compact READ-ONLY endpoints for the iPhone app (GET /mobile/overview,
   // /mobile/tasks/:id, /mobile/followups/:id — the dashboard reads the DB

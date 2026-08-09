@@ -11,6 +11,7 @@ import {
   followups,
   investigationRuns,
   jobDescriptions,
+  jobNotes,
   jobs,
   profiles,
   resumeLinks,
@@ -196,6 +197,40 @@ describe('schema', () => {
     ).toEqual(['source_ref']);
     // Partial: manual rows' NULL source_refs must never collide.
     expect(unique?.config.where).toBeDefined();
+  });
+
+  it('defines the job_notes table', () => {
+    expect(getTableName(jobNotes)).toBe('job_notes');
+    expect(sqlColumnNames(jobNotes)).toEqual([
+      'body',
+      'created_at',
+      'id',
+      'question_id',
+      'task_id',
+    ]);
+    expect(jobNotes.taskId.notNull).toBe(true);
+    expect(jobNotes.body.notNull).toBe(true);
+    // Nullable: null = a general job note, otherwise a jobSpec question id
+    // (plain text, validated against the spec by the api — never a FK).
+    expect(jobNotes.questionId.notNull).toBe(false);
+    expect(jobNotes.questionId.columnType).toBe('PgText');
+    expect(jobNotes.createdAt.notNull).toBe(true);
+  });
+
+  it('references application_tasks and indexes (task_id, created_at) on job_notes', () => {
+    const config = getTableConfig(jobNotes);
+    const fk = config.foreignKeys[0]?.reference();
+    expect(fk?.foreignTable && getTableName(fk.foreignTable)).toBe(
+      'application_tasks',
+    );
+    expect(fk?.columns.map((c) => c.name)).toEqual(['task_id']);
+    const listing = config.indexes.find(
+      (idx) => idx.config.name === 'job_notes_task_id_created_at_idx',
+    );
+    expect(listing).toBeDefined();
+    expect(
+      listing?.config.columns.map((c) => ('name' in c ? c.name : null)),
+    ).toEqual(['task_id', 'created_at']);
   });
 
   it('defines the answers table', () => {

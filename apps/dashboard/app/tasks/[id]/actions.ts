@@ -633,6 +633,75 @@ export async function investigateTask(taskId: string): Promise<ActionResult> {
   return result;
 }
 
+/** A job-note action's result: the mirror outcome rides along so the panel
+ *  can quietly surface a skipped/failed GitHub push (the note itself always
+ *  landed — the DB is the source of truth). */
+export interface JobNoteActionResult extends ActionResult {
+  /** 'mirrored' | 'skipped: no token' | 'failed: …' from the api. */
+  sync?: string;
+}
+
+// Mirrors the api's create body: 20k cap like every other user text, and a
+// questionId the api validates against the task's own jobSpec questions.
+const jobNoteCreateSchema = z.object({
+  body: z.string().trim().min(1).max(20_000),
+  questionId: z.string().max(200).optional(),
+});
+
+/**
+ * Add a job note via the api service. The api inserts the row and re-mirrors
+ * the portfolio scratchpad; a GitHub failure never fails the request (the
+ * outcome arrives as `sync`).
+ */
+export async function createJobNote(
+  taskId: string,
+  input: { body: string; questionId?: string },
+): Promise<JobNoteActionResult> {
+  const idParse = uuidSchema.safeParse(taskId);
+  if (!idParse.success) return { ok: false, message: 'invalid task id.' };
+  const parsed = jobNoteCreateSchema.safeParse(input);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      message:
+        input.body.trim() === ''
+          ? 'write the note first.'
+          : 'note is too long (max 20,000 characters).',
+    };
+  }
+  const result = await callJobNotesApi(
+    `/tasks/${idParse.data}/job-notes`,
+    parsed.data,
+  );
+  if (!result.ok) {
+    return { ok: false, message: `add note failed: ${result.message}` };
+  }
+  revalidatePath(`/tasks/${idParse.data}`);
+  return { ok: true, message: 'note added.', sync: result.sync };
+}
+
+/**
+ * Delete a job note via the api service; the scratchpad is regenerated
+ * WITHOUT it (an empty list still writes an empty file).
+ */
+export async function deleteJobNote(
+  taskId: string,
+  noteId: string,
+): Promise<JobNoteActionResult> {
+  const idParse = uuidSchema.safeParse(taskId);
+  if (!idParse.success) return { ok: false, message: 'invalid task id.' };
+  const noteParse = uuidSchema.safeParse(noteId);
+  if (!noteParse.success) return { ok: false, message: 'invalid note id.' };
+  const result = await callJobNotesApi(
+    `/tasks/${idParse.data}/job-notes/${noteParse.data}/delete`,
+  );
+  if (!result.ok) {
+    return { ok: false, message: `delete failed: ${result.message}` };
+  }
+  revalidatePath(`/tasks/${idParse.data}`);
+  return { ok: true, message: 'note deleted.', sync: result.sync };
+}
+
 /**
  * Deliver a one-time code to an AWAITING_OTP task via the api service, which
  * stores it and resumes the task (AWAITING_OTP -> FILLING). Mirrors the
@@ -651,6 +720,69 @@ export async function submitOtp(
   const result = await callApi(idParse.data, 'otp', { code: trimmed });
   revalidatePath(`/tasks/${idParse.data}`);
   return result;
+}
+
+const jobNotesApiResponseSchema = z.object({
+  note: z.unknown().optional(),
+  ok: z.boolean().optional(),
+  sync: z.string().optional(),
+  error: z.string().optional(),
+  message: z.string().optional(),
+});
+
+/**
+ * Call the sower api service's job-notes routes (and ONLY the sower api
+ * service — the base URL comes from our own deployment env, never from user
+ * input or job data). Mirrors callApi; kept separate because these routes
+ * answer the {note/ok, sync} shape rather than the task-action one.
+ */
+async function callJobNotesApi(
+  path: string,
+  jsonBody?: Record<string, unknown>,
+): Promise<{ ok: boolean; message: string; sync?: string }> {
+  const base = process.env.API_BASE_URL;
+  const apiKey = process.env.INGEST_API_KEY;
+  if (!base || !apiKey) {
+    return {
+      ok: false,
+      message:
+        'api service is not configured (API_BASE_URL / INGEST_API_KEY missing).',
+    };
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(`${base.replace(/\/$/, '')}${path}`, {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        ...(jsonBody ? { 'content-type': 'application/json' } : {}),
+      },
+      body: jsonBody ? JSON.stringify(jsonBody) : undefined,
+      cache: 'no-store',
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      message: `could not reach the api service: ${err instanceof Error ? err.message : 'unknown error'}`,
+    };
+  }
+
+  let body: z.infer<typeof jobNotesApiResponseSchema> = {};
+  try {
+    body = jobNotesApiResponseSchema.parse(await response.json());
+  } catch {
+    // Non-JSON or unexpected shape: fall through to status-based messaging.
+  }
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      message: `(${response.status}) ${body.error ?? body.message ?? 'see api logs'}`,
+    };
+  }
+  return { ok: true, message: '', sync: body.sync };
 }
 
 const apiResponseSchema = z.object({

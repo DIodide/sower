@@ -235,6 +235,35 @@ export const followups = pgTable(
   ],
 );
 
+/**
+ * The task page's job-notes scratchpad: one row per user note about the job,
+ * optionally TIED to a specific jobSpec question (question_id is the plain
+ * question id string, not a FK — specs live in jsonb). The DB is the source
+ * of truth; the portfolio repo's scratchpad.md is a write-through mirror
+ * regenerated IN FULL on every mutation (apps/api portfolio-scratchpad), so
+ * out-of-band edits to the file are never synced back.
+ */
+export const jobNotes = pgTable(
+  'job_notes',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => applicationTasks.id),
+    /** jobSpec question id this note is about; null = a general job note. */
+    questionId: text('question_id'),
+    body: text('body').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    // The task page and the scratchpad mirror read a task's notes
+    // oldest-first.
+    index('job_notes_task_id_created_at_idx').on(table.taskId, table.createdAt),
+  ],
+);
+
 export const events = pgTable(
   'events',
   {

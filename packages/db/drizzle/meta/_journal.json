@@ -162,6 +162,13 @@
       "when": 1784770016907,
       "tag": "0022_followup_source_body",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1786298920031,
+      "tag": "0023_job_notes",
+      "breakpoints": true
     }
   ]
 }

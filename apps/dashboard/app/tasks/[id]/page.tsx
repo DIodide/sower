@@ -16,6 +16,7 @@ import {
   followups,
   investigationRuns,
   jobDescriptions,
+  jobNotes,
   jobs,
   type WorkdaySessionRow,
   workdaySessions,
@@ -49,6 +50,8 @@ import {
 import { FollowupsPanel } from './followups-panel';
 import { InvestigationPanel } from './investigation-panel';
 import { JobDescriptionPanel } from './job-description-panel';
+import type { JobNoteView } from './job-notes-panel';
+import { JobNotesPanel } from './job-notes-panel';
 import { NeedsInputForm } from './needs-input-form';
 import { OtpForm } from './otp-form';
 import { documentKind } from './question-kind';
@@ -609,6 +612,7 @@ export default async function TaskPage({
     investigationRows,
     bankAnswerRows,
     followupRows,
+    jobNoteRows,
   ] = await Promise.all([
     db.select().from(jobs).where(eq(jobs.id, task.jobId)).limit(1),
     db
@@ -657,6 +661,13 @@ export default async function TaskPage({
         sql`${followups.dueDate} asc nulls last`,
         desc(followups.createdAt),
       ),
+    // Job-notes scratchpad, oldest first — the same order the portfolio
+    // mirror file renders them in.
+    db
+      .select()
+      .from(jobNotes)
+      .where(eq(jobNotes.taskId, id))
+      .orderBy(asc(jobNotes.createdAt)),
   ]);
   const job = jobRows[0];
   const latestDescription = descriptionRows[0];
@@ -746,6 +757,27 @@ export default async function TaskPage({
     kind: d.kind,
     filename: d.filename,
     createdLabel: formatLocal(d.createdAt),
+  }));
+  // Job-note views: tied-question labels resolved from the SAME jobSpec the
+  // portfolio mirror uses (raw id fallback), created times pre-rendered
+  // server-side like documentOptions.
+  const questionLabelById = new Map(
+    (spec?.questions ?? []).map((q) => [q.id, q.label]),
+  );
+  const jobNoteViews: JobNoteView[] = jobNoteRows.map((note) => ({
+    id: note.id,
+    body: note.body,
+    ...(note.questionId !== null
+      ? {
+          questionLabel:
+            questionLabelById.get(note.questionId) ?? note.questionId,
+        }
+      : {}),
+    createdLabel: relativeTime(note.createdAt),
+  }));
+  const noteQuestionOptions = (spec?.questions ?? []).map((q) => ({
+    id: q.id,
+    label: q.label,
   }));
   const resolvedCount = views.filter((v) => v.status === 'resolved').length;
   const savedCount = views.filter((v) => v.status === 'saved').length;
@@ -1164,24 +1196,35 @@ export default async function TaskPage({
             </span>
           </div>
         ) : null}
-        {!spec ? (
-          <Empty>
-            No job spec captured yet — the task has not been processed.
-          </Empty>
-        ) : (
-          <div className="card">
-            {task.state === 'NEEDS_INPUT' ? (
-              <NeedsInputForm
-                taskId={task.id}
-                views={views}
-                documents={documentOptions}
-                company={job?.company ?? spec.company ?? ''}
-              />
-            ) : (
-              <QuestionsPanel views={views} />
-            )}
-          </div>
-        )}
+        {/* Two columns: questions left, the job-notes scratchpad right. The
+            notes panel sits OUTSIDE the answers <form> (NeedsInputForm owns
+            it inside the left card), so its controls can never be swept
+            into a saveAnswers submit. */}
+        <div className="qa-split">
+          {!spec ? (
+            <Empty>
+              No job spec captured yet — the task has not been processed.
+            </Empty>
+          ) : (
+            <div className="card">
+              {task.state === 'NEEDS_INPUT' ? (
+                <NeedsInputForm
+                  taskId={task.id}
+                  views={views}
+                  documents={documentOptions}
+                  company={job?.company ?? spec.company ?? ''}
+                />
+              ) : (
+                <QuestionsPanel views={views} />
+              )}
+            </div>
+          )}
+          <JobNotesPanel
+            taskId={task.id}
+            notes={jobNoteViews}
+            questions={noteQuestionOptions}
+          />
+        </div>
       </section>
 
       {/* ---- secondary: history, network ---- */}

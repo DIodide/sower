@@ -4,8 +4,8 @@
  *   - the minimal subprocess env allowlist (secrets never reach the agent),
  *   - the denied-tool lists (one per agent posture: the screenshot agent
  *     keeps every shell/file/code built-in removed; the interpretation
- *     agent gets a local workspace and denies only web/subagent/notebook
- *     tools),
+ *     agent gets a local workspace + web tools and denies only
+ *     subagent/REPL/notebook tools),
  *   - transcript capture from the SDK message stream (the observability
  *     record: every assistant text, tool call, tool result, and denial),
  *   - JSON extraction from agent output text (fenced block first, brace
@@ -66,12 +66,7 @@ export const DENIED_TOOLS = [
  * isolation here — the env-starved subprocess remains the secret boundary).
  * Only subagent spawning, REPL, and notebook editing stay removed.
  */
-export const INTERPRET_DENIED_TOOLS = [
-  'Task',
-  'Agent',
-  'REPL',
-  'NotebookEdit',
-];
+export const INTERPRET_DENIED_TOOLS = ['Task', 'Agent', 'REPL', 'NotebookEdit'];
 
 /**
  * Env vars forwarded to the agent subprocess — nothing else. The SDK `env`

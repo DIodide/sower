@@ -760,6 +760,27 @@ input[type="file"]::file-selector-button {
   transition: width 300ms ease;
 }
 
+/* Two-column questions + job-notes split on the task page: the questions
+   side (which may be the NEEDS_INPUT answers form) stays flexible, the
+   notes rail holds ~22rem, and the rail drops below the questions on
+   narrow screens. */
+.qa-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 22rem;
+  gap: 1rem;
+  align-items: start;
+}
+
+.qa-split > * {
+  min-width: 0;
+}
+
+@media (max-width: 1000px) {
+  .qa-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 /* ----------------------------------------------------------------- stepper */
 
 .steps {

@@ -168,6 +168,13 @@ const envSchema = z
      * the derived CALENDAR_SYNC_ENABLED below).
      */
     GOOGLE_CALENDAR_REFRESH_TOKEN: z.string().optional(),
+    /**
+     * SECRET (Secret Manager): GitHub token with contents write on the
+     * private portfolio repo, used by the job-notes scratchpad mirror
+     * (portfolio-scratchpad.ts). Optional — absent, every mirror reports
+     * 'skipped: no token' and notes live in the DB only. NEVER logged.
+     */
+    GITHUB_PORTFOLIO_TOKEN: z.string().optional(),
   })
   .transform((env) => ({
     ...env,
