@@ -766,9 +766,15 @@ input[type="file"]::file-selector-button {
    narrow screens. */
 .qa-split {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 22rem;
+  /* Rail width is user-controlled (drag divider) via the custom property
+     set by QaSplit; collapsed shrinks it to a slim strip. */
+  grid-template-columns: minmax(0, 1fr) var(--qa-rail-w, 22rem);
   gap: 1rem;
   align-items: start;
+}
+
+.qa-split[data-collapsed] {
+  grid-template-columns: minmax(0, 1fr) 1.25rem;
 }
 
 .qa-split > * {
@@ -776,27 +782,99 @@ input[type="file"]::file-selector-button {
 }
 
 /* The notes rail sticks while the (usually much taller) questions column
-   scrolls, so notes stay usable from anywhere down the page; a taller-than-
-   viewport stack scrolls inside the rail. In the stacked layout below the
-   rail's grid area shrinks to its own height, so stickiness disappears
+   scrolls, so notes stay usable from anywhere down the page; the BODY owns
+   the internal scroll so the divider (positioned just outside the rail's
+   left edge, in the grid gap) is never clipped. In the stacked layout below
+   the rail's grid area shrinks to its own height, so stickiness disappears
    naturally — only the height cap needs resetting there. */
-.qa-split > :last-child {
+.qa-rail {
   position: sticky;
   top: 0.75rem;
   align-self: start;
+}
+
+.qa-rail-body {
   max-height: calc(100dvh - 1.5rem);
   overflow-y: auto;
   scrollbar-width: thin;
 }
 
+/* Divider: a slim col-resize strip living in the column gap. */
+.qa-divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -0.875rem;
+  width: 0.75rem;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.qa-divider:hover::before,
+.qa-split[data-collapsed] .qa-divider::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(50% - 1px);
+  width: 2px;
+  background: var(--line-strong);
+}
+
+.qa-split[data-collapsed] .qa-divider {
+  cursor: default;
+}
+
+button.qa-collapse {
+  position: absolute;
+  top: 0.125rem;
+  left: calc(50% - 0.625rem);
+  width: 1.25rem;
+  height: 1.25rem;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-ctl);
+  background: var(--surface);
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+button.qa-collapse:hover {
+  color: var(--ink);
+  border-color: var(--ink-faint);
+}
+
 @media (max-width: 1000px) {
-  .qa-split {
+  .qa-split,
+  .qa-split[data-collapsed] {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .qa-split > :last-child {
+  .qa-rail-body {
     max-height: none;
     overflow-y: visible;
+  }
+
+  /* Stacked: no column gap to live in — the divider disappears; the
+     collapse chevron moves into the rail's top-right corner. */
+  .qa-divider {
+    position: static;
+    width: auto;
+    cursor: default;
+  }
+
+  .qa-divider:hover::before,
+  .qa-split[data-collapsed] .qa-divider::before {
+    display: none;
+  }
+
+  button.qa-collapse {
+    top: 0;
+    left: auto;
+    right: 0;
   }
 }
 

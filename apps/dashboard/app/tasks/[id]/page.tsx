@@ -54,6 +54,7 @@ import type { JobNoteView } from './job-notes-panel';
 import { JobNotesPanel } from './job-notes-panel';
 import { NeedsInputForm } from './needs-input-form';
 import { OtpForm } from './otp-form';
+import { QaSplit } from './qa-split';
 import { documentKind } from './question-kind';
 import type { DocumentOption, QuestionView } from './questions-panel';
 import { QuestionsPanel } from './questions-panel';
@@ -1192,31 +1193,35 @@ export default async function TaskPage({
             notes panel sits OUTSIDE the answers <form> (NeedsInputForm owns
             it inside the left card), so its controls can never be swept
             into a saveAnswers submit. */}
-        <div className="qa-split">
-          {!spec ? (
-            <Empty>
-              No job spec captured yet — the task has not been processed.
-            </Empty>
-          ) : (
-            <div className="card">
-              {task.state === 'NEEDS_INPUT' ? (
-                <NeedsInputForm
-                  taskId={task.id}
-                  views={views}
-                  documents={documentOptions}
-                  company={job?.company ?? spec.company ?? ''}
-                />
-              ) : (
-                <QuestionsPanel views={views} />
-              )}
-            </div>
-          )}
-          <JobNotesPanel
-            taskId={task.id}
-            notes={jobNoteViews}
-            questions={noteQuestionOptions}
-          />
-        </div>
+        <QaSplit
+          left={
+            !spec ? (
+              <Empty>
+                No job spec captured yet — the task has not been processed.
+              </Empty>
+            ) : (
+              <div className="card">
+                {task.state === 'NEEDS_INPUT' ? (
+                  <NeedsInputForm
+                    taskId={task.id}
+                    views={views}
+                    documents={documentOptions}
+                    company={job?.company ?? spec.company ?? ''}
+                  />
+                ) : (
+                  <QuestionsPanel views={views} />
+                )}
+              </div>
+            )
+          }
+          right={
+            <JobNotesPanel
+              taskId={task.id}
+              notes={jobNoteViews}
+              questions={noteQuestionOptions}
+            />
+          }
+        />
       </section>
 
       {/* ---- secondary: history, network ---- */}

@@ -509,20 +509,34 @@ function NoteRow({
         onFocus={onFocus}
         onBlur={onBlur}
         onKeyDown={onKeyDown}
-        // A drag on the native resize corner pins the user's chosen size:
-        // height changed between pointerdown/up (typing can't do that while
-        // the pointer is held) → mark manual, and autogrow steps aside.
+        // Native corner-resize, pinning the user's chosen size. The 12rem
+        // autogrow cap would CLAMP the drag itself (growing was impossible:
+        // height never changed, so the old change-detection never fired) —
+        // so on a grab in the resize-corner zone the cap lifts and the
+        // current height freezes as an inline style first; the drag then
+        // adjusts freely both ways. Pointer-up keeps the new size
+        // (data-manual-size — autogrow steps aside) or restores the cap
+        // when the height didn't change (it was just a click).
         onPointerDown={(event) => {
-          event.currentTarget.dataset.dragStartHeight = String(
-            event.currentTarget.offsetHeight,
-          );
+          const el = event.currentTarget;
+          const rect = el.getBoundingClientRect();
+          const inCorner =
+            rect.right - event.clientX < 24 && rect.bottom - event.clientY < 24;
+          if (!inCorner) return;
+          el.dataset.dragStartHeight = String(el.offsetHeight);
+          el.style.height = `${el.offsetHeight}px`;
+          el.style.maxHeight = 'none';
         }}
         onPointerUp={(event) => {
           const el = event.currentTarget;
           const started = Number(el.dataset.dragStartHeight ?? '0');
-          if (started > 0 && el.offsetHeight !== started) {
+          delete el.dataset.dragStartHeight;
+          if (started <= 0) return;
+          if (el.offsetHeight !== started) {
             el.dataset.manualSize = '1';
-            el.style.maxHeight = 'none';
+          } else {
+            el.style.height = '';
+            el.style.maxHeight = '';
           }
         }}
       />
