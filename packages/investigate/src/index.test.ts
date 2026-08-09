@@ -171,6 +171,8 @@ describe('investigateScreenshot', () => {
       'WebFetch',
       'ToolSearch',
     ]);
+    // 1M-context Opus by default; INVESTIGATOR_SCREENSHOT_MODEL overrides.
+    expect(call.options.model).toBe('claude-opus-5[1m]');
     expect(call.options.maxTurns).toBe(5);
     expect(call.options.permissionMode).toBe('dontAsk');
     expect(call.options.allowDangerouslySkipPermissions).toBeUndefined();
@@ -195,6 +197,23 @@ describe('investigateScreenshot', () => {
       media_type: 'image/png',
       data: image.toString('base64'),
     });
+  });
+
+  it('lets INVESTIGATOR_SCREENSHOT_MODEL override the model without a rebuild', async () => {
+    process.env.INVESTIGATOR_SCREENSHOT_MODEL = 'claude-opus-4-8';
+    try {
+      queryMock.mockReturnValue(fakeStream(HAPPY_PATH_MESSAGES));
+      await investigateScreenshot({
+        image: Buffer.from('x'),
+        contentType: 'image/png',
+      });
+      const call = queryMock.mock.calls[0]?.[0] as {
+        options: Record<string, unknown>;
+      };
+      expect(call.options.model).toBe('claude-opus-4-8');
+    } finally {
+      delete process.env.INVESTIGATOR_SCREENSHOT_MODEL;
+    }
   });
 
   it('starves the agent subprocess of secrets and restricts its tool set', async () => {

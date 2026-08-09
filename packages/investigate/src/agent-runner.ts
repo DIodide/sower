@@ -2,7 +2,10 @@
  * Shared plumbing for hardened Claude Agent SDK runs, used by both
  * investigateScreenshot and discoverForm:
  *   - the minimal subprocess env allowlist (secrets never reach the agent),
- *   - the denied-tool list (shell/file/code built-ins removed outright),
+ *   - the denied-tool lists (one per agent posture: the screenshot agent
+ *     keeps every shell/file/code built-in removed; the interpretation
+ *     agent gets a local workspace and denies only web/subagent/notebook
+ *     tools),
  *   - transcript capture from the SDK message stream (the observability
  *     record: every assistant text, tool call, tool result, and denial),
  *   - JSON extraction from agent output text (fenced block first, brace
@@ -29,10 +32,12 @@ export interface TranscriptStep {
 const OUTPUT_TRUNCATE_CHARS = 8000;
 
 /**
- * Shell/file/code built-ins removed from the agent's context entirely
- * (defense in depth on top of a restricted `tools` base set: a bare name
- * in `disallowedTools` removes the tool and blocks harness-internal calls
- * in every permission mode).
+ * Screenshot-agent denial list: shell/file/code built-ins removed from the
+ * agent's context entirely (defense in depth on top of a restricted `tools`
+ * base set: a bare name in `disallowedTools` removes the tool and blocks
+ * harness-internal calls in every permission mode). Everything is denied
+ * except the web research tools the agent exists to use
+ * (WebSearch/WebFetch).
  */
 export const DENIED_TOOLS = [
   'Task',
@@ -52,6 +57,22 @@ export const DENIED_TOOLS = [
   'REPL',
   'TodoWrite',
   'ExitPlanMode',
+];
+
+/**
+ * Interpretation-agent denial list: the interpretation agent gets a local
+ * scratch workspace (Bash/Read/Write/Edit/Grep/Glob/Skill under a
+ * per-run mkdtemp cwd), so only web access, subagent spawning, REPL, and
+ * notebook editing stay removed outright — a prompt-injected job page must
+ * never reach the network or fan out into subagents from this run.
+ */
+export const INTERPRET_DENIED_TOOLS = [
+  'WebSearch',
+  'WebFetch',
+  'Task',
+  'Agent',
+  'REPL',
+  'NotebookEdit',
 ];
 
 /**

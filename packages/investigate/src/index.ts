@@ -61,6 +61,14 @@ export interface InvestigationOutcome {
 
 const DEFAULT_MAX_TURNS = 12;
 
+/**
+ * Screenshot-agent model: 1M-context Opus. The `[1m]` long-context suffix
+ * is resolved by the Claude Code subprocess, not validated here, so prod
+ * can override the whole string via INVESTIGATOR_SCREENSHOT_MODEL without
+ * a rebuild if the suffix (or the model id) is rejected at runtime.
+ */
+const DEFAULT_SCREENSHOT_MODEL = 'claude-opus-5[1m]';
+
 /** The only tools the investigation agent may use. */
 const INVESTIGATION_TOOLS = ['WebSearch', 'WebFetch'];
 
@@ -138,6 +146,9 @@ export async function investigateScreenshot(input: {
   const stream = query({
     prompt: userMessages(),
     options: {
+      // Env override first: prod adjusts the model without a rebuild.
+      model:
+        process.env.INVESTIGATOR_SCREENSHOT_MODEL || DEFAULT_SCREENSHOT_MODEL,
       // Base tool set: ONLY web research tools exist in the agent's context.
       // (allowedTools alone does not restrict — it only auto-approves.)
       tools: [...INVESTIGATION_TOOLS],

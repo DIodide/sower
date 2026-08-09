@@ -11,10 +11,12 @@
  *     request whose host is (or resolves to) a private/loopback/link-local
  *     address — the browser can never reach internal/metadata endpoints,
  *     even via redirects or subresources.
- *   - The AGENT only interprets extracted text. It gets NO tools at all
- *     (no browser, no web, no shell/file) and the same minimal env
- *     allowlist as investigateScreenshot, so a prompt-injected job page can
- *     at worst distort its own Question list — which zod then validates.
+ *   - The AGENT only interprets extracted text. It gets NO browser and NO
+ *     web/subagent tools — just a local scratch workspace (Bash/Read/Write/
+ *     Edit/Grep/Glob/Skill inside a per-run mkdtemp cwd, removed after the
+ *     run) and the same minimal env allowlist as investigateScreenshot, so
+ *     a prompt-injected job page can at worst distort its own Question
+ *     list — which zod then validates.
  *     descriptionMarkdown is NEVER agent-generated: it is the raw
  *     programmatic extraction, so the agent cannot hallucinate a JD.
  *
@@ -31,6 +33,9 @@
  * browser.click / browser.extract steps, then the agent's steps), so the
  * whole run is observable.
  */
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Question } from '@sower/core';
 import { extractDeadline } from '@sower/core';
@@ -45,7 +50,7 @@ import { z } from 'zod';
 import {
   buildSubprocessEnv,
   consumeAgentStream,
-  DENIED_TOOLS,
+  INTERPRET_DENIED_TOOLS,
   parseAgentJson,
   type TranscriptStep,
   truncateOutput,
@@ -186,7 +191,25 @@ const MAX_APPLY_HOPS = 2;
 const MAX_IFRAME_SCANS = 8;
 /** Raw anchors collected from the rendered DOM before Node-side filtering. */
 const MAX_ANCHOR_CANDIDATES = 300;
-const DEFAULT_INTERPRET_MAX_TURNS = 6;
+const DEFAULT_INTERPRET_MAX_TURNS = 12;
+/** Model for the interpretation agent. */
+const INTERPRET_MODEL = 'claude-fable-5';
+/** Reasoning effort for the interpretation agent (SDK `effort` option). */
+const INTERPRET_EFFORT = 'medium';
+/**
+ * The interpretation agent's workspace tools: local shell/file/search/skill
+ * work inside its per-run scratch cwd. No web, no subagents (see
+ * INTERPRET_DENIED_TOOLS in agent-runner.ts).
+ */
+const INTERPRET_TOOLS = [
+  'Bash',
+  'Read',
+  'Write',
+  'Edit',
+  'Grep',
+  'Glob',
+  'Skill',
+];
 const MAX_EXTRACTION_JSON_CHARS = 24_000;
 const MAX_DESCRIPTION_MARKDOWN_CHARS = 20_000;
 const DESCRIPTION_EXCERPT_CHARS = 1_500;
@@ -641,8 +664,10 @@ function extractJobMetadata(
  * helper that does not exist inside the browser — the IIFE provides a
  * no-op `__name` binding so the serialized bodies run anywhere. The leading
  * marker comments identify the expression kind (also used by test doubles).
+ * extractionExpression is exported for the live probe/smoke scripts, which
+ * run the REAL serialized expression against live pages.
  */
-function extractionExpression(): string {
+export function extractionExpression(): string {
   return `/* sower:extract */((__name) => (${extractPageState.toString()})((${scoreApplyControlText.toString()}), (${detectAnswerLimit.toString()})))((t) => t)`;
 }
 
@@ -754,7 +779,10 @@ function summarizeExtraction(extraction: RawExtraction): string {
       .slice(0, 12)
       .map(
         (c) =>
-          `${c.label || c.name || '(unlabeled)'}:${c.inputType}${c.required ? '*' : ''}`,
+          // The limit tag makes extraction-time limit detection observable
+          // in the transcript (a stored question without a limit could
+          // otherwise be an extraction miss OR an agent drop).
+          `${c.label || c.name || '(unlabeled)'}:${c.inputType}${c.required ? '*' : ''}${c.limit ? `[≤${c.limit.max} ${c.limit.kind}]` : ''}`,
       )
       .join(', ');
     parts.push(
@@ -1535,12 +1563,14 @@ function appendProgrammaticNotes(
 }
 
 /**
- * Phase 2 — interpret (Agent SDK, TEXT-ONLY). The agent gets the raw
- * extraction, a description excerpt, and page-text snippet in its prompt and
- * NO tools at all; its JSON answer is zod-validated. Same hardened
- * env/options posture as investigateScreenshot. The stored
- * descriptionMarkdown stays the raw programmatic extraction — the agent
- * only refines title/company/questions.
+ * Phase 2 — interpret (Agent SDK, LOCAL-ONLY). The agent gets the raw
+ * extraction, a description excerpt, and page-text snippet in its prompt,
+ * plus a throwaway scratch workspace (a per-run mkdtemp dir as cwd with
+ * Bash/Read/Write/Edit/Grep/Glob/Skill pre-approved — removed after the
+ * run). It has NO web or subagent tools; its JSON answer is zod-validated.
+ * Same hardened env posture as investigateScreenshot (minimal allowlisted
+ * subprocess env). The stored descriptionMarkdown stays the raw
+ * programmatic extraction — the agent only refines title/company/questions.
  */
 async function interpretExtraction(args: {
   extraction: RawExtraction;
@@ -1555,26 +1585,42 @@ async function interpretExtraction(args: {
   const descriptionExcerpt = args.metadata?.descriptionMarkdown
     ? args.metadata.descriptionMarkdown.slice(0, DESCRIPTION_EXCERPT_CHARS)
     : undefined;
-  const stream = query({
-    prompt: buildInterpretationPrompt(
-      args.extraction,
-      args.hint,
-      descriptionExcerpt,
-    ),
-    options: {
-      // Base tool set: EMPTY — interpretation is text-only, so no tool
-      // exists in the agent's context at all.
-      tools: [],
-      // Defense in depth: shell/file/code AND web tools removed outright.
-      disallowedTools: [...DENIED_TOOLS, 'WebSearch', 'WebFetch'],
-      // Headless: never prompt; auto-deny anything not pre-approved.
-      permissionMode: 'dontAsk',
-      maxTurns: args.maxTurns ?? DEFAULT_INTERPRET_MAX_TURNS,
-      // Minimal allowlisted environment — REPLACES process.env for the
-      // subprocess, starving it of DB/API/GCP secrets.
-      env: buildSubprocessEnv(),
-    },
-  });
+  // Fresh scratch workspace per run — the agent's cwd, removed in finally.
+  const scratchDir = await mkdtemp(join(tmpdir(), 'sower-interpret-'));
+  let capture: Awaited<ReturnType<typeof consumeAgentStream>>;
+  try {
+    const stream = query({
+      prompt: buildInterpretationPrompt(
+        args.extraction,
+        args.hint,
+        descriptionExcerpt,
+      ),
+      options: {
+        model: INTERPRET_MODEL,
+        effort: INTERPRET_EFFORT,
+        // Base tool set: the local workspace tools only — no web tools
+        // exist in the agent's context at all.
+        tools: [...INTERPRET_TOOLS],
+        // Pre-approve the workspace tools (plus ToolSearch, the harness
+        // meta-tool) so the headless run never needs a prompt.
+        allowedTools: [...INTERPRET_TOOLS, 'ToolSearch'],
+        // Defense in depth: web/subagent/REPL/notebook tools removed
+        // outright.
+        disallowedTools: [...INTERPRET_DENIED_TOOLS],
+        // Headless: never prompt; auto-deny anything not pre-approved.
+        permissionMode: 'dontAsk',
+        maxTurns: args.maxTurns ?? DEFAULT_INTERPRET_MAX_TURNS,
+        // The scratch dir is the agent's whole working world.
+        cwd: scratchDir,
+        // Minimal allowlisted environment — REPLACES process.env for the
+        // subprocess, starving it of DB/API/GCP secrets.
+        env: buildSubprocessEnv(),
+      },
+    });
+    capture = await consumeAgentStream(stream, args.transcript);
+  } finally {
+    await rm(scratchDir, { recursive: true, force: true }).catch(() => {});
+  }
 
   const programmaticCompany = args.metadata?.company || undefined;
   const programmaticTitle = args.metadata?.title || undefined;
@@ -1584,8 +1630,6 @@ async function interpretExtraction(args: {
   const deadline = descriptionMarkdown
     ? (extractDeadline(descriptionMarkdown) ?? undefined)
     : undefined;
-
-  const capture = await consumeAgentStream(stream, args.transcript);
   const parsed = parseAgentJson(capture, (candidate) => {
     const result = interpretedFormSchema.safeParse(candidate);
     return result.success ? result.data : undefined;

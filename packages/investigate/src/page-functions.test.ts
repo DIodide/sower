@@ -53,6 +53,24 @@ describe('detectAnswerLimit', () => {
     });
   });
 
+  it('matches the live openai.com/student-collective hint shape', () => {
+    // The in-page ancestor walk hands over the wrapper's whole innerText:
+    // the question label followed by the sibling <p>500 characters max</p>
+    // hint (see the extraction fixture in discover-form.test.ts).
+    expect(
+      detectAnswerLimit(
+        null,
+        'What is the most important problem facing young people? How would you try to make progress on it? 500 characters max',
+      ),
+    ).toEqual({ kind: 'characters', max: 500 });
+    expect(
+      detectAnswerLimit(
+        null,
+        'Anything else you’d like to share with the OpenAI team? 150 characters max',
+      ),
+    ).toEqual({ kind: 'characters', max: 150 });
+  });
+
   it('returns null when neither source declares a limit — never invents', () => {
     expect(detectAnswerLimit(null, '')).toBeNull();
     expect(

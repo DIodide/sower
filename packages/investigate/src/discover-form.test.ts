@@ -1,8 +1,9 @@
+import { existsSync } from 'node:fs';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { chromium } from 'playwright';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { JobMetadata, RawExtraction } from './discover-form.js';
-import { detectHandoffUrl } from './discover-form.js';
+import { detectHandoffUrl, extractionExpression } from './discover-form.js';
 import { discoverForm } from './index.js';
 import type { AnchorCandidate } from './page-functions.js';
 
@@ -376,8 +377,8 @@ describe('discoverForm', () => {
     expect(transcript.at(-1)?.kind).toBe('result');
     expect(transcript.map((s) => s.seq)).toEqual(transcript.map((_, i) => i));
 
-    // The interpretation agent is TEXT-ONLY and hardened, and sees a
-    // description excerpt for context.
+    // The interpretation agent is LOCAL-ONLY (scratch workspace, no web)
+    // and hardened, and sees a description excerpt for context.
     expect(queryMock).toHaveBeenCalledTimes(1);
     const call = queryMock.mock.calls[0]?.[0] as {
       prompt: string;
@@ -388,17 +389,42 @@ describe('discoverForm', () => {
     expect(call.prompt).toContain('Caller hint: software intern');
     expect(call.prompt).toContain('JOB DESCRIPTION EXCERPT');
     expect(call.prompt).toContain('# Software Engineer Intern');
-    expect(call.options.tools).toEqual([]);
+    expect(call.options.model).toBe('claude-fable-5');
+    expect(call.options.effort).toBe('medium');
+    expect(call.options.tools).toEqual([
+      'Bash',
+      'Read',
+      'Write',
+      'Edit',
+      'Grep',
+      'Glob',
+      'Skill',
+    ]);
+    expect(call.options.allowedTools).toEqual([
+      'Bash',
+      'Read',
+      'Write',
+      'Edit',
+      'Grep',
+      'Glob',
+      'Skill',
+      'ToolSearch',
+    ]);
     expect(call.options.permissionMode).toBe('dontAsk');
-    expect(call.options.disallowedTools).toEqual(
-      expect.arrayContaining([
-        'Bash',
-        'Read',
-        'Write',
-        'WebSearch',
-        'WebFetch',
-      ]),
-    );
+    // Web/subagent tools stay denied; the workspace tools are NOT denied.
+    expect(call.options.disallowedTools).toEqual([
+      'WebSearch',
+      'WebFetch',
+      'Task',
+      'Agent',
+      'REPL',
+      'NotebookEdit',
+    ]);
+    // A per-run scratch dir is the agent's cwd; it is removed after the
+    // run (the query stream has been fully consumed by now).
+    const cwd = call.options.cwd as string;
+    expect(cwd).toMatch(/sower-interpret-/);
+    expect(existsSync(cwd)).toBe(false);
     const env = call.options.env as Record<string, string>;
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe('test-token');
     for (const key of Object.keys(env)) {
@@ -1155,5 +1181,211 @@ describe('detectHandoffUrl', () => {
     ).toBeUndefined();
     expect(detectHandoffUrl('not a url')).toBeUndefined();
     expect(detectHandoffUrl('file:///etc/passwd')).toBeUndefined();
+  });
+});
+
+/**
+ * Run the REAL serialized in-page extraction (extractionExpression — the
+ * exact string discoverForm evaluates in the browser) against a fake DOM in
+ * Node: `new Function('document', 'CSS', ...)` binds the two globals the
+ * expression touches, and the fake elements implement just the DOM surface
+ * extractPageState uses. The fixture copies the ACTUAL structure around an
+ * essay control on https://openai.com/student-collective/ (verified live
+ * 2026-08-09): the <label> wraps the question text AND the <textarea>,
+ * while the "500 characters max" hint is a sibling <p> of that label inside
+ * a wrapper that holds only this one field — the ancestor walk must reach
+ * the wrapper (one level above the label) to see the hint.
+ */
+describe('extractionExpression on the openai.com/student-collective DOM shape', () => {
+  interface FakeDomEl {
+    tagName: string;
+    parentElement: FakeDomEl | null;
+    childrenEls: FakeDomEl[];
+    ownText: string;
+    attrs: Record<string, string>;
+    id: string;
+    name: string;
+    required: boolean;
+    value: string;
+    readonly textContent: string;
+    readonly innerText: string;
+    getAttribute(attr: string): string | null;
+    closest(selector: string): FakeDomEl | null;
+    checkVisibility(): boolean;
+    querySelectorAll(selector: string): FakeDomEl[];
+    querySelector(selector: string): FakeDomEl | null;
+  }
+
+  const isFieldEl = (node: FakeDomEl): boolean =>
+    node.tagName === 'TEXTAREA' ||
+    node.tagName === 'SELECT' ||
+    (node.tagName === 'INPUT' &&
+      !['hidden', 'submit', 'button', 'reset', 'image'].includes(
+        node.attrs.type ?? 'text',
+      ));
+
+  const descendantsOf = (node: FakeDomEl): FakeDomEl[] =>
+    node.childrenEls.flatMap((child) => [child, ...descendantsOf(child)]);
+
+  function el(
+    tagName: string,
+    attrs: Record<string, string>,
+    ownText: string,
+    ...childrenEls: FakeDomEl[]
+  ): FakeDomEl {
+    const node: FakeDomEl = {
+      tagName: tagName.toUpperCase(),
+      parentElement: null,
+      childrenEls,
+      ownText,
+      attrs,
+      id: attrs.id ?? '',
+      name: attrs.name ?? '',
+      required: attrs.required === 'true',
+      value: attrs.value ?? '',
+      get textContent(): string {
+        return [node.ownText, ...node.childrenEls.map((c) => c.textContent)]
+          .filter(Boolean)
+          .join(' ');
+      },
+      get innerText(): string {
+        return node.textContent;
+      },
+      getAttribute: (attr) => node.attrs[attr] ?? null,
+      closest: (selector) => {
+        const roles = [...selector.matchAll(/\[role="([^"]+)"\]/g)].map(
+          (m) => m[1],
+        );
+        for (
+          let cursor: FakeDomEl | null = node;
+          cursor;
+          cursor = cursor.parentElement
+        ) {
+          if (
+            roles.length > 0
+              ? roles.includes(cursor.attrs.role ?? '')
+              : cursor.tagName === selector.toUpperCase()
+          ) {
+            return cursor;
+          }
+        }
+        return null;
+      },
+      checkVisibility: () => true,
+      // Only the ancestor-walk field census and the fieldset legend lookup
+      // ever run against an ELEMENT in extractPageState.
+      querySelectorAll: (selector) =>
+        selector.startsWith('input:not')
+          ? descendantsOf(node).filter(isFieldEl)
+          : descendantsOf(node).filter(
+              (d) => d.tagName === selector.toUpperCase(),
+            ),
+      querySelector: (selector) => node.querySelectorAll(selector)[0] ?? null,
+    };
+    for (const child of childrenEls) child.parentElement = node;
+    return node;
+  }
+
+  /** The real wrapper shape: label(question text + textarea) + sibling <p> hint. */
+  function essayFixture(textareaAttrs: Record<string, string>) {
+    const textarea = el('textarea', textareaAttrs, '');
+    const wrapper = el(
+      'div',
+      { class: 'flex flex-col gap-2 col-span-2' },
+      '',
+      el(
+        'label',
+        { class: 'flex gap-2 flex-col justify-center' },
+        'What is the most important problem facing young people? How would you try to make progress on it?',
+        textarea,
+      ),
+      el('p', { class: 'text-p2 not-first:mt-2' }, '500 characters max'),
+    );
+    const firstName = el(
+      'div',
+      { class: 'flex flex-col gap-2 col-span-2' },
+      '',
+      el(
+        'label',
+        { class: 'flex gap-2 flex-col justify-center' },
+        'First name *',
+        el('input', { type: 'text', name: 'first_name', required: 'true' }, ''),
+      ),
+      el('p', { class: 'text-p2 not-first:mt-2' }, 'As shown on your ID'),
+    );
+    const email = el(
+      'div',
+      { class: 'flex flex-col gap-2 col-span-2' },
+      '',
+      el(
+        'label',
+        { class: 'flex gap-2 flex-col justify-center' },
+        'Email address *',
+        el('input', { type: 'email', name: 'email', required: 'true' }, ''),
+      ),
+    );
+    const form = el(
+      'form',
+      { class: 'grid grid-cols-2 gap-6' },
+      '',
+      firstName,
+      wrapper,
+      email,
+    );
+    const body = el('body', {}, '', form);
+    const fakeDocument = {
+      title: 'OpenAI Student Collective',
+      body,
+      getElementById: () => null,
+      querySelector: () => null,
+      querySelectorAll: (selector: string) => {
+        if (selector === 'input, textarea, select') {
+          return descendantsOf(body).filter((d) =>
+            ['INPUT', 'TEXTAREA', 'SELECT'].includes(d.tagName),
+          );
+        }
+        if (selector === 'form') {
+          return descendantsOf(body).filter((d) => d.tagName === 'FORM');
+        }
+        return [];
+      },
+    };
+    return fakeDocument;
+  }
+
+  function runExtractionOn(fakeDocument: unknown): RawExtraction {
+    const run = new Function(
+      'document',
+      'CSS',
+      `return ${extractionExpression()};`,
+    ) as (doc: unknown, css: unknown) => RawExtraction;
+    return run(fakeDocument, { escape: (s: string) => s });
+  }
+
+  it('captures the limit from the maxlength attribute (live page today)', () => {
+    const extraction = runExtractionOn(
+      essayFixture({ name: 'mkto_forum_humanity_problems', maxlength: '500' }),
+    );
+    const essay = extraction.controls.find((c) => c.inputType === 'textarea');
+    expect(essay?.limit).toEqual({ kind: 'characters', max: 500 });
+  });
+
+  it('captures the limit from the sibling hint when maxlength is absent', () => {
+    // Hypothesis-(b) regression: the hint <p> is a SIBLING of the label
+    // that wraps the textarea. The wrapper holds only this one field, so
+    // the ancestor walk must NOT stop at the label — it reaches the
+    // wrapper, whose text ends in "500 characters max".
+    const extraction = runExtractionOn(
+      essayFixture({ name: 'mkto_forum_humanity_problems' }),
+    );
+    const essay = extraction.controls.find((c) => c.inputType === 'textarea');
+    expect(essay?.limit).toEqual({ kind: 'characters', max: 500 });
+    // Neighboring fields never inherit the essay's limit, and hint text
+    // without a number ("As shown on your ID") never invents one.
+    const others = extraction.controls.filter(
+      (c) => c.inputType !== 'textarea',
+    );
+    expect(others).toHaveLength(2);
+    for (const control of others) expect(control.limit).toBeUndefined();
   });
 });
