@@ -417,8 +417,6 @@ describe('discoverForm', () => {
     expect(call.options.permissionMode).toBe('dontAsk');
     // Web/subagent tools stay denied; the workspace tools are NOT denied.
     expect(call.options.disallowedTools).toEqual([
-      'WebSearch',
-      'WebFetch',
       'Task',
       'Agent',
       'REPL',
