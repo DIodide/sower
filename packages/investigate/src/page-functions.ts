@@ -53,6 +53,41 @@ export function scoreApplyControlText(
   return 0;
 }
 
+/** Source-declared answer cap detected for one form control. */
+export interface AnswerLimit {
+  kind: 'characters' | 'words';
+  max: number;
+}
+
+/**
+ * Detect a control's source-declared answer cap. The `maxlength` ATTRIBUTE
+ * wins; otherwise a VISIBLE limit hint in the control's own container text
+ * ("Max 500 characters", "up to 200 words", "1,000 character limit").
+ * Returns null when neither declares anything — a limit is NEVER invented.
+ * Self-contained (serialized into the page via toString inside
+ * extractPageState's evaluate expression — see discover-form.ts) and
+ * directly unit-testable in Node.
+ */
+export function detectAnswerLimit(
+  maxLengthAttr: string | null | undefined,
+  hintText: string | null | undefined,
+): AnswerLimit | null {
+  const attr = Number.parseInt(maxLengthAttr ?? '', 10);
+  if (Number.isInteger(attr) && attr > 0) {
+    return { kind: 'characters', max: attr };
+  }
+  const text = hintText ?? '';
+  const match =
+    text.match(
+      /(?:max(?:imum)?|up to|limit(?:ed)? to)\s+([\d,]+)\s*(characters?|chars?|words?)/i,
+    ) ??
+    text.match(/([\d,]+)\s*(character|char|word)s?\s*(?:limit|max(?:imum)?)/i);
+  if (!match) return null;
+  const max = Number.parseInt((match[1] ?? '').replace(/,/g, ''), 10);
+  if (!Number.isInteger(max) || max <= 0) return null;
+  return { kind: /word/i.test(match[2] ?? '') ? 'words' : 'characters', max };
+}
+
 /**
  * Minimal structural view of a DOM node — real Elements satisfy it, and so
  * do plain test fixtures. Only what the markdown serializer touches.

@@ -167,6 +167,8 @@ function mapAshbyFieldType(
 /**
  * Map one applicationForm field entry to a Question, or null when the entry
  * lacks a determinable id/label (we skip rather than fabricate).
+ * Neither the posting API nor the job-board GraphQL field shape declares
+ * answer-length caps, so Question.limit is never set here.
  */
 function toAshbyQuestion(entry: unknown): Question | null {
   if (!isRecord(entry)) {

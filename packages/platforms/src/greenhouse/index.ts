@@ -21,6 +21,11 @@ interface GreenhouseFieldValue {
   value: string | number;
 }
 
+/**
+ * The boards API declares no answer-length caps on any field type (verified
+ * against live payloads/fixtures), so Question.limit is never set here —
+ * limits are captured only where a source actually declares them.
+ */
 interface GreenhouseField {
   name: string;
   type: string;

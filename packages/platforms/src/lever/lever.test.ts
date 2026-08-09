@@ -406,6 +406,7 @@ describe('parseLeverApplicationForm', () => {
     <li class="application-question"><div class="application-label full-width multiple-choice"><div class="text">Pronouns</div></div><div class="application-field"><ul data-qa="multiple-choice"><li><label><input type="radio" name="pronouns" value="He/him" /><span class="application-answer-alternative">He/him</span></label></li><li><label><input type="radio" name="pronouns" value="She/her" /><span class="application-answer-alternative">She/her</span></label></li></ul></div></li>
     <li class="application-question"><div class="application-label full-width">Video Link URL</div><div class="application-field"><input name="urls[Video Link ]" /></div></li>
     <li class="application-question"><div class="application-label full-width multiple-choice"><div class="text">What is your ethnicity?</div></div><div class="application-field"><ul data-qa="multiple-choice"><li><label><input type="checkbox" name="surveysResponses[abc][responses][field0]" value="White" /><span class="application-answer-alternative">White</span></label></li><li><label><input type="checkbox" name="surveysResponses[abc][responses][field0]" value="Black" /><span class="application-answer-alternative">Black</span></label></li></ul></div></li>
+    <li class="application-question"><div class="application-label full-width">Additional information</div><div class="application-field"><textarea name="comments" maxlength="500"></textarea></div></li>
     </ul></form>
     <select name="eeo[gender]"><option value="M">Male</option><option value="F">Female</option></select>`;
 
@@ -440,6 +441,19 @@ describe('parseLeverApplicationForm', () => {
     // eeo[gender] <select> follows it in the document.
     expect(byId['urls[Video Link ]']).toMatchObject({ type: 'text' });
     expect(byId['urls[Video Link ]']?.options).toBeUndefined();
+  });
+
+  it('captures a maxlength attribute as a characters limit — and only there', () => {
+    const byId = Object.fromEntries(
+      parseLeverApplicationForm(html).map((q) => [q.id, q]),
+    );
+    expect(byId.comments).toMatchObject({
+      type: 'textarea',
+      limit: { kind: 'characters', max: 500 },
+    });
+    // Fields whose markup declares no maxlength never gain a limit.
+    expect(byId.name?.limit).toBeUndefined();
+    expect(byId['urls[Video Link ]']?.limit).toBeUndefined();
   });
 
   it('returns [] for markup with no application-question blocks', () => {

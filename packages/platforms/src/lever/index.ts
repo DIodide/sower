@@ -131,6 +131,21 @@ export function parseLeverApplicationForm(html: string): Question[] {
 
     const question: Question = { id, label, type, required };
     if (options && options.length > 0) question.options = options;
+    // Source-declared answer cap: the field's OWN input/textarea maxlength
+    // attribute (scoped by name so another field's cap never bleeds in).
+    // Captured only when present — never invented.
+    if (type === 'text' || type === 'textarea') {
+      const maxLengthMatch = block.match(
+        new RegExp(
+          `<(?:input|textarea)[^>]*name="${nid}"[^>]*maxlength="(\\d+)"|<(?:input|textarea)[^>]*maxlength="(\\d+)"[^>]*name="${nid}"`,
+        ),
+      );
+      const rawMax = maxLengthMatch?.[1] ?? maxLengthMatch?.[2];
+      const max = rawMax ? Number.parseInt(rawMax, 10) : Number.NaN;
+      if (Number.isInteger(max) && max > 0) {
+        question.limit = { kind: 'characters', max };
+      }
+    }
     questions.push(question);
   }
   return questions;

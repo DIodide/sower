@@ -73,6 +73,8 @@ export interface Question {
    * reveals a conditional question. Display-only; never submitted.
    */
   help?: string;
+  /** Source-declared answer cap. Display + client-validation only; never fabricated. */
+  limit?: { kind: 'characters' | 'words'; max: number };
 }
 
 export interface JobSpec {

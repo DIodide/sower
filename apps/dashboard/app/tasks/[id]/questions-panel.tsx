@@ -8,7 +8,11 @@
 // run, then auto-filled answers — so the eye lands on what still needs doing.
 import type { Tone } from '../../../lib/format';
 import { Empty, ExpandableText } from '../../../lib/ui';
-import { CountedTextarea, CountedTextInput } from './counted-input';
+import {
+  type AnswerLimitView,
+  CountedTextarea,
+  CountedTextInput,
+} from './counted-input';
 import { Badge } from './ui';
 
 export interface QuestionOptionView {
@@ -52,6 +56,8 @@ export interface QuestionView {
   conditional?: boolean;
   /** Human hint under the label (e.g. which parent answer reveals this one). */
   help?: string;
+  /** Source-declared answer cap — shown for every status, never fabricated. */
+  limit?: AnswerLimitView;
 }
 
 export interface DocumentOption {
@@ -289,6 +295,7 @@ function MissingInput({
           name={`q:${view.id}`}
           defaultValue={view.savedInput?.[0]}
           required={view.required}
+          limit={view.limit}
         />
         {scopeCompany ? (
           <EssayScopeChoice questionId={view.id} company={scopeCompany} />
@@ -304,6 +311,7 @@ function MissingInput({
         name={`q:${view.id}`}
         defaultValue={view.savedInput?.[0]}
         required={view.required}
+        limit={view.limit}
       />
       {scopeCompany ? (
         <EssayScopeChoice questionId={view.id} company={scopeCompany} />
@@ -353,6 +361,16 @@ function QuestionRow({
         >
           {view.label}
         </label>
+        {view.limit ? (
+          <span
+            className="hint faint"
+            style={{ fontSize: '0.75rem', whiteSpace: 'nowrap' }}
+            title="Answer length limit declared by the application form"
+          >
+            max {view.limit.max.toLocaleString()}{' '}
+            {view.limit.kind === 'words' ? 'words' : 'characters'}
+          </span>
+        ) : null}
         {view.conditional ? (
           <Badge tone="neutral" title="Only applies based on a prior answer">
             conditional

@@ -53,8 +53,10 @@ import {
 import { extractListingLinks, LISTING_LINKS_MIN } from './listing-links.js';
 import {
   type AnchorCandidate,
+  type AnswerLimit,
   assembleDescriptionMarkdown,
   collectAnchors,
+  detectAnswerLimit,
   type EmbeddedDescription,
   recoverEmbeddedDescription,
   scoreApplyControlText,
@@ -139,6 +141,11 @@ export interface RawFormControl {
   inputType: string;
   required: boolean;
   options?: RawFormOption[];
+  /**
+   * Source-declared answer cap: the control's maxlength attribute (wins) or
+   * a visible limit hint inside the control's own container. Never invented.
+   */
+  limit?: AnswerLimit;
 }
 
 /** The raw extraction the browser phase hands to the interpretation agent. */
@@ -207,6 +214,10 @@ const WEBDRIVER_MASK_SCRIPT =
  */
 function extractPageState(
   scoreApplyText: (text: string | null | undefined) => number,
+  detectLimit: (
+    maxLengthAttr: string | null | undefined,
+    hintText: string | null | undefined,
+  ) => AnswerLimit | null,
 ): RawExtraction {
   const MAX_CONTROLS = 80;
   const MAX_OPTIONS = 40;
@@ -287,6 +298,24 @@ function extractPageState(
     (el as HTMLInputElement).required ||
     el.getAttribute('aria-required') === 'true';
 
+  // Answer cap for a free-text control: the maxlength attribute wins;
+  // otherwise a visible limit hint in the control's OWN container — the walk
+  // stops at the first ancestor holding another form field, so a neighboring
+  // question's hint never applies here.
+  const limitFor = (el: HTMLElement): AnswerLimit | null => {
+    let hint = '';
+    let node = el.parentElement;
+    for (let depth = 0; node && depth < 4; depth += 1) {
+      const fieldCount = node.querySelectorAll(
+        'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), textarea, select',
+      ).length;
+      if (fieldCount > 1) break;
+      hint = norm(node.innerText ?? node.textContent).slice(0, 2000);
+      node = node.parentElement;
+    }
+    return detectLimit(el.getAttribute('maxlength'), hint);
+  };
+
   const controls: RawFormControl[] = [];
   const groups = new Map<
     string,
@@ -342,22 +371,30 @@ function extractPageState(
           });
         }
       } else {
-        controls.push({
+        const control: RawFormControl = {
           label: labelFor(input),
           name: input.name || input.id || '',
           inputType: type,
           required: isRequired(input),
-        });
+        };
+        if (type !== 'file') {
+          const limit = limitFor(input);
+          if (limit) control.limit = limit;
+        }
+        controls.push(control);
       }
     } else if (tag === 'textarea') {
       const textarea = el as HTMLTextAreaElement;
       if (!controlVisible(textarea)) continue;
-      controls.push({
+      const control: RawFormControl = {
         label: labelFor(textarea),
         name: textarea.name || textarea.id || '',
         inputType: 'textarea',
         required: isRequired(textarea),
-      });
+      };
+      const limit = limitFor(textarea);
+      if (limit) control.limit = limit;
+      controls.push(control);
     } else {
       const select = el as HTMLSelectElement;
       if (!controlVisible(select)) continue;
@@ -606,7 +643,7 @@ function extractJobMetadata(
  * marker comments identify the expression kind (also used by test doubles).
  */
 function extractionExpression(): string {
-  return `/* sower:extract */((__name) => (${extractPageState.toString()})((${scoreApplyControlText.toString()})))((t) => t)`;
+  return `/* sower:extract */((__name) => (${extractPageState.toString()})((${scoreApplyControlText.toString()}), (${detectAnswerLimit.toString()})))((t) => t)`;
 }
 
 function metadataExpression(): string {
@@ -1382,6 +1419,15 @@ const rawQuestionSchema = z.object({
   type: z.enum(['text', 'textarea', 'file', 'select', 'multiselect']),
   required: z.boolean().catch(false),
   options: z.array(rawOptionSchema).nullish(),
+  // Source-declared answer cap, copied from the extracted control — a
+  // malformed value drops the limit (catch), never the question.
+  limit: z
+    .object({
+      kind: z.enum(['characters', 'words']),
+      max: z.number().int().positive(),
+    })
+    .nullish()
+    .catch(undefined),
 });
 
 /** Keep the valid questions even when the agent malforms one of them. */
@@ -1431,7 +1477,7 @@ function buildInterpretationPrompt(
     '',
     'Rules:',
     '- Keep only real application fields. Drop search boxes, newsletter/subscribe signups, login/password fields, cookie banners, and site-chrome controls.',
-    '- Each question is {id, label, type, required, options?}.',
+    '- Each question is {id, label, type, required, options?, limit?}.',
     '- type must be exactly one of: text | textarea | file | select | multiselect.',
     '  - text/email/tel/url/date/number inputs -> "text"; textarea -> "textarea"; file upload -> "file"',
     '  - radio group or single-choice select -> "select"; a single consent/acknowledgement checkbox -> "select" with options Yes/No',
@@ -1439,6 +1485,7 @@ function buildInterpretationPrompt(
     '- id: short stable snake_case for the field MEANING (first_name, last_name, email, phone, resume, cover_letter, linkedin_url, work_authorization, ...). Never reuse an id.',
     '- required: keep the extracted flag; also set true when the label clearly marks the field mandatory (e.g. "*").',
     '- options: keep the extracted options as {label, value} (raw value when present, else the label). Drop placeholder options like "Select…".',
+    '- limit: when the extracted control carries a limit ({kind: "characters"|"words", max}), copy it verbatim onto the question. NEVER invent a limit; omit the field when the extraction has none.',
     '- company and title: infer the employer and the role title from pageTitle / headingText / the job description excerpt / the page text.',
     '- formFound: true only when the controls form a plausible job application form. If the fields are only login/search/newsletter or there are none, set formFound false with questions [] and explain in notes (e.g. "behind login", "captcha", "no form rendered").',
     '- pageKind: classify what the page IS — "application" (a job application form), "posting" (a single job posting without a reachable form), "listing" (a job listing/search/directory page, not an individual job), "login" (a sign-in wall), "other" (none of these).',
@@ -1571,6 +1618,9 @@ async function interpretExtraction(args: {
               value: option.value,
             })),
           }
+        : {}),
+      ...(question.limit
+        ? { limit: { kind: question.limit.kind, max: question.limit.max } }
         : {}),
     }),
   );

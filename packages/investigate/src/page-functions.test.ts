@@ -2,11 +2,86 @@ import { describe, expect, it } from 'vitest';
 import {
   assembleDescriptionMarkdown,
   collectAnchors,
+  detectAnswerLimit,
   type MarkdownishNode,
   recoverEmbeddedDescription,
   scoreApplyControlText,
   serializeToMarkdown,
 } from './page-functions.js';
+
+describe('detectAnswerLimit', () => {
+  it('captures a maxlength attribute as a characters limit', () => {
+    expect(detectAnswerLimit('500', '')).toEqual({
+      kind: 'characters',
+      max: 500,
+    });
+    expect(detectAnswerLimit('500', null)).toEqual({
+      kind: 'characters',
+      max: 500,
+    });
+  });
+
+  it('captures visible hints in both phrasings, characters and words', () => {
+    expect(
+      detectAnswerLimit(null, 'Cover letter (max 500 characters)'),
+    ).toEqual({ kind: 'characters', max: 500 });
+    expect(detectAnswerLimit(null, 'Maximum 300 chars')).toEqual({
+      kind: 'characters',
+      max: 300,
+    });
+    expect(detectAnswerLimit(null, 'Up to 200 words')).toEqual({
+      kind: 'words',
+      max: 200,
+    });
+    expect(detectAnswerLimit(null, 'Limited to 250 words please')).toEqual({
+      kind: 'words',
+      max: 250,
+    });
+    expect(
+      detectAnswerLimit(null, 'This field has a 500 character limit'),
+    ).toEqual({ kind: 'characters', max: 500 });
+    expect(detectAnswerLimit(null, '150 words max')).toEqual({
+      kind: 'words',
+      max: 150,
+    });
+  });
+
+  it('parses comma-grouped numbers', () => {
+    expect(detectAnswerLimit(null, 'max 1,000 characters')).toEqual({
+      kind: 'characters',
+      max: 1000,
+    });
+  });
+
+  it('returns null when neither source declares a limit — never invents', () => {
+    expect(detectAnswerLimit(null, '')).toBeNull();
+    expect(
+      detectAnswerLimit(null, 'Tell us why you want this role.'),
+    ).toBeNull();
+    expect(detectAnswerLimit(undefined, undefined)).toBeNull();
+    // Prose that mentions limits without a number/unit pair stays null.
+    expect(detectAnswerLimit(null, 'sky is the limit')).toBeNull();
+  });
+
+  it('the attribute wins when both the attribute and a hint exist', () => {
+    expect(detectAnswerLimit('400', 'max 200 words')).toEqual({
+      kind: 'characters',
+      max: 400,
+    });
+  });
+
+  it('an invalid attribute falls through to the visible hint', () => {
+    expect(detectAnswerLimit('-1', 'max 200 words')).toEqual({
+      kind: 'words',
+      max: 200,
+    });
+    expect(detectAnswerLimit('abc', 'max 500 characters')).toEqual({
+      kind: 'characters',
+      max: 500,
+    });
+    expect(detectAnswerLimit('0', '')).toBeNull();
+  });
+});
 
 describe('scoreApplyControlText', () => {
   it('scores exact apply-style phrases highest (3), any case/punctuation', () => {

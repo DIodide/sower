@@ -318,6 +318,13 @@ const discoveredQuestionSchema = z.object({
       }),
     )
     .optional(),
+  // Source-declared answer cap — captured from the page, never fabricated.
+  limit: z
+    .object({
+      kind: z.enum(['characters', 'words']),
+      max: z.number().int().positive().max(1_000_000),
+    })
+    .optional(),
 });
 
 const discoveredFormSchema = z.object({

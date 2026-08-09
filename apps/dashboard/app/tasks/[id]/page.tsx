@@ -236,6 +236,7 @@ function buildQuestionViews(
       docKind: documentKind(question),
       ...(question.conditional ? { conditional: true } : {}),
       ...(question.help ? { help: question.help } : {}),
+      ...(question.limit ? { limit: question.limit } : {}),
     };
 
     if (answer) {

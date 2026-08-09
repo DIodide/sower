@@ -233,6 +233,8 @@ interface QuestionSummary {
   status: 'resolved' | 'missing' | 'unresolved';
   value: string | null;
   source: string | null;
+  /** Source-declared answer cap, passed through when the spec carries one. */
+  limit?: { kind: 'characters' | 'words'; max: number };
 }
 
 function buildQuestions(
@@ -253,6 +255,7 @@ function buildQuestions(
       label: question.label,
       type: question.type,
       required: question.required,
+      ...(question.limit ? { limit: question.limit } : {}),
     };
     const answer = resolvedById.get(question.id);
     if (answer) {

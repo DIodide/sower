@@ -285,6 +285,8 @@ describe('GET /mobile/tasks/:id', () => {
         label: 'Cover letter',
         type: 'textarea',
         required: false,
+        // Source-declared cap — must pass through to the mobile payload.
+        limit: { kind: 'characters', max: 500 },
       },
       { id: 'q-extra', label: 'Anything else?', type: 'text', required: false },
     ];
@@ -430,6 +432,7 @@ describe('GET /mobile/tasks/:id', () => {
         label: 'Cover letter',
         type: 'textarea',
         required: false,
+        limit: { kind: 'characters', max: 500 },
         status: 'missing',
         value: null,
         source: null,

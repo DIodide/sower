@@ -80,6 +80,44 @@ describe('parseQuestionnaireDefinition (real datasite fixture)', () => {
     ).toEqual([]);
   });
 
+  it('maps a text property maxLength; never invents one elsewhere', () => {
+    const parsed = parseQuestionnaireDefinition({
+      definitions: {
+        primaryQuestionnaire: {
+          required: [],
+          properties: {
+            essay: {
+              label: 'Why this role?',
+              type: 'string',
+              order: 'a',
+              maxLength: 500,
+            },
+            choice: {
+              label: 'Authorized?',
+              type: 'object',
+              order: 'b',
+              maxLength: 500,
+            },
+            free: { label: 'Notice period', type: 'string', order: 'c' },
+            bogus: {
+              label: 'Bad cap',
+              type: 'string',
+              order: 'd',
+              maxLength: 0,
+            },
+          },
+        },
+      },
+    });
+    const byId = new Map(parsed.map((f) => [f.id, f]));
+    expect(byId.get('essay')?.maxLength).toBe(500);
+    // A select control's cap is meaningless — never carried.
+    expect(byId.get('choice')?.maxLength).toBeUndefined();
+    // Absent or non-positive caps are never invented.
+    expect(byId.get('free')?.maxLength).toBeUndefined();
+    expect(byId.get('bogus')?.maxLength).toBeUndefined();
+  });
+
   it('drops read-only fields', () => {
     const parsed = parseQuestionnaireDefinition({
       definitions: {
@@ -155,6 +193,25 @@ describe('parseWorkdayQuestionnaire (real CACI GET response, with options + bran
     // 9 top-level + at least the one branch.
     expect(fields.length).toBeGreaterThanOrEqual(10);
   });
+
+  it('the CACI payload declares no maxLength — no field ever gains one', () => {
+    expect(fields.every((f) => f.maxLength === undefined)).toBe(true);
+  });
+
+  it('carries a text question maxLength when the live payload declares one', () => {
+    const parsed = parseWorkdayQuestionnaire({
+      questions: [
+        {
+          id: 'q1',
+          body: 'Describe your experience.',
+          required: true,
+          type: [{ descriptor: 'Text Area' }],
+          maxLength: 1000,
+        },
+      ],
+    });
+    expect(parsed[0]?.maxLength).toBe(1000);
+  });
 });
 
 describe('workdayFieldsToQuestions (pipeline Question mapping)', () => {
@@ -193,5 +250,29 @@ describe('workdayFieldsToQuestions (pipeline Question mapping)', () => {
     const salary = questions.find((q) => q.label.includes('desired salary'));
     expect(salary?.conditional).toBeUndefined();
     expect(salary?.help).toBeUndefined();
+  });
+
+  it('maps a field maxLength to a characters limit; absent stays absent', () => {
+    const mapped = workdayFieldsToQuestions(
+      parseWorkdayQuestionnaire({
+        questions: [
+          {
+            id: 'q1',
+            body: 'Describe your experience.',
+            required: true,
+            type: [{ descriptor: 'Text Area' }],
+            maxLength: 1000,
+          },
+          {
+            id: 'q2',
+            body: 'What is your notice period?',
+            required: false,
+            type: [{ descriptor: 'Text' }],
+          },
+        ],
+      }),
+    );
+    expect(mapped[0]?.limit).toEqual({ kind: 'characters', max: 1000 });
+    expect(mapped[1]?.limit).toBeUndefined();
   });
 });

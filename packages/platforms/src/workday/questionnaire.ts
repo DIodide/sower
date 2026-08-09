@@ -55,6 +55,11 @@ export interface WorkdayQuestionnaireField {
    * orchestrator only answers this field when that parent option was chosen.
    */
   branchTrigger?: BranchTrigger;
+  /**
+   * Source-declared character cap on a text answer (the schema's / live
+   * question's `maxLength`). Only ever set from the payload — never invented.
+   */
+  maxLength?: number;
 }
 
 export interface WorkdayQuestionOption {
@@ -86,6 +91,8 @@ interface DefinitionSchema {
           order?: string;
           hidden?: boolean;
           readOnly?: boolean;
+          /** JSON Schema string cap — Workday sets it on limited text answers. */
+          maxLength?: number;
         }
       >;
     };
@@ -125,6 +132,8 @@ interface LiveQuestion {
   required?: boolean;
   type?: { descriptor?: string }[];
   possibleAnswers?: LiveAnswer[];
+  /** Character cap on a text answer, when the questionnaire declares one. */
+  maxLength?: number;
 }
 interface LiveAnswer {
   id: string;
@@ -189,6 +198,14 @@ export function parseWorkdayQuestionnaire(response: {
       if (options.length > 0) {
         field.options = options;
       }
+      if (
+        control === 'text' &&
+        typeof question.maxLength === 'number' &&
+        Number.isInteger(question.maxLength) &&
+        question.maxLength > 0
+      ) {
+        field.maxLength = question.maxLength;
+      }
       if (trigger) {
         field.branchTrigger = trigger;
       }
@@ -233,7 +250,7 @@ export function parseQuestionnaireDefinition(
     }
     const control = CONTROL_BY_TYPE[prop.type ?? ''] ?? 'text';
     const conditional = prop.hidden === true;
-    fields.push({
+    const field: WorkdayQuestionnaireField = {
       id,
       label: htmlEntityEncodedToPlainText(prop.label ?? '').trim(),
       control,
@@ -242,7 +259,16 @@ export function parseQuestionnaireDefinition(
       conditional,
       order: prop.order ?? '',
       needsOptions: control === 'select',
-    });
+    };
+    if (
+      control === 'text' &&
+      typeof prop.maxLength === 'number' &&
+      Number.isInteger(prop.maxLength) &&
+      prop.maxLength > 0
+    ) {
+      field.maxLength = prop.maxLength;
+    }
+    fields.push(field);
   }
   fields.sort((a, b) => compareOrder(a.order, b.order));
   return fields;
@@ -283,6 +309,9 @@ export function workdayFieldsToQuestions(
       question.conditional = true;
       const help = branchHelpText(field.branchTrigger, byId);
       if (help) question.help = help;
+    }
+    if (field.maxLength !== undefined) {
+      question.limit = { kind: 'characters', max: field.maxLength };
     }
     return question;
   });

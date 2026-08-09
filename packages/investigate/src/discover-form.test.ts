@@ -165,6 +165,9 @@ const APPLICATION_EXTRACTION: RawExtraction = {
       name: 'coverLetter',
       inputType: 'textarea',
       required: false,
+      // Source-declared cap (maxlength attribute / visible hint) — must
+      // survive interpretation onto the canonical question untouched.
+      limit: { kind: 'characters', max: 500 },
     },
     {
       label: 'Are you authorized to work in the US?',
@@ -217,6 +220,7 @@ const INTERPRETED = {
       label: 'Cover letter',
       type: 'textarea',
       required: false,
+      limit: { kind: 'characters', max: 500 },
     },
     {
       id: 'work_authorization',
@@ -299,6 +303,11 @@ describe('discoverForm', () => {
       { label: 'Yes', value: 'yes' },
       { label: 'No', value: 'no' },
     ]);
+    // The source-declared answer cap survives interpretation; questions
+    // without one never gain one.
+    const coverLetter = result.questions.find((q) => q.id === 'cover_letter');
+    expect(coverLetter?.limit).toEqual({ kind: 'characters', max: 500 });
+    expect(result.questions[0]?.limit).toBeUndefined();
 
     // descriptionMarkdown comes PROGRAMMATICALLY from the details page —
     // never from the agent (the agent's JSON has no such field).
