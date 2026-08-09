@@ -6,13 +6,16 @@ import { mirrorTaskScratchpad } from './portfolio-scratchpad.js';
 import type { Deps } from './types.js';
 
 /**
- * Job-notes scratchpad routes: create/delete the user's notes about a job,
- * each optionally TIED to one of the task's jobSpec questions. Every
+ * Job-notes scratchpad routes: create/update/delete the user's notes about a
+ * job, each optionally TIED to one of the task's jobSpec questions. Every
  * mutation regenerates + pushes the portfolio scratchpad mirror IN FULL
  * (portfolio-scratchpad.ts) and reports the outcome as `sync` — a GitHub
  * failure NEVER fails the request: the note is in the DB (the source of
  * truth) and the next mutation re-mirrors the whole file. All routes
- * require x-api-key via the server-wide preHandler.
+ * require x-api-key via the server-wide preHandler. The dashboard panel
+ * autosaves on an 800ms debounce, so a typing burst can update (and
+ * re-mirror) several times — deliberately NO server-side debounce: each
+ * mirror is a full rewrite, so the last one always wins.
  */
 
 const taskParamsSchema = z.object({
@@ -30,6 +33,19 @@ const createBodySchema = z.object({
   body: z.string().trim().min(1).max(20_000),
   questionId: z.string().max(200).optional(),
 });
+
+// PATCH-style update: only provided fields change. questionId null CLEARS
+// the tie (a note demoted back to general); at least one field must be
+// present, like the task-meta route.
+const updateBodySchema = z
+  .object({
+    body: z.string().trim().min(1).max(20_000).optional(),
+    questionId: z.string().max(200).nullable().optional(),
+  })
+  .refine(
+    (patch) => patch.body !== undefined || patch.questionId !== undefined,
+    { message: 'provide at least one of body, questionId' },
+  );
 
 export function registerJobNoteRoutes(app: FastifyInstance, deps: Deps): void {
   // Add a note. A provided questionId must name one of THIS task's jobSpec
@@ -83,6 +99,62 @@ export function registerJobNoteRoutes(app: FastifyInstance, deps: Deps): void {
     const note = inserted[0];
     if (!note) {
       return reply.code(500).send({ error: 'failed to record note' });
+    }
+    const sync = await mirrorTaskScratchpad(deps, taskId);
+    return reply.code(200).send({ note, sync });
+  });
+
+  // Update a note in place (the dashboard's debounced autosave). Same
+  // guarantees as create: a non-null questionId must name one of THIS task's
+  // jobSpec questions, and the scratchpad is re-mirrored after the write.
+  app.post('/tasks/:id/job-notes/:noteId', async (request, reply) => {
+    const params = noteParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid id', issues: params.error.issues });
+    }
+    const body = updateBodySchema.safeParse(request.body);
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send({ error: 'invalid body', issues: body.error.issues });
+    }
+    const { id: taskId, noteId } = params.data;
+    const tasks = await deps.db
+      .select({
+        id: applicationTasks.id,
+        jobSpec: applicationTasks.jobSpec,
+      })
+      .from(applicationTasks)
+      .where(eq(applicationTasks.id, taskId))
+      .limit(1);
+    const task = tasks[0];
+    if (!task) {
+      return reply.code(404).send({ error: 'task not found' });
+    }
+    const questionId = body.data.questionId;
+    if (typeof questionId === 'string') {
+      const known = (task.jobSpec?.questions ?? []).some(
+        (q) => q.id === questionId,
+      );
+      if (!known) {
+        return reply.code(400).send({
+          error: `questionId '${questionId}' is not a question of this task`,
+        });
+      }
+    }
+    const updated = await deps.db
+      .update(jobNotes)
+      .set({
+        ...(body.data.body !== undefined ? { body: body.data.body } : {}),
+        ...(questionId !== undefined ? { questionId } : {}),
+      })
+      .where(and(eq(jobNotes.id, noteId), eq(jobNotes.taskId, taskId)))
+      .returning();
+    const note = updated[0];
+    if (!note) {
+      return reply.code(404).send({ error: 'note not found' });
     }
     const sync = await mirrorTaskScratchpad(deps, taskId);
     return reply.code(200).send({ note, sync });

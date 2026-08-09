@@ -639,6 +639,9 @@ export async function investigateTask(taskId: string): Promise<ActionResult> {
 export interface JobNoteActionResult extends ActionResult {
   /** 'mirrored' | 'skipped: no token' | 'failed: …' from the api. */
   sync?: string;
+  /** Create only: the new row's id, so the client-side panel can reconcile
+   *  its optimistic note (and route follow-up edits at the real row). */
+  noteId?: string;
 }
 
 // Mirrors the api's create body: 20k cap like every other user text, and a
@@ -677,7 +680,62 @@ export async function createJobNote(
     return { ok: false, message: `add note failed: ${result.message}` };
   }
   revalidatePath(`/tasks/${idParse.data}`);
-  return { ok: true, message: 'note added.', sync: result.sync };
+  const created = z.object({ id: z.string() }).safeParse(result.note);
+  return {
+    ok: true,
+    message: 'note added.',
+    sync: result.sync,
+    ...(created.success ? { noteId: created.data.id } : {}),
+  };
+}
+
+// Mirrors the api's update body: PATCH semantics — only provided fields
+// change, questionId null clears the tie, at least one field required.
+const jobNoteUpdateSchema = z
+  .object({
+    body: z.string().trim().min(1).max(20_000).optional(),
+    questionId: z.string().max(200).nullable().optional(),
+  })
+  .refine(
+    (patch) => patch.body !== undefined || patch.questionId !== undefined,
+    { message: 'provide at least one of body, questionId' },
+  );
+
+/**
+ * Update a job note in place via the api service (the panel's debounced
+ * autosave). The api validates a non-null questionId against the task's own
+ * jobSpec and re-mirrors the scratchpad after the write.
+ */
+export async function updateJobNote(
+  taskId: string,
+  noteId: string,
+  patch: { body?: string; questionId?: string | null },
+): Promise<JobNoteActionResult> {
+  const idParse = uuidSchema.safeParse(taskId);
+  if (!idParse.success) return { ok: false, message: 'invalid task id.' };
+  const noteParse = uuidSchema.safeParse(noteId);
+  if (!noteParse.success) return { ok: false, message: 'invalid note id.' };
+  const parsed = jobNoteUpdateSchema.safeParse(patch);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      message:
+        typeof patch.body === 'string' && patch.body.length > 20_000
+          ? 'note is too long (max 20,000 characters).'
+          : typeof patch.body === 'string' && patch.body.trim() === ''
+            ? 'write the note first.'
+            : 'nothing to update.',
+    };
+  }
+  const result = await callJobNotesApi(
+    `/tasks/${idParse.data}/job-notes/${noteParse.data}`,
+    parsed.data,
+  );
+  if (!result.ok) {
+    return { ok: false, message: `save failed: ${result.message}` };
+  }
+  revalidatePath(`/tasks/${idParse.data}`);
+  return { ok: true, message: 'saved.', sync: result.sync };
 }
 
 /**
@@ -734,12 +792,13 @@ const jobNotesApiResponseSchema = z.object({
  * Call the sower api service's job-notes routes (and ONLY the sower api
  * service — the base URL comes from our own deployment env, never from user
  * input or job data). Mirrors callApi; kept separate because these routes
- * answer the {note/ok, sync} shape rather than the task-action one.
+ * answer the {note/ok, sync} shape rather than the task-action one. The raw
+ * `note` rides along so createJobNote can pull the new row's id out of it.
  */
 async function callJobNotesApi(
   path: string,
   jsonBody?: Record<string, unknown>,
-): Promise<{ ok: boolean; message: string; sync?: string }> {
+): Promise<{ ok: boolean; message: string; sync?: string; note?: unknown }> {
   const base = process.env.API_BASE_URL;
   const apiKey = process.env.INGEST_API_KEY;
   if (!base || !apiKey) {
@@ -782,7 +841,7 @@ async function callJobNotesApi(
       message: `(${response.status}) ${body.error ?? body.message ?? 'see api logs'}`,
     };
   }
-  return { ok: true, message: '', sync: body.sync };
+  return { ok: true, message: '', sync: body.sync, note: body.note };
 }
 
 const apiResponseSchema = z.object({

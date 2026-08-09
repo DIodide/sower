@@ -6,8 +6,9 @@ import type { Deps } from './types.js';
 
 /**
  * /tasks/:id/job-notes routes against a fake db and a mocked fetch: create
- * (parent 404, questionId-must-match-the-spec 400, insert shape), delete
- * (task/note 404s, the row removed), and the mirror contract — sync
+ * (parent 404, questionId-must-match-the-spec 400, insert shape), update
+ * (task/note 404s, patch semantics incl. questionId:null clearing the tie),
+ * delete (task/note 404s, the row removed), and the mirror contract — sync
  * 'skipped: no token' without a token, the GET-sha→PUT flow (create vs
  * update, tied-question labels in the rendered file, the empty file after
  * the last delete), and the rule that a GitHub failure NEVER fails the
@@ -58,12 +59,14 @@ function createFakeDb(
   options: {
     selectResults?: unknown[][];
     insertResults?: unknown[][];
+    updateResults?: unknown[][];
     deleteResults?: unknown[][];
     writes?: DbWrite[];
   } = {},
 ): Deps['db'] {
   const selectResults = [...(options.selectResults ?? [])];
   const insertResults = [...(options.insertResults ?? [])];
+  const updateResults = [...(options.updateResults ?? [])];
   const deleteResults = [...(options.deleteResults ?? [])];
   const db = {
     select: () => chain(selectResults.shift() ?? []),
@@ -72,7 +75,7 @@ function createFakeDb(
         options.writes?.push({ method: 'insert', table, arg }),
       ),
     update: (table: unknown) =>
-      chain([], (arg) =>
+      chain(updateResults.shift() ?? [], (arg) =>
         options.writes?.push({ method: 'update', table, arg }),
       ),
     delete: (table: unknown) => {
@@ -439,6 +442,215 @@ describe('POST /tasks/:id/job-notes', () => {
     expect((response.json() as { sync: string }).sync).toBe(
       'failed: ECONNRESET',
     );
+    await app.close();
+  });
+});
+
+describe('POST /tasks/:id/job-notes/:noteId (update)', () => {
+  it('rejects an empty patch, an empty/over-long body, and an over-long questionId with 400', async () => {
+    const writes: DbWrite[] = [];
+    const app = buildServer(createDeps(createFakeDb({ writes })));
+    for (const payload of [
+      {},
+      { body: '' },
+      { body: '   ' },
+      { body: 'x'.repeat(20_001) },
+      { questionId: 'q'.repeat(201) },
+    ]) {
+      const response = await app.inject({
+        method: 'POST',
+        url: `/tasks/${TASK_ID}/job-notes/${NOTE_ID}`,
+        headers: AUTH,
+        payload,
+      });
+      expect(response.statusCode).toBe(400);
+    }
+    expect(writes).toHaveLength(0);
+    await app.close();
+  });
+
+  it('404s on an unknown task, writing nothing', async () => {
+    const writes: DbWrite[] = [];
+    const app = buildServer(
+      createDeps(createFakeDb({ selectResults: [[]], writes })),
+    );
+    const response = await app.inject({
+      method: 'POST',
+      url: `/tasks/${TASK_ID}/job-notes/${NOTE_ID}`,
+      headers: AUTH,
+      payload: { body: 'updated' },
+    });
+    expect(response.statusCode).toBe(404);
+    expect(writes).toHaveLength(0);
+    await app.close();
+  });
+
+  it('404s a note that does not exist (or belongs to another task), skipping the mirror', async () => {
+    stubFetch([]);
+    const app = buildServer(
+      createDeps(
+        createFakeDb({
+          selectResults: [[{ id: TASK_ID, jobSpec: SPEC }]],
+          updateResults: [[]],
+        }),
+        tokenConfig,
+      ),
+    );
+    const response = await app.inject({
+      method: 'POST',
+      url: `/tasks/${TASK_ID}/job-notes/${NOTE_ID}`,
+      headers: AUTH,
+      payload: { body: 'updated' },
+    });
+    expect(response.statusCode).toBe(404);
+    expect(fetchCalls).toHaveLength(0);
+    await app.close();
+  });
+
+  it("400s a questionId that is not one of the task's questions, writing nothing", async () => {
+    const writes: DbWrite[] = [];
+    const app = buildServer(
+      createDeps(
+        createFakeDb({
+          selectResults: [[{ id: TASK_ID, jobSpec: SPEC }]],
+          writes,
+        }),
+      ),
+    );
+    const response = await app.inject({
+      method: 'POST',
+      url: `/tasks/${TASK_ID}/job-notes/${NOTE_ID}`,
+      headers: AUTH,
+      payload: { questionId: 'q-nope' },
+    });
+    expect(response.statusCode).toBe(400);
+    expect((response.json() as { error: string }).error).toContain('q-nope');
+    expect(writes).toHaveLength(0);
+    await app.close();
+  });
+
+  it("updates only the provided fields and reports sync 'skipped: no token' without a token", async () => {
+    const writes: DbWrite[] = [];
+    stubFetch([]);
+    const app = buildServer(
+      createDeps(
+        createFakeDb({
+          selectResults: [[{ id: TASK_ID, jobSpec: SPEC }]],
+          updateResults: [[noteRow({ body: 'updated', questionId: 'q-why' })]],
+          writes,
+        }),
+      ),
+    );
+    const response = await app.inject({
+      method: 'POST',
+      url: `/tasks/${TASK_ID}/job-notes/${NOTE_ID}`,
+      headers: AUTH,
+      payload: { body: 'updated', questionId: 'q-why' },
+    });
+    expect(response.statusCode).toBe(200);
+    const update = writes.find((w) => w.method === 'update');
+    expect(update?.table).toBe(jobNotes);
+    expect(update?.arg).toEqual({ body: 'updated', questionId: 'q-why' });
+    const body = response.json() as { note: { body: string }; sync: string };
+    expect(body.note.body).toBe('updated');
+    expect(body.sync).toBe('skipped: no token');
+    expect(fetchCalls).toHaveLength(0);
+    await app.close();
+  });
+
+  it('questionId: null clears the tie without touching the body', async () => {
+    const writes: DbWrite[] = [];
+    const app = buildServer(
+      createDeps(
+        createFakeDb({
+          selectResults: [[{ id: TASK_ID, jobSpec: SPEC }]],
+          updateResults: [[noteRow()]],
+          writes,
+        }),
+      ),
+    );
+    const response = await app.inject({
+      method: 'POST',
+      url: `/tasks/${TASK_ID}/job-notes/${NOTE_ID}`,
+      headers: AUTH,
+      payload: { questionId: null },
+    });
+    expect(response.statusCode).toBe(200);
+    const update = writes.find((w) => w.method === 'update');
+    expect(update?.arg).toEqual({ questionId: null });
+    const body = response.json() as {
+      note: { questionId: null };
+      sync: string;
+    };
+    expect(body.note.questionId).toBeNull();
+    expect(body.sync).toBe('skipped: no token');
+    await app.close();
+  });
+
+  it('re-mirrors the scratchpad with the updated text (GET sha → PUT)', async () => {
+    const updated = noteRow({ questionId: 'q-why', body: 'updated draft' });
+    stubFetch([
+      fakeResponse({ ok: true, status: 200, body: { sha: 'blob-1' } }),
+      fakeResponse({ ok: true, status: 200, body: { commit: { sha: 'c4' } } }),
+    ]);
+    const app = buildServer(
+      createDeps(
+        createFakeDb({
+          selectResults: [
+            [{ id: TASK_ID, jobSpec: SPEC }],
+            ...mirrorSelects([updated]),
+          ],
+          updateResults: [[updated]],
+        }),
+        tokenConfig,
+      ),
+    );
+    const response = await app.inject({
+      method: 'POST',
+      url: `/tasks/${TASK_ID}/job-notes/${NOTE_ID}`,
+      headers: AUTH,
+      payload: { body: 'updated draft' },
+    });
+    expect(response.statusCode).toBe(200);
+    expect((response.json() as { sync: string }).sync).toBe('mirrored');
+    const putBody = JSON.parse(String(fetchCalls[1]?.init?.body)) as {
+      content: string;
+      sha?: string;
+    };
+    expect(putBody.sha).toBe('blob-1');
+    expect(Buffer.from(putBody.content, 'base64').toString('utf8')).toBe(
+      'Q: Why do you want to work here?\nupdated draft\n--end\n',
+    );
+    await app.close();
+  });
+
+  it('still 200s when GitHub fails — the update is in the DB', async () => {
+    stubFetch([
+      fakeResponse({ ok: false, status: 404 }),
+      fakeResponse({ ok: false, status: 500, text: 'boom' }),
+    ]);
+    const app = buildServer(
+      createDeps(
+        createFakeDb({
+          selectResults: [
+            [{ id: TASK_ID, jobSpec: SPEC }],
+            ...mirrorSelects([noteRow({ body: 'updated' })]),
+          ],
+          updateResults: [[noteRow({ body: 'updated' })]],
+        }),
+        tokenConfig,
+      ),
+    );
+    const response = await app.inject({
+      method: 'POST',
+      url: `/tasks/${TASK_ID}/job-notes/${NOTE_ID}`,
+      headers: AUTH,
+      payload: { body: 'updated' },
+    });
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { note: { id: string }; sync: string };
+    expect(body.note.id).toBe(NOTE_ID);
+    expect(body.sync).toMatch(/^failed: /);
     await app.close();
   });
 });

@@ -758,21 +758,13 @@ export default async function TaskPage({
     filename: d.filename,
     createdLabel: formatLocal(d.createdAt),
   }));
-  // Job-note views: tied-question labels resolved from the SAME jobSpec the
-  // portfolio mirror uses (raw id fallback), created times pre-rendered
-  // server-side like documentOptions.
-  const questionLabelById = new Map(
-    (spec?.questions ?? []).map((q) => [q.id, q.label]),
-  );
+  // Job-note views: the RAW questionId travels to the client-side panel
+  // (its tie select resolves labels from noteQuestionOptions itself),
+  // created times pre-rendered server-side like documentOptions.
   const jobNoteViews: JobNoteView[] = jobNoteRows.map((note) => ({
     id: note.id,
     body: note.body,
-    ...(note.questionId !== null
-      ? {
-          questionLabel:
-            questionLabelById.get(note.questionId) ?? note.questionId,
-        }
-      : {}),
+    ...(note.questionId !== null ? { questionId: note.questionId } : {}),
     createdLabel: relativeTime(note.createdAt),
   }));
   const noteQuestionOptions = (spec?.questions ?? []).map((q) => ({

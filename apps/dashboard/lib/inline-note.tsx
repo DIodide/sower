@@ -18,8 +18,9 @@ const FLASH_MS = 1_500;
 /** Mirrors the api's notes cap — checked here so the error is instant. */
 const NOTE_MAX_CHARS = 20_000;
 
-/** JS autogrow fallback for browsers without `field-sizing: content`. */
-function autogrow(el: HTMLTextAreaElement): void {
+/** JS autogrow fallback for browsers without `field-sizing: content`.
+ *  Exported for the job-notes panel, which shares the .note-edit idiom. */
+export function autogrow(el: HTMLTextAreaElement): void {
   if (typeof CSS !== 'undefined' && CSS.supports('field-sizing', 'content')) {
     return; // the stylesheet already handles it
   }

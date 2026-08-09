@@ -775,9 +775,28 @@ input[type="file"]::file-selector-button {
   min-width: 0;
 }
 
+/* The notes rail sticks while the (usually much taller) questions column
+   scrolls, so notes stay usable from anywhere down the page; a taller-than-
+   viewport stack scrolls inside the rail. In the stacked layout below the
+   rail's grid area shrinks to its own height, so stickiness disappears
+   naturally — only the height cap needs resetting there. */
+.qa-split > :last-child {
+  position: sticky;
+  top: 0.75rem;
+  align-self: start;
+  max-height: calc(100dvh - 1.5rem);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
 @media (max-width: 1000px) {
   .qa-split {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .qa-split > :last-child {
+    max-height: none;
+    overflow-y: visible;
   }
 }
 
@@ -1791,6 +1810,87 @@ button.due-cell-btn:hover {
   font-size: 0.6875rem;
 }
 
+/* job-notes rail: a stack of always-editable autogrowing notes — no submit
+   anywhere. The top slot is the composer (ghost placeholder); each note
+   below saves itself on the inline-note debounce. */
+.jn-row {
+  padding: 0.4375rem 0;
+  border-top: var(--border-soft);
+}
+
+.jn-row:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+
+.jn-row .note-edit {
+  font-size: 0.875rem;
+}
+
+.jn-row .note-edit::placeholder {
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+/* per-note meta line: the quiet question tie, created time, save state,
+   and the ghost delete */
+.jn-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 0.375rem;
+  flex-wrap: wrap;
+  min-width: 0;
+  margin-top: 0.125rem;
+}
+
+/* the question tie, restyled to hint size — reads as a label, not a form */
+.jn-tie {
+  max-width: 100%;
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-family: inherit;
+  font-size: 0.6875rem;
+  color: var(--ink-faint);
+  cursor: pointer;
+}
+
+.jn-tie:hover,
+.jn-tie:focus {
+  color: var(--ink-muted);
+}
+
+.jn-right {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.375rem;
+  margin-left: auto;
+}
+
+/* ghost delete: hidden until the row is hovered/focused (always visible on
+   touch — see the hover:none block) */
+.jn-del {
+  border: none;
+  background: none;
+  padding: 0 0.125rem;
+  font-size: 0.875rem;
+  line-height: 1;
+  color: var(--ink-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+
+.jn-row:hover .jn-del,
+.jn-row:focus-within .jn-del,
+.jn-del:focus-visible {
+  opacity: 1;
+}
+
+.jn-del:hover {
+  color: var(--ink);
+}
+
 /* "show N more" expander inside the Sent list — stays collapsible: the
    summary never hides, its label swaps to "show less" while open */
 details.show-more > summary {
@@ -1908,7 +2008,8 @@ details.show-more[open] > summary .show-more-open {
   }
 
   .grid-row .note-ghost,
-  .due-ghost {
+  .due-ghost,
+  .jn-del {
     opacity: 1;
   }
 
