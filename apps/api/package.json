@@ -13,6 +13,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.0",
     "@google-cloud/run": "^3.3.0",
     "@sower/accounts": "workspace:*",
     "@sower/answers": "workspace:*",

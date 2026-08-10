@@ -41,7 +41,7 @@ import {
 } from '../lib/format';
 import { compareWaiting } from '../lib/reorder';
 import { Empty, SectionHeading } from '../lib/ui';
-import { FollowupKindBadge, FollowupStateBadge } from './followups/ui';
+import { InPlayRow, type InPlayRowData } from './in-play-row';
 import { OrderedList } from './ordered-list';
 import { QuickAddBar } from './quick-add-bar';
 import { SearchBox } from './search-box';
@@ -524,6 +524,24 @@ export default async function Page({
     );
   }
 
+  // "In play" row data for the client rows (the '×' dismiss island): labels
+  // precomputed on the server so hydration never disagrees on "now".
+  const inPlay: InPlayRowData[] = inPlayRows.map((followup) => ({
+    id: followup.id,
+    taskId: followup.taskId,
+    kind: followup.kind,
+    title: followup.title,
+    company: followup.company ?? followup.jobSpec?.company ?? 'unknown company',
+    state: followup.state,
+    due: followup.dueDate
+      ? {
+          label: deadlineChipLabel(followup.dueDate) ?? '',
+          title: `due ${formatDeadline(followup.dueDate)}`,
+          soon: isDeadlineSoon(followup.dueDate),
+        }
+      : null,
+  }));
+
   const rows: TaskRowData[] = taskRows.map((row) => {
     const meta = stateMeta(row.state);
     const unsupported =
@@ -786,36 +804,8 @@ export default async function Page({
                 {SECTIONS.inPlay}
               </SectionHeading>
               <div className="row-list">
-                {inPlayRows.map((followup) => (
-                  <div key={followup.id} className="fu-row">
-                    <FollowupKindBadge kind={followup.kind} />
-                    <span className="fu-title">
-                      <span className="faint">
-                        {followup.company ??
-                          followup.jobSpec?.company ??
-                          'unknown company'}
-                        {' · '}
-                      </span>
-                      <Link href={`/followups/${followup.id}`}>
-                        {followup.title}
-                      </Link>
-                    </span>
-                    <FollowupStateBadge state={followup.state} />
-                    <span className="fu-due">
-                      {followup.dueDate ? (
-                        <span
-                          className={
-                            isDeadlineSoon(followup.dueDate)
-                              ? 'deadline-chip deadline-chip--soon'
-                              : 'deadline-chip'
-                          }
-                          title={`due ${formatDeadline(followup.dueDate)}`}
-                        >
-                          ⏰ {deadlineChipLabel(followup.dueDate)}
-                        </span>
-                      ) : null}
-                    </span>
-                  </div>
+                {inPlay.map((followup) => (
+                  <InPlayRow key={followup.id} row={followup} />
                 ))}
               </div>
             </section>

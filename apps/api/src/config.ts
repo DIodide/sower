@@ -175,6 +175,15 @@ const envSchema = z
      * 'skipped: no token' and notes live in the DB only. NEVER logged.
      */
     GITHUB_PORTFOLIO_TOKEN: z.string().optional(),
+    /**
+     * SECRET (Secret Manager): Claude Code OAuth token for the LLM
+     * follow-up judge (followup-judge.ts — the judge subprocess reads the
+     * same env var directly). Optional — absent, the inbox poll skips
+     * judging with its conservative fallback (high-signal regex kinds kept,
+     * 'recruiter' dropped) and POST /followups/audit answers
+     * {enabled:false}. NEVER logged.
+     */
+    CLAUDE_CODE_OAUTH_TOKEN: z.string().optional(),
   })
   .transform((env) => ({
     ...env,

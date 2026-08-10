@@ -1,6 +1,7 @@
 import {
   deadlineFromIsoDate,
   FOLLOWUP_KIND_LABELS,
+  type FollowupKind,
   type TaskState,
 } from '@sower/core';
 import {
@@ -20,15 +21,18 @@ import {
 import { desc, eq, inArray } from 'drizzle-orm';
 import { syncFollowupCalendarEvent } from './calendar-sync.js';
 import { escapeLabel } from './discord-ingest.js';
+import { judgeFollowupMail } from './followup-judge.js';
 import type { Deps } from './types.js';
 
 /**
  * Follow-up inbox poll: scan recent Gmail for post-application mail (OA
  * invites, interview requests, offers, rejections, recruiter notes), match
  * each message to a SENT application by company name, classify it
- * (@sower/inbox followup-classify — pure), and record matched mail as
- * followups rows. Fully dormant until the Gmail OAuth triple
- * (GMAIL_CLIENT_ID/SECRET/REFRESH_TOKEN) is configured.
+ * (@sower/inbox followup-classify — pure), have the LLM judge
+ * (followup-judge.ts) veto noise the regexes can't (billing/security
+ * notices, webinar RSVPs, newsletters from the company's own domain), and
+ * record surviving mail as followups rows. Fully dormant until the Gmail
+ * OAuth triple (GMAIL_CLIENT_ID/SECRET/REFRESH_TOKEN) is configured.
  *
  * Email content is UNTRUSTED input: the classifier's extracted fields
  * (kind/title/url/dueDate) are re-validated (url against the same host
@@ -102,6 +106,44 @@ export interface FollowupInboxPollResult {
   created: number;
   /** Scanned messages that created nothing (dedupe/no-match/noise/cap). */
   skipped: number;
+  /** Regex-classified messages the LLM judge vetoed as noise (skipped). */
+  judgedNoise: number;
+  /** Judge calls that failed/timed out (the conservative fallback ran). */
+  judgeFailed: number;
+}
+
+/**
+ * Regex kinds kept when NO judge verdict is available (judge failure,
+ * timeout, or no CLAUDE_CODE_OAUTH_TOKEN): the specific-wording matches are
+ * high-signal, while the 'recruiter' catch-all fallback is where every live
+ * false positive lived — without a judge, recruiter-kind mail is dropped.
+ */
+const HIGH_SIGNAL_KINDS: readonly FollowupKind[] = [
+  'assessment',
+  'interview',
+  'offer',
+  'rejection',
+];
+
+/**
+ * `Recruiter — subj` → `Interview — subj` when the judge overrules the
+ * regex kind: the stored title leads with the kind label
+ * (followup-classify buildTitle), so a re-kinded row must not keep the old
+ * label lying in front.
+ */
+function retagTitle(
+  title: string,
+  fromKind: FollowupKind,
+  toKind: FollowupKind,
+): string {
+  const fromLabel = FOLLOWUP_KIND_LABELS[fromKind];
+  if (!title.startsWith(fromLabel)) {
+    return title;
+  }
+  return `${FOLLOWUP_KIND_LABELS[toKind]}${title.slice(fromLabel.length)}`.slice(
+    0,
+    300,
+  );
 }
 
 /** ` lowercased text with punctuation collapsed to single spaces `. */
@@ -163,6 +205,8 @@ function fromDomainFlat(from: string): string {
 interface SentTask {
   taskId: string;
   company: string;
+  /** The application's job title (verbatim) — context for the LLM judge. */
+  title: string;
   /** Company tokens — the sender-anchored gate. */
   tokens: string[];
   /** Job-title tokens (same normalization) — the overlap tiebreaker. */
@@ -392,7 +436,15 @@ export async function runFollowupInboxPoll(
     !config.GMAIL_CLIENT_SECRET ||
     !config.GMAIL_REFRESH_TOKEN
   ) {
-    return { enabled: false, scanned: 0, matched: 0, created: 0, skipped: 0 };
+    return {
+      enabled: false,
+      scanned: 0,
+      matched: 0,
+      created: 0,
+      skipped: 0,
+      judgedNoise: 0,
+      judgeFailed: 0,
+    };
   }
   const reader =
     mailbox ??
@@ -427,6 +479,7 @@ export async function runFollowupInboxPoll(
       tasks.push({
         taskId: row.taskId,
         company,
+        title,
         tokens,
         titleTokens: matchTokens(title),
         nonApplication: NON_APPLICATION_TITLE_RE.test(title),
@@ -454,6 +507,8 @@ export async function runFollowupInboxPoll(
 
   let matched = 0;
   let created = 0;
+  let judgedNoise = 0;
+  let judgeFailed = 0;
   for (const id of ids) {
     if (created >= MAX_FOLLOWUP_CREATIONS_PER_RUN) {
       break;
@@ -479,6 +534,40 @@ export async function runFollowupInboxPoll(
     if (!classified) {
       continue;
     }
+    // LLM judge on the regex-accepted mail: 'noise' → record NOTHING;
+    // 'followup' → the judge's kind wins when it differs. When no verdict
+    // exists (judge failure/timeout, or judging disabled without
+    // CLAUDE_CODE_OAUTH_TOKEN) the conservative fallback keeps the
+    // high-signal regex kinds and drops 'recruiter' — the catch-all where
+    // every live false positive lived. The poll itself never breaks.
+    let kind = classified.kind;
+    if (config.CLAUDE_CODE_OAUTH_TOKEN) {
+      const judged = await judgeFollowupMail({
+        subject: message.subject,
+        from: message.from,
+        bodyText: emailBodyToPlainText(message.bodyText),
+        company: task.company,
+        jobTitle: task.title,
+        regexKind: classified.kind,
+      });
+      if (judged === null) {
+        judgeFailed += 1;
+        if (!HIGH_SIGNAL_KINDS.includes(classified.kind)) {
+          continue;
+        }
+      } else if (judged.verdict === 'noise') {
+        judgedNoise += 1;
+        continue;
+      } else if (judged.kind !== undefined) {
+        kind = judged.kind;
+      }
+    } else if (!HIGH_SIGNAL_KINDS.includes(classified.kind)) {
+      continue;
+    }
+    const title =
+      kind === classified.kind
+        ? classified.title
+        : retagTitle(classified.title, classified.kind, kind);
     const dueDate = classified.dueDate
       ? new Date(deadlineFromIsoDate(classified.dueDate) ?? classified.dueDate)
       : null;
@@ -486,8 +575,8 @@ export async function runFollowupInboxPoll(
       .insert(followups)
       .values({
         taskId: task.taskId,
-        kind: classified.kind,
-        title: classified.title.slice(0, 300),
+        kind,
+        title: title.slice(0, 300),
         state: 'RECEIVED',
         url: allowedFollowupUrl(classified.url),
         dueDate,
@@ -525,5 +614,7 @@ export async function runFollowupInboxPoll(
     matched,
     created,
     skipped: scanned - created,
+    judgedNoise,
+    judgeFailed,
   };
 }

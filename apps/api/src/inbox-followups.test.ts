@@ -14,7 +14,9 @@ import type { Deps, Notifier } from './types.js';
 /**
  * The follow-up inbox poll with an injected fake Gmail + notify: gating on
  * the OAuth triple, company-token matching, source_ref dedupe, classifier
- * null-skips, the per-run creation cap, and the #alerts note. The
+ * null-skips, the LLM judge (noise veto / kind override / conservative
+ * failure fallback — the judge itself is proven in followup-judge.test.ts
+ * and mocked here), the per-run creation cap, and the #alerts note. The
  * classifier itself is proven in @sower/inbox; the calendar sync in
  * calendar-sync.test.ts (mocked here).
  */
@@ -28,6 +30,26 @@ vi.mock('./calendar-sync.js', () => ({
       return { kind: 'created', eventId: 'evt-1' };
     },
   ),
+}));
+
+/** Scripted judge: per-call results (shifted), then the fallback. */
+const judgeState = vi.hoisted(() => ({
+  calls: [] as unknown[],
+  results: [] as unknown[],
+  fallback: {
+    verdict: 'followup',
+    confidence: 'high',
+    reason: 'about the application',
+  } as unknown,
+}));
+
+vi.mock('./followup-judge.js', () => ({
+  judgeFollowupMail: vi.fn(async (input: unknown) => {
+    judgeState.calls.push(input);
+    return judgeState.results.length > 0
+      ? judgeState.results.shift()
+      : judgeState.fallback;
+  }),
 }));
 
 interface Chain {
@@ -106,6 +128,7 @@ const baseConfig = {
   GMAIL_CLIENT_ID: 'cid',
   GMAIL_CLIENT_SECRET: 'csec',
   GMAIL_REFRESH_TOKEN: 'rtok',
+  CLAUDE_CODE_OAUTH_TOKEN: 'oauth-tok',
   DISCORD_BOT_TOKEN: 'tok',
   DISCORD_ENABLED: true,
   DISCORD_ALERTS_CHANNEL_ID: 'chan-alerts',
@@ -190,6 +213,13 @@ const SENT_TASKS = [
 
 beforeEach(() => {
   calendarState.calls = [];
+  judgeState.calls = [];
+  judgeState.results = [];
+  judgeState.fallback = {
+    verdict: 'followup',
+    confidence: 'high',
+    reason: 'about the application',
+  };
 });
 
 describe('runFollowupInboxPoll', () => {
@@ -211,6 +241,8 @@ describe('runFollowupInboxPoll', () => {
         matched: 0,
         created: 0,
         skipped: 0,
+        judgedNoise: 0,
+        judgeFailed: 0,
       });
       expect(db.selectCount()).toBe(0);
     }
@@ -239,6 +271,8 @@ describe('runFollowupInboxPoll', () => {
       matched: 1,
       created: 1,
       skipped: 0,
+      judgedNoise: 0,
+      judgeFailed: 0,
     });
     const followupWrite = writes.find(
       (w) => w.method === 'insert' && w.table === followups,
@@ -293,6 +327,8 @@ describe('runFollowupInboxPoll', () => {
       matched: 0,
       created: 0,
       skipped: 1,
+      judgedNoise: 0,
+      judgeFailed: 0,
     });
     expect(mailbox.readMessage).not.toHaveBeenCalled();
   });
@@ -318,6 +354,8 @@ describe('runFollowupInboxPoll', () => {
       matched: 0,
       created: 0,
       skipped: 1,
+      judgedNoise: 0,
+      judgeFailed: 0,
     });
     expect(writes).toHaveLength(0);
   });
@@ -355,6 +393,8 @@ describe('runFollowupInboxPoll', () => {
       matched: 0,
       created: 0,
       skipped: 2,
+      judgedNoise: 0,
+      judgeFailed: 0,
     });
     expect(writes).toHaveLength(0);
   });
@@ -501,6 +541,8 @@ describe('runFollowupInboxPoll', () => {
       matched: 1,
       created: 0,
       skipped: 1,
+      judgedNoise: 0,
+      judgeFailed: 0,
     });
     expect(writes.filter((w) => w.table === events)).toHaveLength(0);
     expect(calendarState.calls).toEqual([]);
@@ -541,6 +583,8 @@ describe('runFollowupInboxPoll', () => {
       matched: 10,
       created: 10,
       skipped: 2,
+      judgedNoise: 0,
+      judgeFailed: 0,
     });
     expect(
       writes.filter((w) => w.method === 'insert' && w.table === followups),
@@ -586,6 +630,161 @@ describe('runFollowupInboxPoll', () => {
     expect(result.created).toBe(1);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+
+  it('records NOTHING when the judge vetoes a regex-accepted mail as noise', async () => {
+    const writes: DbWrite[] = [];
+    const db = createFakeDb({ selectResults: [SENT_TASKS, []], writes });
+    const notify = createNotify();
+    judgeState.results = [
+      { verdict: 'noise', confidence: 'high', reason: 'webinar reminder' },
+    ];
+
+    const result = await runFollowupInboxPoll(
+      createDeps({ db, notify }),
+      createMailbox([akunaMessage()]),
+    );
+
+    expect(result).toEqual({
+      enabled: true,
+      scanned: 1,
+      matched: 1,
+      created: 0,
+      skipped: 1,
+      judgedNoise: 1,
+      judgeFailed: 0,
+    });
+    expect(writes).toHaveLength(0);
+    expect(calendarState.calls).toEqual([]);
+    expect(notify.postChannelMessage).not.toHaveBeenCalled();
+  });
+
+  it("prefers the judge's kind over the regex kind and retags the title", async () => {
+    const writes: DbWrite[] = [];
+    const db = createFakeDb({
+      selectResults: [SENT_TASKS, []],
+      insertResults: [[createdRow()], []],
+      writes,
+    });
+    judgeState.results = [
+      {
+        verdict: 'followup',
+        kind: 'interview',
+        confidence: 'high',
+        reason: 'a scheduling request, not an assessment',
+      },
+    ];
+
+    const result = await runFollowupInboxPoll(
+      createDeps({ db }),
+      createMailbox([akunaMessage()]),
+    );
+
+    expect(result.created).toBe(1);
+    // The judge saw the matched application's identity + the regex verdict.
+    expect(judgeState.calls[0]).toMatchObject({
+      subject: 'Akuna Capital - Online Assessment Invitation',
+      from: 'Akuna Capital <no-reply@hackerrankforwork.com>',
+      company: 'Akuna Capital',
+      jobTitle: 'SWE Intern',
+      regexKind: 'assessment',
+    });
+    const followupWrite = writes.find(
+      (w) => w.method === 'insert' && w.table === followups,
+    );
+    expect(followupWrite?.arg).toMatchObject({
+      kind: 'interview',
+      title: 'Interview — Akuna Capital - Online Assessment Invitation',
+    });
+  });
+
+  it('judge failure: high-signal regex kinds are kept, recruiter mail is dropped', async () => {
+    const JANE_TASK_ID = 'aaaaaaaa-0000-4000-8000-000000000004';
+    const tasks = [
+      ...SENT_TASKS,
+      { taskId: JANE_TASK_ID, company: 'Jane Street', title: 'SWE Intern' },
+    ];
+    const writes: DbWrite[] = [];
+    const db = createFakeDb({
+      selectResults: [tasks, []],
+      insertResults: [[createdRow()], []],
+      writes,
+    });
+    judgeState.results = [null, null];
+
+    const result = await runFollowupInboxPoll(
+      createDeps({ db }),
+      createMailbox([
+        akunaMessage(),
+        {
+          id: 'm9',
+          subject: 'Jane Street — an update on your application',
+          from: 'Jane Street Recruiting <no-reply@janestreet.com>',
+          receivedAt: new Date('2026-07-18T15:00:00Z'),
+          bodyText: 'A recruiter will reach out with next steps.',
+        },
+      ]),
+    );
+
+    expect(result).toEqual({
+      enabled: true,
+      scanned: 2,
+      matched: 2,
+      created: 1,
+      skipped: 1,
+      judgedNoise: 0,
+      judgeFailed: 2,
+    });
+    // Only the assessment survived the conservative fallback.
+    const followupWrites = writes.filter(
+      (w) => w.method === 'insert' && w.table === followups,
+    );
+    expect(followupWrites).toHaveLength(1);
+    expect(followupWrites[0]?.arg).toMatchObject({ kind: 'assessment' });
+  });
+
+  it('self-gate: without CLAUDE_CODE_OAUTH_TOKEN the judge never runs and the same fallback applies', async () => {
+    const JANE_TASK_ID = 'aaaaaaaa-0000-4000-8000-000000000004';
+    const tasks = [
+      ...SENT_TASKS,
+      { taskId: JANE_TASK_ID, company: 'Jane Street', title: 'SWE Intern' },
+    ];
+    const writes: DbWrite[] = [];
+    const db = createFakeDb({
+      selectResults: [tasks, []],
+      insertResults: [[createdRow()], []],
+      writes,
+    });
+
+    const result = await runFollowupInboxPoll(
+      createDeps({ db, config: { CLAUDE_CODE_OAUTH_TOKEN: undefined } }),
+      createMailbox([
+        akunaMessage(),
+        {
+          id: 'm9',
+          subject: 'Jane Street — an update on your application',
+          from: 'Jane Street Recruiting <no-reply@janestreet.com>',
+          receivedAt: new Date('2026-07-18T15:00:00Z'),
+          bodyText: 'A recruiter will reach out with next steps.',
+        },
+      ]),
+    );
+
+    expect(judgeState.calls).toHaveLength(0);
+    expect(result).toEqual({
+      enabled: true,
+      scanned: 2,
+      matched: 2,
+      created: 1,
+      skipped: 1,
+      judgedNoise: 0,
+      judgeFailed: 0,
+    });
+    const followupWrites = writes.filter(
+      (w) => w.method === 'insert' && w.table === followups,
+    );
+    expect(followupWrites).toHaveLength(1);
+    expect(followupWrites[0]?.arg).toMatchObject({ kind: 'assessment' });
   });
 });
 

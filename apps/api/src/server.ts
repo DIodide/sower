@@ -34,6 +34,7 @@ import {
   runDiscordIngestPoll,
   type UrlOutcome,
 } from './discord-ingest.js';
+import { runFollowupAudit } from './followup-audit.js';
 import { registerFollowupRoutes } from './followup-routes.js';
 import { runFollowupInboxPoll } from './inbox-followups.js';
 import { ingestJob } from './ingest.js';
@@ -1817,6 +1818,15 @@ export function buildServer(deps: Deps): FastifyInstance {
   // (per-message dedupe on followups.source_ref).
   app.post('/inbox/followups/poll', async () => {
     return runFollowupInboxPoll(deps);
+  });
+
+  // Re-judge OPEN email-ingested follow-ups from their stored source email
+  // (source_body) and DISMISS high-confidence LLM-judged noise through the
+  // shared transition path — the cleanup pass for junk ingested before the
+  // judge existed. Caps at 30 judgments per call (re-POST to continue);
+  // no-op {enabled:false} until CLAUDE_CODE_OAUTH_TOKEN is configured.
+  app.post('/followups/audit', async () => {
+    return runFollowupAudit(deps);
   });
 
   // --- Workday session bridge (dashboard <-> local headful capture agent) ---

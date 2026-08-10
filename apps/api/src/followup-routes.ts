@@ -141,7 +141,7 @@ function dueDateFromBody(value: string): Date {
  * the sync's own column write happened after the row was read/returned, so
  * the response would otherwise report a stale calendar_event_id.
  */
-function withSyncedEventId(
+export function withSyncedEventId(
   followup: Followup,
   outcome: CalendarSyncOutcome,
 ): Followup {
@@ -156,6 +156,69 @@ function withSyncedEventId(
     return { ...followup, calendarEventId: outcome.eventId };
   }
   return followup;
+}
+
+/** applyFollowupTransition's outcome — the route maps these onto HTTP. */
+export type FollowupTransitionOutcome =
+  | { kind: 'ok'; followup: Followup }
+  | { kind: 'not_allowed'; allowed: string[] }
+  | { kind: 'conflict' };
+
+/**
+ * THE shared follow-up transition path (the /followups/:id/transition
+ * route and the audit endpoint both go through here — never reimplement):
+ * validate the event against the @sower/core table, state-guarded update,
+ * FOLLOWUP_STATE event on the parent task's timeline (`data` merges extra
+ * fields, e.g. the audit's judge reason), then the unconditional calendar
+ * sync (terminal → delete, reopened with a due date → recreate; self-gated,
+ * never throws by contract).
+ */
+export async function applyFollowupTransition(
+  deps: Deps,
+  existing: Followup,
+  event: FollowupEvent,
+  data?: Record<string, unknown>,
+): Promise<FollowupTransitionOutcome> {
+  if (!canFollowupTransition(existing.state, event)) {
+    return {
+      kind: 'not_allowed',
+      allowed: Object.keys(FOLLOWUP_ALLOWED[existing.state]),
+    };
+  }
+  const toState = followupTransition(existing.state, event);
+  // The from-state predicate makes read-validate-write safe under
+  // concurrency: of two racing transitions that both read the same
+  // state, exactly one matches and wins — the loser updates 0 rows and
+  // reports 'conflict' instead of writing a contradictory event row and
+  // calendar sync.
+  const updated = await deps.db
+    .update(followups)
+    .set({ state: toState, updatedAt: new Date() })
+    .where(
+      and(eq(followups.id, existing.id), eq(followups.state, existing.state)),
+    )
+    .returning();
+  let followup = updated[0];
+  if (!followup) {
+    return { kind: 'conflict' };
+  }
+  await deps.db.insert(events).values({
+    taskId: existing.taskId,
+    type: 'FOLLOWUP_STATE',
+    data: {
+      followupId: existing.id,
+      event,
+      from: existing.state,
+      to: toState,
+      ...data,
+    },
+  });
+  // Unconditional: the sync derives keep/delete from the NEW state + due
+  // date (terminal → delete, reopened with a due date → recreate, no due
+  // date → noop). Self-gated, never throws.
+  const outcome = await syncFollowupCalendarEvent(deps, existing.id);
+  followup = withSyncedEventId(followup, outcome);
+  return { kind: 'ok', followup };
 }
 
 export function registerFollowupRoutes(app: FastifyInstance, deps: Deps): void {
@@ -360,42 +423,20 @@ export function registerFollowupRoutes(app: FastifyInstance, deps: Deps): void {
       return reply.code(404).send({ error: 'followup not found' });
     }
     const event = body.data.event;
-    if (!canFollowupTransition(existing.state, event)) {
+    const outcome = await applyFollowupTransition(deps, existing, event);
+    if (outcome.kind === 'not_allowed') {
       return reply.code(409).send({
         error: `event '${event}' is not allowed from state '${existing.state}'`,
-        allowed: Object.keys(FOLLOWUP_ALLOWED[existing.state]),
+        allowed: outcome.allowed,
       });
     }
-    const toState = followupTransition(existing.state, event);
-    // The from-state predicate makes read-validate-write safe under
-    // concurrency: of two racing transitions that both read the same
-    // state, exactly one matches and wins — the loser updates 0 rows and
-    // 409s instead of writing a contradictory event row and calendar sync.
-    const updated = await deps.db
-      .update(followups)
-      .set({ state: toState, updatedAt: new Date() })
-      .where(
-        and(eq(followups.id, followupId), eq(followups.state, existing.state)),
-      )
-      .returning();
-    let followup = updated[0];
-    if (!followup) {
+    if (outcome.kind === 'conflict') {
       return reply.code(409).send({
         error: `follow-up state changed concurrently — event '${event}' no longer applies`,
         allowed: [],
       });
     }
-    await deps.db.insert(events).values({
-      taskId: existing.taskId,
-      type: 'FOLLOWUP_STATE',
-      data: { followupId, event, from: existing.state, to: toState },
-    });
-    // Unconditional: the sync derives keep/delete from the NEW state + due
-    // date (terminal → delete, reopened with a due date → recreate, no due
-    // date → noop). Self-gated, never throws.
-    const outcome = await syncFollowupCalendarEvent(deps, followupId);
-    followup = withSyncedEventId(followup, outcome);
-    return reply.code(200).send({ followup });
+    return reply.code(200).send({ followup: outcome.followup });
   });
 
   // Move a follow-up to a DIFFERENT application — the inbox poll's matcher

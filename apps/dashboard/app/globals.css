@@ -2097,7 +2097,8 @@ details.show-more[open] > summary .show-more-open {
 
   .grid-row .note-ghost,
   .due-ghost,
-  .jn-del {
+  .jn-del,
+  .fu-del {
     opacity: 1;
   }
 
@@ -2239,6 +2240,31 @@ details.show-more[open] > summary .show-more-open {
   white-space: nowrap;
 }
 
+/* ghost dismiss on the home "In play" rows (the .jn-del idiom): hidden
+   until the row is hovered/focused (always visible on touch — see the
+   hover:none block) */
+.fu-del {
+  border: none;
+  background: none;
+  padding: 0 0.125rem;
+  font-size: 0.875rem;
+  line-height: 1;
+  color: var(--ink-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+
+.fu-row:hover .fu-del,
+.fu-row:focus-within .fu-del,
+.fu-del:focus-visible {
+  opacity: 1;
+}
+
+.fu-del:hover {
+  color: var(--ink);
+}
+
 /* faint "N open" follow-up pointer riding a Sent row's status cell */
 .fu-open {
   margin-left: 0.5rem;
@@ -2298,6 +2324,20 @@ details.show-more[open] > summary .show-more-open {
 
   .fu-row > .fu-due:empty {
     display: none;
+  }
+
+  /* rows with the '×' dismiss (home "In play") gain a fourth column for
+     it; task-page rows keep the three-column template above */
+  .fu-row:has(.fu-del) {
+    grid-template-columns: max-content minmax(0, 1fr) max-content max-content;
+    grid-template-areas:
+      "kind title state del"
+      "due due due due";
+  }
+
+  .fu-row > .fu-del {
+    grid-area: del;
+    justify-self: end;
   }
 }
 
