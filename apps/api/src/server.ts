@@ -25,6 +25,7 @@ import {
   syncCalendarEventsForJob,
   syncTaskCalendarEvent,
 } from './calendar-sync.js';
+import { registerCliRoutes } from './cli-routes.js';
 import { runDeadlineAlerts } from './deadline-alerts.js';
 import { runWeeklyDigest } from './digest.js';
 import { markApprovalCardSubmitted, registerDiscordRoutes } from './discord.js';
@@ -462,10 +463,18 @@ export function buildServer(deps: Deps): FastifyInstance {
     if (request.method === 'GET' && path.startsWith('/r/')) {
       return;
     }
+    // EITHER accepted key opens every guarded route: the ingest key, or —
+    // when configured — the CLI's own key (rotatable independently, see
+    // config CLI_API_KEY). Both compares are constant-time; the header is
+    // redacted from logs above and never echoed in a response.
     const apiKey = request.headers['x-api-key'];
+    const cliKey = deps.config.CLI_API_KEY;
     if (
       typeof apiKey !== 'string' ||
-      !safeEqual(apiKey, deps.config.INGEST_API_KEY)
+      !(
+        safeEqual(apiKey, deps.config.INGEST_API_KEY) ||
+        (cliKey !== undefined && safeEqual(apiKey, cliKey))
+      )
     ) {
       reply.code(401);
       return reply.send({ error: 'unauthorized' });
@@ -1950,6 +1959,12 @@ export function buildServer(deps: Deps): FastifyInstance {
   // directly, a phone cannot). Zero writes; x-api-key via the same
   // server-wide preHandler.
   registerMobileRoutes(app, deps);
+
+  // READ-ONLY endpoints for the sower CLI (GET /cli/tasks, /cli/tasks/:id,
+  // /cli/export — agents drive the pipeline through apps/cli without DB
+  // access). Zero writes; x-api-key (INGEST_API_KEY or CLI_API_KEY) via the
+  // same server-wide preHandler.
+  registerCliRoutes(app, deps);
 
   // /resumes (list/sync/edit/ask/fork + versions + run polling; x-api-key
   // via the same server-wide preHandler).

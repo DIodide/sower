@@ -24,6 +24,14 @@ const envSchema = z
     PORT: z.coerce.number().int().positive().default(8080),
     DATABASE_URL: z.string().min(1),
     INGEST_API_KEY: z.string().min(1),
+    /**
+     * SECRET (Secret Manager `sower-cli-token`): a SECOND accepted value
+     * for the x-api-key header, issued to the sower CLI (apps/cli) so the
+     * agent-facing token can be rotated or revoked without touching the
+     * ingest key every other caller holds. Optional — absent, only
+     * INGEST_API_KEY is accepted. NEVER logged.
+     */
+    CLI_API_KEY: z.string().min(1).optional(),
     QUEUE_DRIVER: z.enum(['inline', 'cloud-tasks']).default('inline'),
     GCP_PROJECT_ID: z.string().optional(),
     GCP_REGION: z.string().optional(),
