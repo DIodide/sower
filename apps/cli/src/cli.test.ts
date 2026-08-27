@@ -1,5 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { type CliIo, runCli } from './cli.js';
+import { type CliIo, HELP, runCli } from './cli.js';
 
 /**
  * Command → request mapping with an injected fetch (no network), output
@@ -128,17 +129,397 @@ describe('read commands', () => {
     expect(out).toEqual([JSON.stringify(body)]);
   });
 
-  it('--pretty renders a table, not JSON', async () => {
+  it('--pretty renders a curated table (short ids, no JSON) at the io width', async () => {
     const tasks = [
-      { id: TASK_ID, state: 'NEEDS_INPUT', company: 'Acme' },
-      { id: NOTE_ID, state: 'REVIEW', company: null },
+      { id: TASK_ID, state: 'NEEDS_INPUT', company: 'Acme', title: 'SWE' },
+      { id: NOTE_ID, state: 'REVIEW', company: null, title: null },
     ];
-    const { io, out } = createIo([{ body: { tasks } }]);
+    const { io, out } = createIo([{ body: { tasks } }], { columns: 80 });
     await runCli(['tasks', '--pretty'], io);
     const text = out.join('\n');
-    expect(text).toContain('id');
-    expect(text).toContain('Acme');
+    expect(text.split('\n')[0]?.startsWith('id        company')).toBe(true);
+    expect(text).toContain('aaaaaaaa  Acme');
+    expect(text).not.toContain(TASK_ID);
     expect(text).not.toContain('{');
+    for (const line of text.split('\n')) {
+      expect(line.length).toBeLessThanOrEqual(80);
+    }
+  });
+
+  it('tasks --search adds ?q=', async () => {
+    const { io, requests } = createIo([{ body: { tasks: [] } }]);
+    await runCli(['tasks', '--search', 'acme corp', '--state', 'REVIEW'], io);
+    expect(requests[0]?.url).toBe(`${BASE}/cli/tasks?state=REVIEW&q=acme+corp`);
+  });
+
+  it('description: GET the detail, print {description}; --pretty prints it raw', async () => {
+    const detail = { task: { id: TASK_ID }, description: '# Role\n\n- a' };
+    const json = createIo([{ body: detail }]);
+    expect(await runCli(['description', TASK_ID], json.io)).toBe(0);
+    expect(json.requests[0]?.url).toBe(`${BASE}/cli/tasks/${TASK_ID}`);
+    expect(json.out).toEqual([
+      JSON.stringify({ description: '# Role\n\n- a' }),
+    ]);
+
+    const pretty = createIo([{ body: detail }]);
+    await runCli(['description', TASK_ID, '--pretty'], pretty.io);
+    expect(pretty.out).toEqual(['# Role\n\n- a']);
+
+    const none = createIo([{ body: { task: { id: TASK_ID } } }]);
+    await runCli(['description', TASK_ID], none.io);
+    expect(none.out).toEqual([JSON.stringify({ description: null })]);
+  });
+
+  it('answers: every question in the compact shape; answer picks one (exit 2 when absent)', async () => {
+    const questions = [
+      {
+        id: 'q1',
+        label: 'Full name',
+        type: 'text',
+        required: true,
+        status: 'resolved',
+        value: 'Ib',
+        source: 'profile',
+        limit: { kind: 'characters', max: 50 },
+      },
+      {
+        id: 'q2',
+        label: 'Resume',
+        type: 'file',
+        required: true,
+        status: 'saved',
+        value: null,
+        source: null,
+        savedValues: ['resume.pdf (resume)'],
+        savedDocId: 'doc-1',
+      },
+    ];
+    const all = createIo([{ body: { questions } }]);
+    expect(await runCli(['answers', TASK_ID], all.io)).toBe(0);
+    expect(all.requests[0]?.url).toBe(`${BASE}/cli/tasks/${TASK_ID}`);
+    expect(JSON.parse(all.out[0] ?? '')).toEqual([
+      {
+        id: 'q1',
+        label: 'Full name',
+        type: 'text',
+        required: true,
+        status: 'resolved',
+        value: 'Ib',
+        saved: null,
+      },
+      {
+        id: 'q2',
+        label: 'Resume',
+        type: 'file',
+        required: true,
+        status: 'saved',
+        value: null,
+        saved: ['resume.pdf (resume)'],
+        savedDocId: 'doc-1',
+      },
+    ]);
+
+    const one = createIo([{ body: { questions } }]);
+    expect(await runCli(['answer', TASK_ID, 'q2'], one.io)).toBe(0);
+    expect(JSON.parse(one.out[0] ?? '').id).toBe('q2');
+
+    const missing = createIo([{ body: { questions } }]);
+    expect(await runCli(['answer', TASK_ID, 'q9'], missing.io)).toBe(2);
+    expect(missing.out).toEqual([]);
+    expect(JSON.parse(missing.err[0] ?? '').error).toContain('q9');
+  });
+});
+
+describe('write commands (new verbs)', () => {
+  it('answer set: POST /tasks/:id/answers — one --value is a scalar, repeated is an array, --global scopes', async () => {
+    const reply = {
+      saved: 1,
+      resolution: {
+        resolved: 1,
+        missing: 0,
+        requiredMissing: 0,
+        persisted: false,
+      },
+    };
+    const scalar = createIo([{ body: reply }]);
+    const code = await runCli(
+      ['answer', 'set', TASK_ID, 'q1', '--value', 'Jane Doe'],
+      scalar.io,
+    );
+    expect(code).toBe(0);
+    expect(scalar.requests[0]?.method).toBe('POST');
+    expect(scalar.requests[0]?.url).toBe(`${BASE}/tasks/${TASK_ID}/answers`);
+    expect(JSON.parse(scalar.requests[0]?.body ?? '')).toEqual({
+      answers: [{ questionId: 'q1', value: 'Jane Doe' }],
+    });
+    expect(scalar.out).toEqual([JSON.stringify(reply)]);
+
+    const multi = createIo([{ body: reply }]);
+    await runCli(
+      [
+        'answer',
+        'set',
+        TASK_ID,
+        'q2',
+        '--value',
+        'ts',
+        '--value',
+        'rs',
+        '--global',
+      ],
+      multi.io,
+    );
+    expect(JSON.parse(multi.requests[0]?.body ?? '')).toEqual({
+      answers: [{ questionId: 'q2', value: ['ts', 'rs'], scope: 'global' }],
+    });
+
+    const none = createIo();
+    expect(await runCli(['answer', 'set', TASK_ID, 'q1'], none.io)).toBe(1);
+    expect(none.requests).toHaveLength(0);
+  });
+
+  it('task edit: POST /tasks/:id/meta with only the given fields; clears send null', async () => {
+    const set = createIo([{ body: { ok: true } }]);
+    const code = await runCli(
+      [
+        'task',
+        'edit',
+        TASK_ID,
+        '--notes',
+        'ping recruiter',
+        '--priority=-1',
+        '--due',
+        '2026-09-01',
+      ],
+      set.io,
+    );
+    expect(code).toBe(0);
+    expect(set.requests[0]?.method).toBe('POST');
+    expect(set.requests[0]?.url).toBe(`${BASE}/tasks/${TASK_ID}/meta`);
+    expect(JSON.parse(set.requests[0]?.body ?? '')).toEqual({
+      notes: 'ping recruiter',
+      priority: -1,
+      dueDate: '2026-09-01',
+    });
+
+    const clear = createIo([{ body: { ok: true } }]);
+    await runCli(
+      ['task', 'edit', TASK_ID, '--clear-notes', '--clear-due'],
+      clear.io,
+    );
+    expect(JSON.parse(clear.requests[0]?.body ?? '')).toEqual({
+      notes: null,
+      dueDate: null,
+    });
+
+    const only = createIo([{ body: { ok: true } }]);
+    await runCli(['task', 'edit', TASK_ID, '--priority', '2'], only.io);
+    expect(JSON.parse(only.requests[0]?.body ?? '')).toEqual({ priority: 2 });
+
+    const nothing = createIo();
+    expect(await runCli(['task', 'edit', TASK_ID], nothing.io)).toBe(1);
+    expect(nothing.requests).toHaveLength(0);
+
+    const bad = createIo();
+    expect(
+      await runCli(['task', 'edit', TASK_ID, '--priority', '5'], bad.io),
+    ).toBe(1);
+    expect(bad.requests).toHaveLength(0);
+    expect(JSON.parse(bad.err[0] ?? '').error).toContain('--priority');
+  });
+
+  it('resolve / requeue / restore / unmark-applied / reingest: bare POST /tasks/:id/<verb>', async () => {
+    for (const verb of [
+      'resolve',
+      'requeue',
+      'restore',
+      'unmark-applied',
+      'reingest',
+    ]) {
+      const { io, requests, out } = createIo([{ body: { ok: true } }]);
+      expect(await runCli([verb, TASK_ID], io)).toBe(0);
+      expect(requests[0]?.method).toBe('POST');
+      expect(requests[0]?.url).toBe(`${BASE}/tasks/${TASK_ID}/${verb}`);
+      expect(requests[0]?.body).toBeNull();
+      expect(out).toEqual([JSON.stringify({ ok: true })]);
+    }
+  });
+
+  it('ingest: a url (source defaults to cli), --paste, --manual', async () => {
+    const url = createIo([{ status: 201, body: { taskId: TASK_ID } }]);
+    expect(
+      await runCli(
+        ['ingest', 'https://boards.greenhouse.io/acme/jobs/1'],
+        url.io,
+      ),
+    ).toBe(0);
+    expect(url.requests[0]?.url).toBe(`${BASE}/ingest`);
+    expect(JSON.parse(url.requests[0]?.body ?? '')).toEqual({
+      url: 'https://boards.greenhouse.io/acme/jobs/1',
+      source: 'cli',
+    });
+
+    const sourced = createIo([{ status: 201, body: {} }]);
+    await runCli(
+      ['ingest', 'https://x.example/j', '--source', 'email'],
+      sourced.io,
+    );
+    expect(JSON.parse(sourced.requests[0]?.body ?? '').source).toBe('email');
+
+    const paste = createIo([{ body: { ok: true, urls: 2 } }]);
+    await runCli(
+      ['ingest', '--paste', 'see https://a.example and https://b.example'],
+      paste.io,
+    );
+    expect(paste.requests[0]?.url).toBe(`${BASE}/ingest/paste`);
+    expect(JSON.parse(paste.requests[0]?.body ?? '')).toEqual({
+      text: 'see https://a.example and https://b.example',
+    });
+
+    const manual = createIo([
+      { status: 201, body: { ok: true, taskId: TASK_ID } },
+    ]);
+    await runCli(
+      [
+        'ingest',
+        '--manual',
+        '--company',
+        'Acme',
+        '--title',
+        'SWE Intern',
+        '--notes',
+        'met at fair',
+        '--priority',
+        '1',
+      ],
+      manual.io,
+    );
+    expect(manual.requests[0]?.url).toBe(`${BASE}/ingest/manual`);
+    expect(JSON.parse(manual.requests[0]?.body ?? '')).toEqual({
+      company: 'Acme',
+      title: 'SWE Intern',
+      notes: 'met at fair',
+      priority: 1,
+    });
+
+    const noUrl = createIo();
+    expect(await runCli(['ingest'], noUrl.io)).toBe(1);
+    const noCompany = createIo();
+    expect(
+      await runCli(['ingest', '--manual', '--title', 'x'], noCompany.io),
+    ).toBe(1);
+    expect(noCompany.requests).toHaveLength(0);
+  });
+
+  it('notes edit: POST /tasks/:id/job-notes/:noteId with the patch; --general clears the tie', async () => {
+    const tie = createIo([{ body: { note: { id: NOTE_ID } } }]);
+    const code = await runCli(
+      [
+        'notes',
+        'edit',
+        TASK_ID,
+        NOTE_ID,
+        '--body',
+        'Updated.',
+        '--question',
+        'q1',
+      ],
+      tie.io,
+    );
+    expect(code).toBe(0);
+    expect(tie.requests[0]?.method).toBe('POST');
+    expect(tie.requests[0]?.url).toBe(
+      `${BASE}/tasks/${TASK_ID}/job-notes/${NOTE_ID}`,
+    );
+    expect(JSON.parse(tie.requests[0]?.body ?? '')).toEqual({
+      body: 'Updated.',
+      questionId: 'q1',
+    });
+
+    const general = createIo([{ body: { note: { id: NOTE_ID } } }]);
+    await runCli(['notes', 'edit', TASK_ID, NOTE_ID, '--general'], general.io);
+    expect(JSON.parse(general.requests[0]?.body ?? '')).toEqual({
+      questionId: null,
+    });
+
+    const nothing = createIo();
+    expect(await runCli(['notes', 'edit', TASK_ID, NOTE_ID], nothing.io)).toBe(
+      1,
+    );
+    expect(nothing.requests).toHaveLength(0);
+  });
+
+  it('followup add: POST /tasks/:taskId/followups; followup --edit: PATCH /followups/:id', async () => {
+    const add = createIo([{ body: { followup: { id: FOLLOWUP_ID } } }]);
+    const code = await runCli(
+      [
+        'followup',
+        'add',
+        TASK_ID,
+        '--kind',
+        'assessment',
+        '--title',
+        'HackerRank',
+        '--url',
+        'https://hr.example/x',
+        '--due',
+        '2026-09-03',
+        '--notes',
+        '90 minutes',
+      ],
+      add.io,
+    );
+    expect(code).toBe(0);
+    expect(add.requests[0]?.method).toBe('POST');
+    expect(add.requests[0]?.url).toBe(`${BASE}/tasks/${TASK_ID}/followups`);
+    expect(JSON.parse(add.requests[0]?.body ?? '')).toEqual({
+      kind: 'assessment',
+      title: 'HackerRank',
+      url: 'https://hr.example/x',
+      dueDate: '2026-09-03',
+      notes: '90 minutes',
+    });
+
+    const edit = createIo([{ body: { followup: { id: FOLLOWUP_ID } } }]);
+    await runCli(
+      [
+        'followup',
+        FOLLOWUP_ID,
+        '--edit',
+        '--title',
+        'Renamed',
+        '--due',
+        '2026-09-10',
+      ],
+      edit.io,
+    );
+    expect(edit.requests[0]?.method).toBe('PATCH');
+    expect(edit.requests[0]?.url).toBe(`${BASE}/followups/${FOLLOWUP_ID}`);
+    expect(JSON.parse(edit.requests[0]?.body ?? '')).toEqual({
+      title: 'Renamed',
+      dueDate: '2026-09-10',
+    });
+
+    const missingKind = createIo();
+    expect(
+      await runCli(
+        ['followup', 'add', TASK_ID, '--title', 'x'],
+        missingKind.io,
+      ),
+    ).toBe(1);
+    const emptyEdit = createIo();
+    expect(
+      await runCli(['followup', FOLLOWUP_ID, '--edit'], emptyEdit.io),
+    ).toBe(1);
+    expect(emptyEdit.requests).toHaveLength(0);
+  });
+
+  it('the README carries --help verbatim (agents read both)', () => {
+    const readme = readFileSync(
+      new URL('../README.md', import.meta.url),
+      'utf8',
+    );
+    expect(readme).toContain(HELP);
   });
 });
 

@@ -19,7 +19,18 @@ import {
   jobNotes,
   jobs,
 } from '@sower/db';
-import { asc, count, desc, eq, inArray } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  ilike,
+  inArray,
+  or,
+  type SQL,
+  sql,
+} from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
@@ -75,6 +86,8 @@ const idParamsSchema = z.object({
 
 const listQuerySchema = z.object({
   state: z.string().optional(),
+  /** Free-text search (`sower tasks --search`); blank = no filter. */
+  q: z.string().trim().max(200).optional(),
   limit: z.coerce.number().int().min(1).max(MAX_LIMIT).default(DEFAULT_LIMIT),
 });
 
@@ -105,6 +118,24 @@ function parseStateFilter(
     }
   }
   return { states: parts as TaskState[] };
+}
+
+/**
+ * The dashboard home page's search, verbatim (ilike over the jobs row's
+ * company/title/url, the task notes, and the jobSpec's title/company —
+ * agent-discovered forms fill the spec before the jobs row is backfilled,
+ * so the match must cover what the user SEES), plus the url.
+ */
+function searchCondition(q: string): SQL | undefined {
+  const pattern = `%${q.replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
+  return or(
+    ilike(jobs.company, pattern),
+    ilike(jobs.title, pattern),
+    ilike(jobs.url, pattern),
+    ilike(applicationTasks.notes, pattern),
+    sql`${applicationTasks.jobSpec}->>'title' ilike ${pattern}`,
+    sql`${applicationTasks.jobSpec}->>'company' ilike ${pattern}`,
+  );
 }
 
 /** The columns a CLI list row is built from (task + joined job). */
@@ -314,8 +345,8 @@ function bankEntries(
 
 export function registerCliRoutes(app: FastifyInstance, deps: Deps): void {
   // The pipeline in one list: ALL states by default (archive included),
-  // newest activity first — an agent filters with `?state=` when it wants
-  // a slice.
+  // newest activity first — an agent filters with `?state=` / searches
+  // with `?q=` when it wants a slice.
   app.get('/cli/tasks', async (request, reply) => {
     const query = listQuerySchema.safeParse(request.query);
     if (!query.success) {
@@ -330,15 +361,21 @@ export function registerCliRoutes(app: FastifyInstance, deps: Deps): void {
         allowed: TASK_STATES,
       });
     }
+    const conditions: SQL[] = [];
+    if (filter.states !== null) {
+      conditions.push(inArray(applicationTasks.state, filter.states));
+    }
+    if (query.data.q) {
+      const search = searchCondition(query.data.q);
+      if (search) {
+        conditions.push(search);
+      }
+    }
     const rows = await deps.db
       .select(listSelection)
       .from(applicationTasks)
       .innerJoin(jobs, eq(applicationTasks.jobId, jobs.id))
-      .where(
-        filter.states !== null
-          ? inArray(applicationTasks.state, filter.states)
-          : undefined,
-      )
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
       .orderBy(desc(applicationTasks.updatedAt))
       .limit(query.data.limit);
     // Open follow-ups per task in ONE grouped query — never per row.

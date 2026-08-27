@@ -22,6 +22,7 @@ import {
   sql,
 } from 'drizzle-orm';
 import Link from 'next/link';
+import type { ReactNode } from 'react';
 import { getDb } from '../lib/db';
 import { pickDeadline, toDateInputValue } from '../lib/deadline';
 import {
@@ -40,6 +41,7 @@ import {
   type Tone,
 } from '../lib/format';
 import { compareWaiting } from '../lib/reorder';
+import { compareRecent, parseSortMode, type SortMode } from '../lib/sort';
 import { Empty, SectionHeading } from '../lib/ui';
 import { InPlayRow, type InPlayRowData } from './in-play-row';
 import { OrderedList } from './ordered-list';
@@ -99,12 +101,15 @@ function filterHref(filters: {
   bucket?: Bucket | null;
   state?: TaskState | null;
   platform?: string | null;
+  /** Rides along with every chip/search like the filters; default omitted. */
+  sort?: SortMode | null;
 }): string {
   const qs = new URLSearchParams();
   if (filters.q) qs.set('q', filters.q);
   if (filters.bucket) qs.set('bucket', filters.bucket);
   if (filters.state) qs.set('state', filters.state);
   if (filters.platform) qs.set('platform', filters.platform);
+  if (filters.sort === 'recent') qs.set('sort', 'recent');
   const s = qs.toString();
   return s ? `/?${s}` : '/';
 }
@@ -175,21 +180,27 @@ function RowList({ rows }: { rows: TaskRowData[] }) {
  *  TRUE total under the current filters (it may exceed the rows fetched when
  *  the shared list cap truncated this section). `reorderable` routes the rows
  *  through the client OrderedList (drag-and-drop manual order — "Waiting on
- *  you" only). */
+ *  you" in priority order only). `hint` is a one-liner under the heading
+ *  (the recent-sort explanation), shown only when there are rows. */
 function Section({
   title,
   rows,
   count,
   reorderable = false,
+  hint,
 }: {
   title: string;
   rows: TaskRowData[];
   count?: number;
   reorderable?: boolean;
+  hint?: ReactNode;
 }) {
   return (
     <section>
       <SectionHeading count={count ?? rows.length}>{title}</SectionHeading>
+      {rows.length > 0 && hint ? (
+        <p className="hint order-hint">{hint}</p>
+      ) : null}
       {rows.length === 0 ? (
         <Empty>none</Empty>
       ) : reorderable ? (
@@ -223,6 +234,9 @@ export default async function Page({
       ? rawBucket
       : null;
   const platformFilter = firstParam(params.platform);
+  // ?sort=recent: every section by date added, newest first (priority and
+  // manual rank ignored); default = the priority order below.
+  const sortMode = parseSortMode(firstParam(params.sort));
 
   const db = getDb();
 
@@ -326,8 +340,15 @@ export default async function Page({
           ),
         )
         .orderBy(
-          desc(applicationTasks.priority),
-          desc(applicationTasks.updatedAt),
+          ...(sortMode === 'recent'
+            ? // Recently added: arrival order for the capped sections too,
+              // so the cap keeps the NEWEST rows (`nulls last` — a plain
+              // desc would sort a null created_at first).
+              [sql`${applicationTasks.createdAt} desc nulls last`]
+            : [
+                desc(applicationTasks.priority),
+                desc(applicationTasks.updatedAt),
+              ]),
         )
         .limit(LIST_CAP),
       // Open post-application follow-ups ("In play"), joined with the parent
@@ -635,23 +656,39 @@ export default async function Page({
     return rows.filter((r) => set.has(r.state));
   };
 
-  const waiting = inStates(WAITING_STATES);
+  // Recently added: EVERY section by arrival, newest first — "Waiting on
+  // you" included, priority and manual rank ignored. Sorted here (not only
+  // in the fetch) so the contract holds whatever order the rows arrived in.
+  const byMode = (list: TaskRowData[]) =>
+    sortMode === 'recent' ? [...list].sort(compareRecent) : list;
+  const waiting = byMode(inStates(WAITING_STATES));
   // "New & processing" is about ARRIVALS: newest ingest first within each
   // priority tier (created_at — the fetch's updatedAt order would shuffle
   // rows every time the worker touched one). The shared comparator with the
   // ranks masked off is exactly priority desc / arrival desc; ranks stay a
   // Waiting-on-you concept.
-  const processing = inStates(PROCESSING_STATES).sort((a, b) =>
-    compareWaiting(
-      { priority: a.priority, sortRank: null, createdAtMs: a.createdAtMs },
-      { priority: b.priority, sortRank: null, createdAtMs: b.createdAtMs },
-    ),
-  );
-  const sent = inStates(SENT_STATES);
+  const processing =
+    sortMode === 'recent'
+      ? inStates(PROCESSING_STATES).sort(compareRecent)
+      : inStates(PROCESSING_STATES).sort((a, b) =>
+          compareWaiting(
+            {
+              priority: a.priority,
+              sortRank: null,
+              createdAtMs: a.createdAtMs,
+            },
+            {
+              priority: b.priority,
+              sortRank: null,
+              createdAtMs: b.createdAtMs,
+            },
+          ),
+        );
+  const sent = byMode(inStates(SENT_STATES));
   const placed = new Set([...waiting, ...processing, ...sent].map((r) => r.id));
   // Archive is the catch-all: FAILED / DUPLICATE / DISCARDED plus any
   // unknown legacy state, so no row can ever silently vanish.
-  const archive = rows.filter((r) => !placed.has(r.id));
+  const archive = byMode(rows.filter((r) => !placed.has(r.id)));
 
   // Open the Archive when the filters point straight at it (or a search
   // matched something inside) — a filtered-for row must never hide.
@@ -668,10 +705,23 @@ export default async function Page({
     bucketFilter !== null ||
     platformFilter !== null;
 
+  // The current filters, for the sort chips (they change ONLY the sort).
+  const currentFilters = {
+    q: qFilter,
+    bucket: bucketFilter,
+    state: stateFilter,
+    platform: platformFilter,
+  };
+
   const bucketChip = (bucket: Bucket) => (
     <Link
       key={bucket}
-      href={filterHref({ q: qFilter, bucket, platform: platformFilter })}
+      href={filterHref({
+        q: qFilter,
+        bucket,
+        platform: platformFilter,
+        sort: sortMode,
+      })}
       className="chip"
       aria-current={
         bucketFilter === bucket && !stateFilter ? 'true' : undefined
@@ -703,7 +753,11 @@ export default async function Page({
           {bucketChip('active')}
           {bucketChip('done')}
           <Link
-            href={filterHref({ q: qFilter, platform: platformFilter })}
+            href={filterHref({
+              q: qFilter,
+              platform: platformFilter,
+              sort: sortMode,
+            })}
             className="chip"
             aria-current={!bucketFilter && !stateFilter ? 'true' : undefined}
           >
@@ -722,6 +776,7 @@ export default async function Page({
                         q: qFilter,
                         bucket: bucketFilter,
                         state: stateFilter,
+                        sort: sortMode,
                       })}
                       className="chip"
                       aria-current={
@@ -738,6 +793,7 @@ export default async function Page({
                           bucket: bucketFilter,
                           state: stateFilter,
                           platform: p,
+                          sort: sortMode,
                         })}
                         className="chip"
                         aria-current={platformFilter === p ? 'true' : undefined}
@@ -759,6 +815,7 @@ export default async function Page({
                       q: qFilter,
                       state: s,
                       platform: platformFilter,
+                      sort: sortMode,
                     })}
                     className="chip"
                     aria-current={stateFilter === s ? 'true' : undefined}
@@ -770,6 +827,26 @@ export default async function Page({
               </div>
             </div>
           </details>
+          {/* Sort — carried by every chip and the search like a filter. */}
+          <div className="chip-row" style={{ margin: 0 }}>
+            <span className="hint">sort</span>
+            <Link
+              href={filterHref(currentFilters)}
+              className="chip"
+              aria-current={sortMode === 'priority' ? 'true' : undefined}
+              title="Priority tiers first; drag to reorder within Waiting on you"
+            >
+              Priority
+            </Link>
+            <Link
+              href={filterHref({ ...currentFilters, sort: 'recent' })}
+              className="chip"
+              aria-current={sortMode === 'recent' ? 'true' : undefined}
+              title="Newest added first, in every section"
+            >
+              Recently added
+            </Link>
+          </div>
         </div>
       </div>
 
@@ -778,7 +855,8 @@ export default async function Page({
         <div className="card" style={{ marginTop: '0.5rem' }}>
           {hasFilters ? (
             <p className="hint" style={{ margin: 0 }}>
-              No tasks match these filters. <Link href="/">Clear filters</Link>
+              No tasks match these filters.{' '}
+              <Link href={filterHref({ sort: sortMode })}>Clear filters</Link>
             </p>
           ) : (
             <p className="hint" style={{ margin: 0 }}>
@@ -789,7 +867,22 @@ export default async function Page({
         </div>
       ) : (
         <Workspace>
-          <Section title={SECTIONS.waiting} rows={waiting} reorderable />
+          <Section
+            title={SECTIONS.waiting}
+            rows={waiting}
+            // Drag-reorder only means something within priority tiers.
+            reorderable={sortMode === 'priority'}
+            hint={
+              sortMode === 'recent' ? (
+                <>
+                  Sorted by date added — priority and your manual order are
+                  ignored. Switch to{' '}
+                  <Link href={filterHref(currentFilters)}>priority</Link> to
+                  drag rows.
+                </>
+              ) : undefined
+            }
+          />
           <Section
             title={SECTIONS.processing}
             rows={processing}

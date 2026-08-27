@@ -11,17 +11,19 @@
 // before finalize — it never submits (finalize is separately gated).
 
 import { randomUUID } from 'node:crypto';
-import type { BankValue } from '@sower/answers';
-import { normalizeLabel } from '@sower/answers';
+import {
+  type AnswerInput,
+  documentKind,
+  saveAnswersToBank,
+} from '@sower/answers';
 import type { Question, TaskPriority } from '@sower/core';
-import { answers, applicationTasks, documents, jobs } from '@sower/db';
+import { applicationTasks, documents, jobs } from '@sower/db';
 import { createStorage } from '@sower/storage';
 import { eq } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { getDb } from '../../../lib/db';
 import { SECTIONS } from '../../../lib/format';
-import { documentKind } from './question-kind';
 
 export interface ActionResult {
   ok: boolean;
@@ -29,7 +31,6 @@ export interface ActionResult {
 }
 
 const uuidSchema = z.string().uuid();
-const textAnswerSchema = z.string().trim().min(1).max(20_000);
 
 // PATCH-style task meta (notes/priority/dueDate) — mirrors the api's
 // /tasks/:id/meta contract: only provided fields are written, notes/dueDate:
@@ -88,121 +89,45 @@ function sanitizeFilename(name: string): string {
   return cleaned;
 }
 
-/** option value id -> human label, for validating and labeling select saves. */
-function optionLabelByValue(question: Question): Map<string, string> {
-  return new Map(
-    (question.options ?? []).map((o) => [String(o.value), o.label]),
-  );
-}
-
 /**
- * Upsert a bank answer keyed by (company, normalized label). `company` is a
- * normalized company key ('' = GLOBAL): a company-scoped save never touches
- * the global row and vice versa, so one company's essay answer can never
- * overwrite — or leak to — another company's.
+ * Store a freshly uploaded file as a documents row of the question's kind
+ * and return its id — the bank then binds the question to THIS document
+ * (not merely the first document of the kind) through the shared writer,
+ * exactly like an existing-document pick.
  */
-async function upsertAnswer(
+async function storeUpload(
   db: ReturnType<typeof getDb>,
   question: Question,
-  value: BankValue,
-  company: string,
-): Promise<void> {
-  const normalized = normalizeLabel(question.label);
-  // A label that normalizes to '' (e.g. all punctuation) can't be a bank key —
-  // it would collide with every other empty-label answer in the same scope.
-  if (normalized === '') return;
-  // Atomic upsert on the (company, normalized_label) unique index: a concurrent
-  // double-save can't create two rows, and a company-scoped write never touches
-  // the global row or another company's.
-  await db
-    .insert(answers)
-    .values({
-      questionLabel: question.label,
-      normalizedLabel: normalized,
-      value,
-      source: 'user',
-      company,
-    })
-    .onConflictDoUpdate({
-      target: [answers.company, answers.normalizedLabel],
-      set: { questionLabel: question.label, value, source: 'user' },
-    });
-}
-
-async function handleFileQuestion(
-  db: ReturnType<typeof getDb>,
-  question: Question,
-  formData: FormData,
-  errors: string[],
-): Promise<boolean> {
+  upload: File,
+): Promise<string> {
   const kind = documentKind(question);
-  const upload = formData.get(`file:${question.id}`);
-
-  if (upload instanceof File && upload.size > 0) {
-    if (upload.size > MAX_UPLOAD_BYTES) {
-      errors.push(`"${question.label}": file exceeds 15 MB limit`);
-      return false;
-    }
-    const filename = sanitizeFilename(upload.name);
-    const storagePath = `documents/${randomUUID()}/${filename}`;
-    const data = Buffer.from(await upload.arrayBuffer());
-    await createStorage().put(storagePath, data, upload.type || undefined);
-    await db.insert(documents).values({
+  const filename = sanitizeFilename(upload.name);
+  const storagePath = `documents/${randomUUID()}/${filename}`;
+  const data = Buffer.from(await upload.arrayBuffer());
+  await createStorage().put(storagePath, data, upload.type || undefined);
+  const inserted = await db
+    .insert(documents)
+    .values({
       kind,
       filename,
       storagePath,
       contentType: upload.type || null,
       sizeBytes: upload.size,
-    });
-    // Record the pick so resolution binds THIS question to THIS document
-    // (not merely the first document of the kind). Document picks are global:
-    // the same resume/cover letter is reusable across companies.
-    await upsertAnswer(db, question, storagePath, '');
-    return true;
-  }
-
-  // An existing document was picked: validate the reference and bind it to this
-  // question so resolution honors the specific choice (previously a no-op that
-  // silently discarded the selection).
-  const docId = formData.get(`doc:${question.id}`);
-  if (typeof docId === 'string' && docId !== '') {
-    const parsed = uuidSchema.safeParse(docId);
-    if (!parsed.success) {
-      errors.push(`"${question.label}": invalid document reference`);
-      return false;
-    }
-    const found = await db
-      .select({
-        id: documents.id,
-        kind: documents.kind,
-        storagePath: documents.storagePath,
-      })
-      .from(documents)
-      .where(eq(documents.id, parsed.data))
-      .limit(1);
-    if (!found[0]) {
-      errors.push(`"${question.label}": selected document no longer exists`);
-      return false;
-    }
-    if (found[0].kind !== kind) {
-      errors.push(
-        `"${question.label}": selected document is kind "${found[0].kind}", expected "${kind}"`,
-      );
-      return false;
-    }
-    await upsertAnswer(db, question, found[0].storagePath, '');
-    return true;
-  }
-  return false;
+    })
+    .returning({ id: documents.id });
+  const row = inserted[0];
+  if (!row) throw new Error('failed to record the uploaded document');
+  return row.id;
 }
 
 /**
  * Persist user-provided answers for a task's missing questions.
  *
- * Truthfulness: only explicit user input is stored (source 'user'); select
- * and multiselect values are rejected unless they exactly match one of the
- * question's option values. Question ids not present in this task's
- * job_spec are ignored entirely.
+ * The form is read here (field names, uploads); the bank semantics — which
+ * question ids are writable, option validation, company vs global scope,
+ * document-kind checks, the 20k cap, source 'user' — live in ONE place,
+ * @sower/answers saveAnswersToBank, shared with the api's
+ * POST /tasks/:id/answers so the two surfaces can never drift.
  *
  * Scoping: text/textarea (essay) answers are saved COMPANY-SCOPED to this
  * task's company by default — they only auto-fill future applications at the
@@ -251,94 +176,80 @@ export async function saveAnswers(
     };
   }
 
-  // Normalized company key for scoping essay answers ('' when unknown) —
-  // same normalization the resolver uses (see @sower/answers ResolveOptions).
-  const companyKey = (task.jobCompany ?? task.jobSpec.company ?? '')
-    .toLowerCase()
-    .trim();
-
   const errors: string[] = [];
-  let savedCount = 0;
-  let uploadedCount = 0;
+  const inputs: AnswerInput[] = [];
+  // Questions whose document was uploaded in THIS submit (the receipt
+  // counts them as uploads, not plain saves).
+  const uploaded = new Set<string>();
 
   // ONLY iterate the task's own job_spec questions — any other form field is
   // ignored, so arbitrary question ids can never be written.
   for (const question of task.jobSpec.questions) {
-    try {
-      if (question.type === 'file') {
-        if (await handleFileQuestion(db, question, formData, errors)) {
-          uploadedCount += 1;
-        }
-        continue;
-      }
-
-      if (question.type === 'multiselect') {
-        const raw = formData
-          .getAll(`q:${question.id}`)
-          .filter((v): v is string => typeof v === 'string' && v !== '');
-        if (raw.length === 0) continue;
-        const labels = optionLabelByValue(question);
-        const invalid = raw.filter((v) => !labels.has(v));
-        if (invalid.length > 0) {
-          errors.push(
-            `"${question.label}": value not among the question's options`,
-          );
+    if (question.type === 'file') {
+      const upload = formData.get(`file:${question.id}`);
+      if (upload instanceof File && upload.size > 0) {
+        if (upload.size > MAX_UPLOAD_BYTES) {
+          errors.push(`"${question.label}": file exceeds 15 MB limit`);
           continue;
         }
-        // Store {value,label} pairs: the label is what the answers page shows
-        // and what lets the pick resolve on another company's form, where
-        // option value ids differ (see @sower/answers matchStoredOption).
-        await upsertAnswer(
-          db,
-          question,
-          raw.map((v) => ({ value: v, label: labels.get(v) ?? v })),
-          '',
-        );
-        savedCount += 1;
-        continue;
-      }
-
-      const raw = formData.get(`q:${question.id}`);
-      if (typeof raw !== 'string' || raw === '') continue;
-
-      if (question.type === 'select') {
-        const label = optionLabelByValue(question).get(raw);
-        if (label === undefined) {
+        try {
+          inputs.push({
+            questionId: question.id,
+            value: await storeUpload(db, question, upload),
+          });
+          uploaded.add(question.id);
+        } catch (err) {
           errors.push(
-            `"${question.label}": value not among the question's options`,
+            `"${question.label}": ${err instanceof Error ? err.message : 'failed to save'}`,
           );
-          continue;
         }
-        // {value,label}: human-readable in the library, resolvable by value
-        // on this form and by label on any other tenant's variant of it.
-        await upsertAnswer(db, question, { value: raw, label }, '');
-        savedCount += 1;
         continue;
       }
-
-      // text / textarea — company-scoped by default; the "reuse for all
-      // companies" checkbox saves it globally instead.
-      const parsed = textAnswerSchema.safeParse(raw);
-      if (!parsed.success) {
-        errors.push(
-          `"${question.label}": ${parsed.error.issues[0]?.message ?? 'invalid value'}`,
-        );
-        continue;
+      // An existing document was picked: the shared writer validates the
+      // reference (exists, right kind) and binds it to this question.
+      const docId = formData.get(`doc:${question.id}`);
+      if (typeof docId === 'string' && docId !== '') {
+        inputs.push({ questionId: question.id, value: docId });
       }
-      const reuseEverywhere = formData.get(`global:${question.id}`) === '1';
-      await upsertAnswer(
-        db,
-        question,
-        parsed.data,
-        reuseEverywhere ? '' : companyKey,
-      );
-      savedCount += 1;
-    } catch (err) {
-      errors.push(
-        `"${question.label}": ${err instanceof Error ? err.message : 'failed to save'}`,
-      );
+      continue;
     }
+
+    if (question.type === 'multiselect') {
+      const raw = formData
+        .getAll(`q:${question.id}`)
+        .filter((v): v is string => typeof v === 'string' && v !== '');
+      if (raw.length > 0) {
+        inputs.push({ questionId: question.id, value: raw });
+      }
+      continue;
+    }
+
+    const raw = formData.get(`q:${question.id}`);
+    if (typeof raw !== 'string' || raw === '') continue;
+    if (question.type === 'select') {
+      inputs.push({ questionId: question.id, value: raw });
+      continue;
+    }
+    // text / textarea — company-scoped by default; the "reuse for all
+    // companies" checkbox saves it globally instead.
+    inputs.push({
+      questionId: question.id,
+      value: raw,
+      scope:
+        formData.get(`global:${question.id}`) === '1' ? 'global' : 'company',
+    });
   }
+
+  const outcome = await saveAnswersToBank(db, {
+    questions: task.jobSpec.questions,
+    company: task.jobCompany ?? task.jobSpec.company,
+    answers: inputs,
+  });
+  for (const error of outcome.errors) {
+    errors.push(`"${error.label ?? error.questionId}": ${error.message}`);
+  }
+  const uploadedCount = outcome.saved.filter((id) => uploaded.has(id)).length;
+  const savedCount = outcome.saved.length - uploadedCount;
 
   const parts: string[] = [];
   if (savedCount > 0)

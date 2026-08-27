@@ -75,6 +75,7 @@ import {
   markTaskApplied,
   requeueTask,
 } from './task-actions.js';
+import { registerTaskAnswerRoutes } from './task-answers.js';
 import { transitionTask } from './transitions.js';
 import type { Deps } from './types.js';
 
@@ -1953,6 +1954,11 @@ export function buildServer(deps: Deps): FastifyInstance {
   // server-wide preHandler); every mutation re-mirrors the portfolio
   // scratchpad file.
   registerJobNoteRoutes(app, deps);
+
+  // POST /tasks/:id/answers — the CLI's answer writer (the dashboard form's
+  // exact bank semantics via @sower/answers saveAnswersToBank, then a
+  // re-resolve; x-api-key via the same server-wide preHandler).
+  registerTaskAnswerRoutes(app, deps);
 
   // Compact READ-ONLY endpoints for the iPhone app (GET /mobile/overview,
   // /mobile/tasks/:id, /mobile/followups/:id — the dashboard reads the DB

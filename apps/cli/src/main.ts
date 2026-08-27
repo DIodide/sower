@@ -11,6 +11,8 @@ import { writeAuthConfig } from './config.js';
 const code = await runCli(process.argv.slice(2), {
   env: process.env,
   fetch: (input, init) => fetch(input, init),
+  // Undefined when stdout is a pipe — --pretty then falls back to $COLUMNS.
+  columns: process.stdout.columns,
   stdout: (line) => {
     process.stdout.write(`${line}\n`);
   },

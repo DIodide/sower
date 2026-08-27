@@ -1,5 +1,6 @@
 import type { BankEntry, BankValue } from '@sower/answers';
 import {
+  documentKind,
   isBankOptionValue,
   matchStoredOption,
   normalizeCompanyKey,
@@ -55,7 +56,6 @@ import { JobNotesPanel } from './job-notes-panel';
 import { NeedsInputForm } from './needs-input-form';
 import { OtpForm } from './otp-form';
 import { QaSplit } from './qa-split';
-import { documentKind } from './question-kind';
 import type { DocumentOption, QuestionView } from './questions-panel';
 import { QuestionsPanel } from './questions-panel';
 import { TaskActions } from './task-actions';

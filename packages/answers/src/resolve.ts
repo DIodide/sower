@@ -451,15 +451,22 @@ function finalize(
   return { questionId: question.id, source, value: String(raw) };
 }
 
+/** The stored-document kinds a file question can map to. */
+export type DocumentKind = 'resume' | 'cover_letter' | 'other';
+
 /**
- * Which stored-document kind a file question asks for, or null when the
- * question is not recognizably a resume/cover-letter upload (or ambiguously
- * indicates both). Detection uses the standard field id or whole words in
- * the normalized label — never substrings.
+ * Which stored-document kind a file question asks for. Detection uses the
+ * standard field id or whole words in the normalized label — never
+ * substrings. Ambiguous questions (mentioning both resume and cover letter)
+ * and unrecognized uploads map to 'other', which resolution never
+ * auto-attaches. Shared by the resolver (auto-attach by kind), the bank
+ * writer (a picked document must be of the question's kind), and the
+ * dashboard's document pickers.
  */
-function documentKindForFileQuestion(
-  question: Question,
-): 'resume' | 'cover_letter' | null {
+export function documentKind(question: {
+  id: string;
+  label: string;
+}): DocumentKind {
   const label = normalizeLabel(question.label);
   const words = label.split(' ');
   const indicatesResume =
@@ -468,10 +475,18 @@ function documentKindForFileQuestion(
     words.includes('cv');
   const indicatesCoverLetter =
     question.id === 'cover_letter' || /\bcover letter\b/.test(label);
-  if (indicatesResume && indicatesCoverLetter) return null;
+  if (indicatesResume && indicatesCoverLetter) return 'other';
   if (indicatesResume) return 'resume';
   if (indicatesCoverLetter) return 'cover_letter';
-  return null;
+  return 'other';
+}
+
+/** documentKind for the resolver: 'other' never auto-resolves, so null. */
+function documentKindForFileQuestion(
+  question: Question,
+): 'resume' | 'cover_letter' | null {
+  const kind = documentKind(question);
+  return kind === 'other' ? null : kind;
 }
 
 /**

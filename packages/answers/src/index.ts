@@ -23,9 +23,11 @@ export type {
   BankOptionValue,
   BankValue,
   DocumentEntry,
+  DocumentKind,
   ResolveOptions,
 } from './resolve.js';
 export {
+  documentKind,
   isBankOptionValue,
   matchStoredOption,
   normalizeCompanyKey,
@@ -34,3 +36,17 @@ export {
   selectBankValue,
   splitMissingByRequired,
 } from './resolve.js';
+export type {
+  AnswerInput,
+  AnswerSaveError,
+  AnswerScope,
+  AnswerWrite,
+  DocumentRow,
+  SaveAnswersResult,
+} from './save.js';
+export {
+  ANSWER_MAX_CHARS,
+  planAnswerWrites,
+  saveAnswersToBank,
+  upsertBankAnswer,
+} from './save.js';

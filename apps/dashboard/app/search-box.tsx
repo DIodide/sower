@@ -68,7 +68,7 @@ export function SearchBox() {
   };
 
   // Server-rendered hidden fields keep the other filters on a no-JS submit.
-  const carried = ['bucket', 'state', 'platform'] as const;
+  const carried = ['bucket', 'state', 'platform', 'sort'] as const;
 
   return (
     <form method="GET" action="/" onSubmit={onSubmit}>

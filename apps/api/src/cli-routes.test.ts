@@ -17,7 +17,7 @@ import type { Deps } from './types.js';
 
 interface Chain {
   from: () => Chain;
-  where: () => Chain;
+  where: (condition?: unknown) => Chain;
   limit: () => Chain;
   innerJoin: () => Chain;
   orderBy: () => Chain;
@@ -25,10 +25,13 @@ interface Chain {
   then: (onFulfilled: (value: unknown) => unknown) => Promise<unknown>;
 }
 
-function chain(result: unknown): Chain {
+function chain(result: unknown, onWhere?: (arg: unknown) => void): Chain {
   const self: Chain = {
     from: () => self,
-    where: () => self,
+    where: (condition?: unknown) => {
+      onWhere?.(condition);
+      return self;
+    },
     limit: () => self,
     innerJoin: () => self,
     orderBy: () => self,
@@ -39,7 +42,11 @@ function chain(result: unknown): Chain {
   return self;
 }
 
-function createFakeDb(selectResults: unknown[][] = []): Deps['db'] {
+function createFakeDb(
+  selectResults: unknown[][] = [],
+  /** When provided, every select's where() argument is recorded here. */
+  wheres?: unknown[],
+): Deps['db'] {
   const results = [...selectResults];
   const db = {
     select: () => {
@@ -47,7 +54,7 @@ function createFakeDb(selectResults: unknown[][] = []): Deps['db'] {
       if (next === undefined) {
         throw new Error('cli routes ran more queries than the test provided');
       }
-      return chain(next);
+      return chain(next, (arg) => wheres?.push(arg));
     },
     insert: () => {
       throw new Error('cli routes must never write');
@@ -259,6 +266,51 @@ describe('GET /cli/tasks', () => {
     expect(bad.json().error).toBe("invalid state 'NOPE'");
     expect(bad.json().allowed).toContain('DISCARDED');
     await badApp.close();
+  });
+
+  it('?q= adds the dashboard search condition (and blank q adds none)', async () => {
+    const wheres: unknown[] = [];
+    const app = buildServer(
+      createDeps(createFakeDb([[listRow()], []], wheres)),
+    );
+    const res = await app.inject({
+      method: 'GET',
+      url: '/cli/tasks?q=acme',
+      headers: AUTH,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().tasks).toHaveLength(1);
+    // The list select carries a condition; the grouped follow-up count
+    // select keeps its own open-states filter.
+    expect(wheres[0]).toBeDefined();
+    await app.close();
+
+    const blank: unknown[] = [];
+    const app2 = buildServer(createDeps(createFakeDb([[], []], blank)));
+    expect(
+      (
+        await app2.inject({
+          method: 'GET',
+          url: '/cli/tasks?q=',
+          headers: AUTH,
+        })
+      ).statusCode,
+    ).toBe(200);
+    // No state, no search → the list select is unfiltered.
+    expect(blank[0]).toBeUndefined();
+    await app2.close();
+
+    const tooLong = buildServer(createDeps(createFakeDb()));
+    expect(
+      (
+        await tooLong.inject({
+          method: 'GET',
+          url: `/cli/tasks?q=${'x'.repeat(201)}`,
+          headers: AUTH,
+        })
+      ).statusCode,
+    ).toBe(400);
+    await tooLong.close();
   });
 
   it('400s a limit above the cap', async () => {

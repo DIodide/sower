@@ -153,7 +153,11 @@ vi.mock('@sower/platforms', () => ({
       : null,
 }));
 
-vi.mock('@sower/answers', () => ({
+// Only the profile/resolver entry points are stubbed; the rest of the
+// package (the bank writer behind /tasks/:id/answers, its constants) stays
+// real so the server module graph loads.
+vi.mock('@sower/answers', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@sower/answers')>()),
   getProfile: async () => ({}),
   isEmptyProfile: () => false,
   resolveAnswers: () => ({ resolved: [], missing: [] }),
