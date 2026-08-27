@@ -706,3 +706,62 @@ describe('token hygiene', () => {
     }
   });
 });
+
+describe('answer view + api issues passthrough', () => {
+  it('compact answers carry savedInput, limit, and select options when present', async () => {
+    const detail = {
+      questions: [
+        {
+          id: 'q1',
+          label: 'Essay',
+          type: 'textarea',
+          required: false,
+          status: 'saved',
+          value: null,
+          savedValues: ['Hello world'],
+          savedInput: ['Hello world'],
+          limit: { kind: 'characters', max: 500 },
+        },
+        {
+          id: 'q2',
+          label: 'Pick',
+          type: 'select',
+          required: true,
+          status: 'missing',
+          value: null,
+          options: [{ label: 'Yes', value: 'y' }],
+        },
+      ],
+    };
+    const first = createIo([{ body: detail }]);
+    expect(await runCli(['answer', TASK_ID, 'q1'], first.io)).toBe(0);
+    const one = JSON.parse(first.out.join(''));
+    expect(one.savedInput).toEqual(['Hello world']);
+    expect(one.limit).toEqual({ kind: 'characters', max: 500 });
+    const second = createIo([{ body: detail }]);
+    expect(await runCli(['answer', TASK_ID, 'q2'], second.io)).toBe(0);
+    expect(JSON.parse(second.out.join('')).options).toEqual([
+      { label: 'Yes', value: 'y' },
+    ]);
+  });
+
+  it('surfaces the api validation issues on stderr', async () => {
+    const { io, err } = createIo([
+      {
+        status: 400,
+        body: {
+          error: 'invalid answers',
+          issues: [{ questionId: 'q1', label: 'Essay', message: 'too long' }],
+        },
+      },
+    ]);
+    expect(
+      await runCli(['answer', 'set', TASK_ID, 'q1', '--value', 'x'], io),
+    ).toBe(1);
+    const parsed = JSON.parse(err.join(''));
+    expect(parsed.status).toBe(400);
+    expect(parsed.issues).toEqual([
+      { questionId: 'q1', label: 'Essay', message: 'too long' },
+    ]);
+  });
+});

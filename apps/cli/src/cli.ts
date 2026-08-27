@@ -52,11 +52,20 @@ export interface CliIo {
 class CliError extends Error {
   readonly exitCode: number;
   readonly status: number | undefined;
+  /** Structured detail from the api body (e.g. validation `issues`) —
+   *  agents act on WHY, not just "invalid". */
+  readonly issues: unknown;
 
-  constructor(message: string, exitCode: number, status?: number) {
+  constructor(
+    message: string,
+    exitCode: number,
+    status?: number,
+    issues?: unknown,
+  ) {
     super(message);
     this.exitCode = exitCode;
     this.status = status;
+    this.issues = issues;
   }
 }
 
@@ -172,10 +181,15 @@ async function request(
       typeof (data as { error?: unknown }).error === 'string'
         ? (data as { error: string }).error
         : `HTTP ${response.status}`;
+    const issues =
+      data !== null && typeof data === 'object'
+        ? (data as { issues?: unknown }).issues
+        : undefined;
     throw new CliError(
       detail,
       response.status === 404 ? EXIT_NOT_FOUND : EXIT_ERROR,
       response.status,
+      issues,
     );
   }
   return data;
@@ -296,6 +310,13 @@ function compactAnswer(question: unknown): Record<string, unknown> {
     value: q.value ?? null,
     saved: Array.isArray(q.savedValues) ? q.savedValues : null,
     ...(typeof q.savedDocId === 'string' ? { savedDocId: q.savedDocId } : {}),
+    // Raw values `answer set` must echo to keep a saved answer (display
+    // `saved` above is option LABELS / filenames — not settable input).
+    ...(Array.isArray(q.savedInput) ? { savedInput: q.savedInput } : {}),
+    ...(q.limit !== undefined && q.limit !== null ? { limit: q.limit } : {}),
+    ...(Array.isArray(q.options) && q.options.length > 0
+      ? { options: q.options }
+      : {}),
   };
 }
 
@@ -666,6 +687,7 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
         JSON.stringify({
           error: error.message,
           ...(error.status !== undefined ? { status: error.status } : {}),
+          ...(error.issues !== undefined ? { issues: error.issues } : {}),
         }),
       );
       return error.exitCode;
