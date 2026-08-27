@@ -206,6 +206,7 @@ describe('read commands', () => {
         status: 'resolved',
         value: 'Ib',
         saved: null,
+        limit: { kind: 'characters', max: 50 },
       },
       {
         id: 'q2',
