@@ -319,7 +319,10 @@ export function registerFillJobRoutes(app: FastifyInstance, deps: Deps): void {
       .where(
         and(
           inArray(fillJobs.status, ['claimed', 'running']),
-          sql`coalesce(${fillJobs.heartbeatAt}, ${fillJobs.claimedAt}) < ${cutoff}`,
+          // toISOString(): a raw-sql Date param has no column type context, so
+          // drizzle would send Date.toString() ("Fri Aug 28 2026…"), which
+          // Postgres rejects for timestamptz (500 on every claim — live bug).
+          sql`coalesce(${fillJobs.heartbeatAt}, ${fillJobs.claimedAt}) < ${cutoff.toISOString()}`,
         ),
       )
       .returning({ id: fillJobs.id, taskId: fillJobs.taskId });
