@@ -792,6 +792,83 @@ export const agentHeartbeats = pgTable('agent_heartbeats', {
 });
 
 /**
+ * Lifecycle of a "fill in browser" job (greenhouse v1):
+ * - 'requested': the dashboard asked; waiting for the local runner to claim.
+ * - 'claimed': the runner took it (claimed_at + heartbeat_at set).
+ * - 'running': the runner opened the tab and is filling the real form.
+ * - 'ready': every answered field was attempted; the human finishes in the
+ *   live view (live_view_url) — the runner NEVER submits the form.
+ * - 'failed': the runner errored, or its heartbeat went stale and the claim
+ *   endpoint reaped the row (see `error`).
+ */
+export type FillJobStatus =
+  | 'requested'
+  | 'claimed'
+  | 'running'
+  | 'ready'
+  | 'failed';
+
+/**
+ * One per-question outcome the runner reports back (fill_jobs.report).
+ * File questions are always 'skipped' in v1 — the human attaches files in
+ * the live view.
+ */
+export interface FillReportEntry {
+  questionId: string;
+  label: string;
+  outcome: 'filled' | 'skipped' | 'failed';
+  detail?: string;
+}
+
+/**
+ * One row per "fill in browser" request: the dashboard inserts 'requested',
+ * the runner daemon on the user's machine claims it (FOR UPDATE SKIP LOCKED
+ * in apps/api), fills every answered question into the real greenhouse form
+ * over CDP, and reports back a live-view URL + per-field outcomes. The
+ * runner never submits — the human finishes in the live view. claimed/
+ * running rows whose heartbeat (or claim) is older than 5 minutes are
+ * flipped to 'failed' by the claim endpoint, so a dead runner can never
+ * wedge a task's fill.
+ */
+export const fillJobs = pgTable(
+  'fill_jobs',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => applicationTasks.id),
+    status: text('status')
+      .$type<FillJobStatus>()
+      .notNull()
+      .default('requested'),
+    /** Human devtools URL of the runner's browser tab (set once running). */
+    liveViewUrl: text('live_view_url'),
+    report: jsonb('report').$type<FillReportEntry[]>(),
+    /** Populated on a failed fill (runner error / heartbeat lost). */
+    error: text('error'),
+    requestedAt: timestamp('requested_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    claimedAt: timestamp('claimed_at', { withTimezone: true }),
+    heartbeatAt: timestamp('heartbeat_at', { withTimezone: true }),
+    finishedAt: timestamp('finished_at', { withTimezone: true }),
+  },
+  (table) => [
+    // The claim endpoint takes the oldest 'requested' row (and reaps stale
+    // claimed/running ones) by status.
+    index('fill_jobs_status_requested_at_idx').on(
+      table.status,
+      table.requestedAt,
+    ),
+    // The dashboard panel reads a task's latest job.
+    index('fill_jobs_task_id_requested_at_idx').on(
+      table.taskId,
+      table.requestedAt,
+    ),
+  ],
+);
+
+/**
  * Mirror of @sower/answers' `Profile` (z.infer<typeof ProfileSchema>) — the
  * user's answer-resolution profile. Re-declared locally (like
  * InvestigationResult above) because @sower/answers itself depends on

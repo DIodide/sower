@@ -48,6 +48,7 @@ import {
   StateBadge,
   Timestamp,
 } from '../../../lib/ui';
+import { FillJobPanel } from './fill-job-panel';
 import { FollowupsPanel } from './followups-panel';
 import { InvestigationPanel } from './investigation-panel';
 import { JobDescriptionPanel } from './job-description-panel';
@@ -1060,6 +1061,12 @@ export default async function TaskPage({
           <>
             <hr className="divider-soft" />
             <div className="row" style={{ alignItems: 'flex-start' }}>
+              {/* Greenhouse only (v1), and only while the task is actionable —
+                  the same gate the api enforces on POST /tasks/:id/fill. */}
+              {job?.platform === 'greenhouse' &&
+              ['NEEDS_INPUT', 'REVIEW'].includes(task.state) ? (
+                <TaskActions taskId={task.id} mode="fill" />
+              ) : null}
               {task.state !== 'DUPLICATE' ? (
                 <TaskActions taskId={task.id} mode="mark-applied" />
               ) : null}
@@ -1069,6 +1076,13 @@ export default async function TaskPage({
           </>
         ) : null}
       </section>
+
+      {/* ---- browser fill (greenhouse): the runner fills the real form in
+           a browser on the user's machine; the human always submits in the
+           live view — nothing here ever submits. ---- */}
+      {job?.platform === 'greenhouse' ? (
+        <FillJobPanel taskId={task.id} />
+      ) : null}
 
       {/* ---- post-application follow-ups: ALWAYS on sent tasks (the panel
            invites tracking the first reply), and on any task that already

@@ -10,6 +10,7 @@ import {
   investigateTask,
   markApplied,
   reingestTask,
+  requestBrowserFill,
   requeueTask,
   restoreTask,
   startSessionCapture,
@@ -27,7 +28,8 @@ type Mode =
   | 'restore'
   | 'mark-applied'
   | 'unmark-applied'
-  | 'reingest';
+  | 'reingest'
+  | 'fill';
 
 const LABELS: Record<Mode, { idle: string; className: string; title: string }> =
   {
@@ -85,6 +87,12 @@ const LABELS: Record<Mode, { idle: string; className: string; title: string }> =
       title:
         'Reset this task and re-run it through ingestion from scratch — same task, fresh parse',
     },
+    fill: {
+      idle: 'Fill in browser',
+      className: 'btn btn--primary',
+      title:
+        'Asks the runner on your machine to open the real greenhouse form in a browser and fill in your answered questions — nothing is ever submitted; you review and finish in the live view',
+    },
   };
 
 /** Modes carrying an optional free-text note. The input is ALWAYS visible
@@ -114,6 +122,7 @@ export function TaskActions({ taskId, mode }: { taskId: string; mode: Mode }) {
       if (mode === 'restore') return restoreTask(taskId);
       if (mode === 'unmark-applied') return unmarkApplied(taskId);
       if (mode === 'reingest') return reingestTask(taskId);
+      if (mode === 'fill') return requestBrowserFill(taskId);
       if (mode === 'discard' || mode === 'mark-applied') {
         // The optional note typed next to the button — empty is fine.
         const note = formData.get('note');

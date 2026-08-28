@@ -17,7 +17,7 @@ import {
   saveAnswersToBank,
 } from '@sower/answers';
 import type { Question, TaskPriority } from '@sower/core';
-import { applicationTasks, documents, jobs } from '@sower/db';
+import { applicationTasks, documents, fillJobs, jobs } from '@sower/db';
 import { createStorage } from '@sower/storage';
 import { eq } from 'drizzle-orm';
 import { revalidatePath } from 'next/cache';
@@ -544,6 +544,66 @@ export async function investigateTask(taskId: string): Promise<ActionResult> {
   return result;
 }
 
+/**
+ * Ask the api to queue a "fill in browser" job for a greenhouse task
+ * (POST /tasks/:id/fill). The runner on the user's machine claims it, opens
+ * the real form in a browser via OpenTab, and fills the answered questions —
+ * it NEVER submits; the human finishes in the live view. The api enforces
+ * eligibility (greenhouse, NEEDS_INPUT/REVIEW) and refuses a second job
+ * while one is still active.
+ */
+export async function requestBrowserFill(
+  taskId: string,
+): Promise<ActionResult> {
+  const idParse = uuidSchema.safeParse(taskId);
+  if (!idParse.success) return { ok: false, message: 'invalid task id.' };
+  const result = await callApi(idParse.data, 'fill');
+  revalidatePath(`/tasks/${idParse.data}`);
+  return result;
+}
+
+/** One fill job's poll snapshot: the status plus change markers, so the
+ *  FillJobRefresher refreshes the page only when the panel would change. */
+export interface FillJobStatusResult {
+  ok: boolean;
+  message: string;
+  job?: { status: string; hasLiveView: boolean; hasReport: boolean };
+}
+
+/** The FillJobRefresher's 2s poll — reads the row directly, like the page. */
+export async function getFillJobStatus(
+  jobId: string,
+): Promise<FillJobStatusResult> {
+  const idParse = uuidSchema.safeParse(jobId);
+  if (!idParse.success) return { ok: false, message: 'invalid fill job id.' };
+  let db: ReturnType<typeof getDb>;
+  try {
+    db = getDb();
+  } catch {
+    return { ok: false, message: 'database is not configured (DATABASE_URL).' };
+  }
+  const rows = await db
+    .select({
+      status: fillJobs.status,
+      liveViewUrl: fillJobs.liveViewUrl,
+      report: fillJobs.report,
+    })
+    .from(fillJobs)
+    .where(eq(fillJobs.id, idParse.data))
+    .limit(1);
+  const job = rows[0];
+  if (!job) return { ok: false, message: 'fill job not found.' };
+  return {
+    ok: true,
+    message: job.status,
+    job: {
+      status: job.status,
+      hasLiveView: job.liveViewUrl !== null,
+      hasReport: job.report !== null,
+    },
+  };
+}
+
 /** A job-note action's result: the mirror outcome rides along so the panel
  *  can quietly surface a skipped/failed GitHub push (the note itself always
  *  landed — the DB is the source of truth). */
@@ -775,6 +835,8 @@ const apiResponseSchema = z.object({
   /** Reorder only: present when the drop crossed a tier boundary and the
    *  row adopted the destination tier's priority. */
   priority: z.number().optional(),
+  /** Fill only: the already-active job on a 409 (presence is the signal). */
+  job: z.unknown().optional(),
   error: z.string().optional(),
   message: z.string().optional(),
 });
@@ -798,7 +860,8 @@ async function callApi(
     | 'investigate'
     | 'meta'
     | 'reorder'
-    | 'reingest',
+    | 'reingest'
+    | 'fill',
   jsonBody?: Record<string, unknown>,
 ): Promise<ActionResult> {
   const base = process.env.API_BASE_URL;
@@ -841,6 +904,19 @@ async function callApi(
   }
 
   if (!response.ok) {
+    // Fill's active-job 409 carries the existing job — a friendly nudge, not
+    // an error dump: the Browser fill panel already shows that job live.
+    if (
+      action === 'fill' &&
+      response.status === 409 &&
+      body.job !== undefined
+    ) {
+      return {
+        ok: false,
+        message:
+          'a browser fill is already in progress for this task — see the Browser fill panel.',
+      };
+    }
     return {
       ok: false,
       message: `${action} failed (${response.status}): ${body.error ?? body.message ?? 'see api logs'}`,
@@ -860,6 +936,14 @@ async function callApi(
     return {
       ok: true,
       message: `dry-run submit recorded${summary}; no real submission was made.${back}`,
+    };
+  }
+
+  if (action === 'fill') {
+    return {
+      ok: true,
+      message:
+        'browser fill requested — the runner on your machine will open and fill the form; watch the Browser fill panel for the live view link.',
     };
   }
 

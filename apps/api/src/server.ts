@@ -35,6 +35,7 @@ import {
   runDiscordIngestPoll,
   type UrlOutcome,
 } from './discord-ingest.js';
+import { registerFillJobRoutes } from './fill-jobs.js';
 import { runFollowupAudit } from './followup-audit.js';
 import { registerFollowupRoutes } from './followup-routes.js';
 import { runFollowupInboxPoll } from './inbox-followups.js';
@@ -1971,6 +1972,12 @@ export function buildServer(deps: Deps): FastifyInstance {
   // access). Zero writes; x-api-key (INGEST_API_KEY or CLI_API_KEY) via the
   // same server-wide preHandler.
   registerCliRoutes(app, deps);
+
+  // "Fill in browser": POST /tasks/:id/fill (dashboard) + the runner's
+  // /fill-jobs claim/report/fail/heartbeat endpoints (x-api-key via the
+  // same server-wide preHandler). The runner fills the real greenhouse
+  // form over CDP but NEVER submits — the human finishes in the live view.
+  registerFillJobRoutes(app, deps);
 
   // /resumes (list/sync/edit/ask/fork + versions + run polling; x-api-key
   // via the same server-wide preHandler).

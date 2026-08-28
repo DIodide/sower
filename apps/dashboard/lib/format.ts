@@ -344,6 +344,10 @@ const EVENT_LABELS: Record<string, string> = {
   FOLLOWUP_STATE: 'Follow-up state changed',
   FOLLOWUP_UPDATED: 'Follow-up edited',
   FOLLOWUP_REASSIGNED: 'Follow-up moved to a different application',
+  // Browser fill (fill_jobs): the runner fills the real form; never submits.
+  FILL_REQUESTED: 'Browser fill requested',
+  FILL_READY: 'Browser fill ready — finish in the live view',
+  FILL_FAILED: 'Browser fill failed',
 };
 
 /**

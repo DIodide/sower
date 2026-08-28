@@ -39,4 +39,7 @@ const code = await runCli(process.argv.slice(2), {
     });
   },
 });
-process.exit(code);
+// exitCode, not process.exit(): exit() tears the process down before large
+// stdout finishes flushing through a pipe — outputs >64KB (tasks/export)
+// were truncated mid-JSON for piped consumers (observed live, twice).
+process.exitCode = code;
