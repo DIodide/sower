@@ -237,7 +237,59 @@ export async function executeFill(
       detail,
     });
   }
+  await retryRevealedQuestions(
+    page,
+    scope,
+    actions,
+    report,
+    settleMs,
+    deadline,
+  );
   return report;
+}
+
+/** Failures that mean the control was absent, not that filling it broke. */
+const MISSING_CONTROL = /^no form control labeled/;
+
+/**
+ * Greenhouse hides follow-up questions until their trigger is answered,
+ * so a question that was absent on the first pass can exist by the time
+ * the rest of the form is in. Anything reported missing gets one more
+ * look; a second miss keeps its original outcome.
+ */
+async function retryRevealedQuestions(
+  page: Page,
+  scope: Locator,
+  actions: FillAction[],
+  report: FillReportItem[],
+  settleMs: number,
+  deadline: number,
+): Promise<void> {
+  const missing = report.filter(
+    (item) =>
+      item.outcome === 'failed' && MISSING_CONTROL.test(item.detail ?? ''),
+  );
+  if (missing.length === 0) {
+    return;
+  }
+  const byId = new Map(
+    actions
+      .filter((action) => action.kind !== 'skip')
+      .map((action) => [action.questionId, action] as const),
+  );
+  for (const item of missing) {
+    const action = byId.get(item.questionId);
+    if (action === undefined || Date.now() > deadline) {
+      continue;
+    }
+    try {
+      await fillOne(page, scope, action, settleMs);
+      item.outcome = 'filled';
+      delete item.detail;
+    } catch {
+      // Still absent (or newly broken): the first failure stands.
+    }
+  }
 }
 
 /** Errors that mean 'the DOM moved under us', not 'the field is missing'. */
