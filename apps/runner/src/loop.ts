@@ -1,4 +1,5 @@
 import type { OpenTabClient, OpenTabSession } from './opentab-client.js';
+import { liveViewUrl } from './opentab-client.js';
 import { redactSecrets } from './redact.js';
 import type {
   FillPayload,
@@ -64,7 +65,7 @@ export async function runTick(deps: TickDeps): Promise<boolean> {
     });
     await deps.sower.report(job.id, {
       status: 'running',
-      liveViewUrl: session.urls.devtools,
+      liveViewUrl: liveViewUrl(session),
     });
     const rawReport = await deps.fill(session, payload);
     fillCompleted = true;

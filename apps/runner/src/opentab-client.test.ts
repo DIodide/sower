@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { makeOpenTabClient, type OpenTabSession } from './opentab-client.js';
+import {
+  liveViewUrl,
+  makeOpenTabClient,
+  type OpenTabSession,
+} from './opentab-client.js';
 
 /**
  * Session create/destroy against an injected fetch, parsing the exact
@@ -105,5 +109,37 @@ describe('makeOpenTabClient', () => {
     await expect(client.destroySession('s_dead00')).rejects.toThrow(
       /no such session/,
     );
+  });
+});
+
+describe('liveViewUrl', () => {
+  it('prefers the viewport OpenTab advertises', () => {
+    expect(liveViewUrl(session)).toBe(
+      'http://127.0.0.1:9333/t/ot-serve-token/view/s/s_ab12cd',
+    );
+  });
+
+  it('derives the viewport when an older serve omits the field', () => {
+    // The route is live on serve processes that predate advertising it,
+    // and browser_http carries the same /t/<token> base.
+    const older: OpenTabSession = {
+      ...session,
+      urls: { ...session.urls, live_view: undefined },
+    };
+    expect(liveViewUrl(older)).toBe(
+      'http://127.0.0.1:9333/t/ot-serve-token/view/s/s_ab12cd',
+    );
+  });
+
+  it('falls back to devtools when browser_http is an unfamiliar shape', () => {
+    const odd: OpenTabSession = {
+      ...session,
+      urls: {
+        ...session.urls,
+        live_view: undefined,
+        browser_http: 'http://127.0.0.1:9333/elsewhere',
+      },
+    };
+    expect(liveViewUrl(odd)).toBe(session.urls.devtools);
   });
 });

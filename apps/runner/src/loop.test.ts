@@ -5,7 +5,7 @@ import type { FillPayload } from './sower-client.js';
 
 /**
  * Tick ordering with stubbed effects: the empty-queue path touches
- * nothing, the happy path reports running (devtools live view) then
+ * nothing, the happy path reports running (live-view viewport) then
  * ready, failures BEFORE/DURING the fill destroy the session and fail
  * the job, a ready-report failure AFTER the fill keeps the session
  * alive, and every outbound string (fail errors, report details) passes
@@ -75,7 +75,7 @@ describe('runTick', () => {
     expect(deps.sower.fail).not.toHaveBeenCalled();
   });
 
-  it('opens a session, reports running with the devtools url, then ready', async () => {
+  it('opens a session, reports running with the live-view url, then ready', async () => {
     const deps = makeDeps();
     deps.sower.claim.mockResolvedValueOnce({ job, payload });
     const report = [
@@ -89,10 +89,11 @@ describe('runTick', () => {
       url: payload.applyUrl,
       ttl: 4 * 3600,
     });
-    // The live-view URL is the feature — it is NOT redacted.
+    // The live-view URL is the feature — it is NOT redacted. It is the
+    // viewport a human takes the tab over in, never the DevTools frontend.
     expect(deps.sower.report).toHaveBeenNthCalledWith(1, 'j1', {
       status: 'running',
-      liveViewUrl: session.urls.devtools,
+      liveViewUrl: session.urls.live_view,
     });
     expect(deps.sower.report).toHaveBeenNthCalledWith(2, 'j1', {
       status: 'ready',

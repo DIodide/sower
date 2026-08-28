@@ -25,8 +25,12 @@ export interface OpenTabSessionUrls {
   browser_ws: string;
   /** Hosted DevTools frontend aimed at this tab — open in a browser. */
   devtools: string;
-  /** OpenTab's clean human-control viewport for this tab. */
-  live_view: string;
+  /**
+   * OpenTab's human-control viewport for this tab. Optional: a serve
+   * process started before this field was advertised omits it while still
+   * routing the URL, so read it through liveViewUrl().
+   */
+  live_view?: string;
 }
 
 export interface OpenTabSession {
@@ -41,6 +45,29 @@ export interface OpenTabSession {
   createdAt: string;
   expiresAt: string | null;
   urls: OpenTabSessionUrls;
+}
+
+/**
+ * The link a human opens to take the tab over. OpenTab serves a viewport
+ * built for that at /t/<token>/view/s/<id>, which is what belongs in the
+ * dashboard; the hosted DevTools frontend is an inspector that happens to
+ * screencast. When a serve process is old enough not to advertise the
+ * field, derive it from browser_http (".../t/<token>/i/<instanceId>"),
+ * whose token base is the same, and fall back to DevTools only if even
+ * that shape is unfamiliar.
+ */
+export function liveViewUrl(session: OpenTabSession): string {
+  const advertised = session.urls.live_view;
+  if (advertised !== undefined && advertised !== '') {
+    return advertised;
+  }
+  const derived = session.urls.browser_http.replace(
+    /\/i\/[^/]+\/?$/,
+    `/view/s/${session.id}`,
+  );
+  return derived === session.urls.browser_http
+    ? session.urls.devtools
+    : derived;
 }
 
 export interface OpenTabClient {
