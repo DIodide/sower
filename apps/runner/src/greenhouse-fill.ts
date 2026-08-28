@@ -62,6 +62,16 @@ export function normalizeLabel(raw: string): string {
 }
 
 /**
+ * Punctuation- and spacing-insensitive form of a label, used only as a
+ * fallback when nothing matches exactly. Question payloads sometimes carry
+ * a run-together label for a field the form spaces out ('DisabilityStatus'
+ * vs 'Disability Status'), and both collapse to the same key here.
+ */
+export function looseLabelKey(raw: string): string {
+  return normalizeLabel(raw).replace(/[^a-z0-9]/g, '');
+}
+
+/**
  * Values headed for a single-line input lose their line breaks: a typed
  * newline is an Enter keystroke (which sends the form), and a one-line
  * field cannot hold them anyway. Textareas keep theirs via fill().
@@ -131,11 +141,18 @@ export interface ExecuteOptions {
   capMs?: number;
   /** Settle pause after scrolling a control into view. */
   settleMs?: number;
+  /** Budget for the board to render its questions before the first action. */
+  readyTimeoutMs?: number;
 }
 
 const DEFAULT_CAP_MS = 4 * 60_000;
 const DEFAULT_SETTLE_MS = 150;
 const ACTION_TIMEOUT_MS = 10_000;
+const DEFAULT_READY_TIMEOUT_MS = 30_000;
+/** Gap between control-count samples while the board is still rendering. */
+const FORM_SETTLE_POLL_MS = 300;
+/** Pause before the single retry of an action lost to a re-render. */
+const TRANSIENT_RETRY_PAUSE_MS = 750;
 
 /** A question control is never a checkbox/radio — those are option inputs. */
 const QUESTION_CONTROL_SELECTOR =
@@ -160,7 +177,9 @@ export async function executeFill(
 ): Promise<FillReportItem[]> {
   const capMs = options.capMs ?? DEFAULT_CAP_MS;
   const settleMs = options.settleMs ?? DEFAULT_SETTLE_MS;
+  const readyTimeoutMs = options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
   const deadline = Date.now() + capMs;
+  await waitForFormReady(page, readyTimeoutMs);
   const scope = await formScope(page);
   const report: FillReportItem[] = [];
   for (const action of actions) {
@@ -182,26 +201,86 @@ export async function executeFill(
       });
       continue;
     }
+    let failure: unknown = null;
     try {
       await fillOne(page, scope, action, settleMs);
+    } catch (error) {
+      failure = error;
+    }
+    if (failure !== null && isTransientDomError(failure)) {
+      // The board re-rendered under this action. Let it settle and take
+      // one more pass before calling the question failed.
+      failure = null;
+      try {
+        await page.waitForTimeout(TRANSIENT_RETRY_PAUSE_MS);
+        await waitForFormReady(page, readyTimeoutMs);
+        await fillOne(page, scope, action, settleMs);
+      } catch (error) {
+        failure = error;
+      }
+    }
+    if (failure === null) {
       report.push({
         questionId: action.questionId,
         label: action.label,
         outcome: 'filled',
       });
-    } catch (error) {
-      const detail = (
-        error instanceof Error ? error.message : String(error)
-      ).slice(0, 500);
-      report.push({
-        questionId: action.questionId,
-        label: action.label,
-        outcome: 'failed',
-        detail,
-      });
+      continue;
     }
+    const detail = (
+      failure instanceof Error ? failure.message : String(failure)
+    ).slice(0, 500);
+    report.push({
+      questionId: action.questionId,
+      label: action.label,
+      outcome: 'failed',
+      detail,
+    });
   }
   return report;
+}
+
+/** Errors that mean 'the DOM moved under us', not 'the field is missing'. */
+const TRANSIENT_DOM_ERROR =
+  /execution context was destroyed|not attached to the dom|node is detached|frame was detached|element is not attached/i;
+
+export function isTransientDomError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return TRANSIENT_DOM_ERROR.test(message);
+}
+
+/**
+ * A greenhouse board paints its shell first and renders the questions
+ * client-side, so a page that has finished loading often has no controls
+ * yet. The first live run typed straight into that gap: the six leading
+ * contact fields came back 'no form control labeled ...' and the next one
+ * died with 'Execution context was destroyed' as the app swapped the
+ * document in, while every question reached later filled fine. So: wait
+ * for a real question control to exist, then for the control count to
+ * stop growing (the board streams the rest of the form in behind it).
+ */
+export async function waitForFormReady(
+  page: Page,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  await page
+    .waitForLoadState('domcontentloaded', { timeout: timeoutMs })
+    .catch(() => undefined);
+  const controls = page.locator(QUESTION_CONTROL_SELECTOR);
+  await controls.first().waitFor({
+    state: 'attached',
+    timeout: Math.max(1_000, deadline - Date.now()),
+  });
+  let previous = -1;
+  while (Date.now() < deadline) {
+    const current = await controls.count();
+    if (current === previous) {
+      return;
+    }
+    previous = current;
+    await page.waitForTimeout(FORM_SETTLE_POLL_MS);
+  }
 }
 
 /** Both greenhouse boards (classic and React) render the questions in a form. */
@@ -229,6 +308,8 @@ interface CandidateRoot {
   kind: 'label' | 'group';
   text: string;
   forId: string | null;
+  /** Groups only: whether the subtree holds checkbox/radio option inputs. */
+  hasOptionInputs: boolean;
 }
 
 /** One round-trip: heading text + shape of every candidate root, in DOM order. */
@@ -241,6 +322,7 @@ async function scanCandidateRoots(scope: Locator): Promise<CandidateRoot[]> {
           kind: 'label' as const,
           text: element.textContent ?? '',
           forId: element.getAttribute('for'),
+          hasOptionInputs: false,
         };
       }
       const legend =
@@ -258,7 +340,10 @@ async function scanCandidateRoots(scope: Locator): Promise<CandidateRoot[]> {
                   element.ownerDocument.getElementById(id)?.textContent ?? '',
               )
               .join(' ');
-      return { kind: 'group' as const, text, forId: null };
+      const hasOptionInputs =
+        element.querySelector('input[type="checkbox"], input[type="radio"]') !==
+        null;
+      return { kind: 'group' as const, text, forId: null, hasOptionInputs };
     }),
   );
 }
@@ -320,15 +405,31 @@ async function findControl(
   scope: Locator,
   matchLabel: string,
   matchIndex: number,
+  wants: 'text' | 'options',
 ): Promise<Located> {
   const roots = scope.locator(CANDIDATE_ROOT_SELECTOR);
   const infos = await scanCandidateRoots(scope);
+  // A fieldset legend can repeat the label of a plain input it wraps
+  // (greenhouse wraps Phone in <fieldset><legend>Phone</legend> around a
+  // country picker plus the number field), and that group would otherwise
+  // win the lookup and fail as 'not a text control'. So a text action
+  // never binds to a group, and an option action binds only to a group
+  // that actually holds option inputs.
+  const usable = infos
+    .map((info, index) => ({ info, index }))
+    .filter(
+      ({ info }) =>
+        info.kind === 'label' || (wants === 'options' && info.hasOptionInputs),
+    );
+  let matches = usable.filter(
+    ({ info }) => normalizeLabel(info.text) === matchLabel,
+  );
+  const loose = looseLabelKey(matchLabel);
+  if (matches.length === 0 && loose !== '') {
+    matches = usable.filter(({ info }) => looseLabelKey(info.text) === loose);
+  }
   const located: Located[] = [];
-  for (let index = 0; index < infos.length; index++) {
-    const info = infos[index];
-    if (info === undefined || normalizeLabel(info.text) !== matchLabel) {
-      continue;
-    }
+  for (const { info, index } of matches) {
     if (info.kind === 'group') {
       located.push({ control: null, container: roots.nth(index) });
     } else {
@@ -363,6 +464,7 @@ async function fillOne(
     scope,
     action.matchLabel,
     action.matchIndex,
+    action.kind === 'text' ? 'text' : 'options',
   );
   await (control ?? container).scrollIntoViewIfNeeded({
     timeout: ACTION_TIMEOUT_MS,

@@ -1,9 +1,13 @@
 import { readFileSync } from 'node:fs';
+import type { Page } from 'playwright-core';
 import { describe, expect, it } from 'vitest';
 import {
+  isTransientDomError,
+  looseLabelKey,
   normalizeLabel,
   planFill,
   stripLineBreaks,
+  waitForFormReady,
 } from './greenhouse-fill.js';
 import type { FillQuestion } from './sower-client.js';
 
@@ -251,5 +255,97 @@ describe('executor safety', () => {
         expect(line).not.toMatch(/submit|apply/i);
       }
     }
+  });
+});
+
+describe('looseLabelKey', () => {
+  it('ties a run-together payload label to the spaced form label', () => {
+    // The live EEOC block ships 'Disability Status' / 'Veteran Status'
+    // while the payload carries them run together; both must land.
+    expect(looseLabelKey('DisabilityStatus')).toBe(
+      looseLabelKey('Disability Status*'),
+    );
+    expect(looseLabelKey('VeteranStatus')).toBe(
+      looseLabelKey('Veteran Status'),
+    );
+  });
+
+  it('keeps genuinely different labels apart', () => {
+    expect(looseLabelKey('First Name')).not.toBe(looseLabelKey('Last Name'));
+  });
+});
+
+describe('isTransientDomError', () => {
+  it('recognises a re-render that killed the action', () => {
+    expect(
+      isTransientDomError(
+        new Error('locator.evaluateAll: Execution context was destroyed'),
+      ),
+    ).toBe(true);
+    expect(
+      isTransientDomError(new Error('Element is not attached to the DOM')),
+    ).toBe(true);
+  });
+
+  it('leaves a real miss alone', () => {
+    expect(
+      isTransientDomError(new Error('no form control labeled "race"')),
+    ).toBe(false);
+  });
+});
+
+describe('waitForFormReady', () => {
+  function stubPage(counts: number[]) {
+    const calls = { counts: 0, waits: 0, attached: 0 };
+    const page = {
+      waitForLoadState: async () => undefined,
+      locator: () => ({
+        first: () => ({
+          waitFor: async () => {
+            calls.attached += 1;
+          },
+        }),
+        count: async () => {
+          const value = counts[Math.min(calls.counts, counts.length - 1)] ?? 0;
+          calls.counts += 1;
+          return value;
+        },
+      }),
+      waitForTimeout: async () => {
+        calls.waits += 1;
+      },
+    };
+    return { page: page as unknown as Page, calls };
+  }
+
+  it('waits for the control count to stop growing', async () => {
+    // The board streams questions in: 3, then 7, then all 12.
+    const { page, calls } = stubPage([3, 7, 12, 12]);
+    await waitForFormReady(page, 30_000);
+    expect(calls.attached).toBe(1);
+    expect(calls.counts).toBe(4);
+    expect(calls.waits).toBe(3);
+  });
+
+  it('returns as soon as a stable form is already rendered', async () => {
+    const { page, calls } = stubPage([12, 12]);
+    await waitForFormReady(page, 30_000);
+    expect(calls.waits).toBe(1);
+  });
+
+  it('propagates the timeout when no control ever appears', async () => {
+    const page = {
+      waitForLoadState: async () => undefined,
+      locator: () => ({
+        first: () => ({
+          waitFor: async () => {
+            throw new Error('Timeout 1000ms exceeded.');
+          },
+        }),
+        count: async () => 0,
+      }),
+      waitForTimeout: async () => undefined,
+    } as unknown as Page;
+    await expect(waitForFormReady(page, 1_000)).rejects.toThrow(/Timeout/);
   });
 });
