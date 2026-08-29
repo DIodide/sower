@@ -580,12 +580,34 @@ async function findControl(
   throw new Error('duplicate label could not be disambiguated');
 }
 
+/**
+ * Close anything a previous question left open. The phone field's country
+ * picker is the reason: it stays expanded after the country is set, and
+ * its list is long enough to lie over whichever field follows, which
+ * times out that field's click and made the failure wander between runs.
+ *
+ * The dismissal is a synthetic click on <body>, which is what these
+ * widgets listen for — never a click at coordinates, which could land on
+ * anything, and never a keystroke.
+ */
+async function dismissOpenOverlays(page: Page): Promise<void> {
+  await page.evaluate(`(() => {
+    if (document.querySelector('[aria-expanded="true"]') === null) return;
+    for (const type of ['mousedown', 'mouseup', 'click']) {
+      document.body.dispatchEvent(
+        new MouseEvent(type, { bubbles: true, cancelable: true, view: window }),
+      );
+    }
+  })()`);
+}
+
 async function fillOne(
   page: Page,
   scope: Locator,
   action: Exclude<FillAction, { kind: 'skip' }>,
   settleMs: number,
 ): Promise<void> {
+  await dismissOpenOverlays(page);
   const { control, container } = await findControl(
     page,
     scope,
