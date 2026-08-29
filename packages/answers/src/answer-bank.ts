@@ -769,6 +769,20 @@ function entryForQuestion(
  * bank and profile. Bank answers derive from the profile, so they carry
  * source 'profile'.
  */
+/**
+ * True when the curated bank's answer for this question would be a
+ * decline. That is standing policy for a question nobody has answered —
+ * never guess a demographic — rather than a value derived from anything
+ * in the profile, so a saved answer supersedes it.
+ */
+export function isCuratedDecline(
+  question: Question,
+  bank: AnswerBank,
+): boolean {
+  const entry = entryForQuestion(question, bank);
+  return entry !== null && entry.strategy.type === 'decline';
+}
+
 export function resolveFromAnswerBank(
   question: Question,
   profile: Profile,

@@ -7,7 +7,11 @@ import type {
 // Circular at module level (answer-bank.ts imports normalizeLabel from this
 // file) but benign: both modules only call across the cycle inside functions,
 // never during evaluation.
-import { type AnswerBank, resolveFromAnswerBank } from './answer-bank.js';
+import {
+  type AnswerBank,
+  isCuratedDecline,
+  resolveFromAnswerBank,
+} from './answer-bank.js';
 import { isEmptyProfile, type Profile } from './profile.js';
 
 /**
@@ -534,6 +538,14 @@ export function selectBankValue(
  *  5) answers bank, exact normalized-label match, company-scoped entry for
  *     opts.company preferred over global (see selectBankValue) -> source
  *     'bank'
+ *
+ * With one inversion: when the curated strategy is a DECLINE, a saved
+ * answer wins instead. Declining is what Sower does for a demographic
+ * question nobody has answered, and an answer the user typed and saved is
+ * the opposite of nobody answering — ranking the policy above it meant
+ * someone who told Sower their race went on declining. Every other
+ * curated strategy is derived from the profile itself (GPA buckets,
+ * ranges, consents) and still outranks a stale saved answer.
  *  6) file questions: matching stored document -> source 'document'
  *  7) profile.custom, exact normalized-label match -> profile
  * A stage only wins when it yields a final valid answer (selects require an
@@ -607,6 +619,20 @@ export function resolveAnswers(
     }
 
     const label = normalizeLabel(question.label);
+    const curated =
+      profileConfigured && answerBank !== undefined
+        ? resolveFromAnswerBank(question, profile, answerBank)
+        : null;
+    const saved = finalize(
+      question,
+      selectBankValue(question, bank, company),
+      'bank',
+    );
+    // A decline is a placeholder for silence, so the user's own answer
+    // supersedes it; every other curated strategy reads the profile and
+    // stays ahead of the bank.
+    const declines =
+      answerBank !== undefined && isCuratedDecline(question, answerBank);
     const answer =
       (profileConfigured
         ? finalize(
@@ -615,10 +641,7 @@ export function resolveAnswers(
             'profile',
           )
         : null) ??
-      (profileConfigured && answerBank !== undefined
-        ? resolveFromAnswerBank(question, profile, answerBank)
-        : null) ??
-      finalize(question, selectBankValue(question, bank, company), 'bank') ??
+      (declines ? (saved ?? curated) : (curated ?? saved)) ??
       finalize(question, customByNormalizedLabel.get(label), 'profile');
 
     if (answer === null) {

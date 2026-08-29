@@ -1645,6 +1645,34 @@ describe('resolveAnswers — curated answer bank stage', () => {
     ]);
   });
 
+  it('lets a saved answer supersede the decline it stands in for', () => {
+    // Declining is what Sower does when nobody answered; once the user
+    // saves an answer, that is no longer the situation. (The fixture's
+    // decline entry keys off the greenhouse 'gender' compliance id.)
+    const question = q({
+      id: 'gender',
+      label: 'Gender',
+      type: 'select',
+      options: [
+        { label: 'Male', value: '1' },
+        { label: 'Female', value: '2' },
+        { label: 'Decline To Self Identify', value: '3' },
+      ],
+    });
+    const declined = resolveAnswers([question], profile, { answerBank });
+    expect(declined.resolved).toEqual([
+      { questionId: 'gender', source: 'profile', value: '3' },
+    ]);
+
+    const answered = resolveAnswers([question], profile, {
+      answerBank,
+      bank: [{ normalizedLabel: 'gender', value: '1' }],
+    });
+    expect(answered.resolved).toEqual([
+      { questionId: 'gender', source: 'bank', value: '1' },
+    ]);
+  });
+
   it('routes Greenhouse compliance ids to the eeo decline entries', () => {
     const question = q({
       id: 'gender',
