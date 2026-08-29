@@ -174,6 +174,20 @@ const COUNTRY_QUESTION: Readonly<Question> = {
   formOnly: true,
 };
 
+/**
+ * Greenhouse's EEOC section asks Hispanic/Latino first and only renders
+ * Race once it is answered, yet the payload describes Race alone. It is
+ * synthesized with the block it belongs to, so answering it reveals Race
+ * within the same browser fill.
+ */
+const HISPANIC_QUESTION: Readonly<Question> = {
+  id: 'hispanic_ethnicity',
+  label: 'Are you Hispanic/Latino?',
+  type: 'text',
+  required: false,
+  formOnly: true,
+};
+
 const EDUCATION_FIELDS: ReadonlyArray<readonly [string, string]> = [
   ['school--0', 'School'],
   ['degree--0', 'Degree'],
@@ -207,6 +221,15 @@ function rendersEducation(flag: string | null | undefined): boolean {
   return value.includes('education') && !/hidden|disabled|none|off/.test(value);
 }
 
+/** The EEOC block is present when the payload describes its Race question. */
+function hasEeocRaceQuestion(payload: GreenhouseJobPayload): boolean {
+  return (payload.compliance ?? []).some((block) =>
+    (block.questions ?? []).some((question) =>
+      question.fields.some((field) => field.name === 'race'),
+    ),
+  );
+}
+
 function formOnlyQuestions(payload: GreenhouseJobPayload): Question[] {
   const questions: Question[] = [];
   if (!rendersModernBoardForm(payload.absolute_url)) {
@@ -223,6 +246,9 @@ function formOnlyQuestions(payload: GreenhouseJobPayload): Question[] {
         formOnly: true,
       });
     }
+  }
+  if (hasEeocRaceQuestion(payload)) {
+    questions.push({ ...HISPANIC_QUESTION });
   }
   return questions;
 }

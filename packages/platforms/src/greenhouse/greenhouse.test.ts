@@ -455,14 +455,16 @@ describe('GreenhouseAdapter.discover — gitlab compliance fixture', () => {
   it('includes all EEOC compliance questions with string option values', async () => {
     const spec = await adapter.discover(gitlabRef, gitlabUrl);
     const ids = spec.questions.map((q) => q.id);
-    // gitlab posts on job-boards, so the synthesized country question
-    // trails the EEOC block.
-    expect(ids.slice(-5)).toEqual([
+    // gitlab posts on job-boards, so the synthesized questions trail the
+    // EEOC block — Hispanic/Latino among them, since Race is described
+    // and the question that reveals it is not.
+    expect(ids.slice(-6)).toEqual([
       'disability_status',
       'veteran_status',
       'race',
       'gender',
       'country',
+      'hispanic_ethnicity',
     ]);
     for (const id of [
       'disability_status',
@@ -478,8 +480,9 @@ describe('GreenhouseAdapter.discover — gitlab compliance fixture', () => {
       ).toBe(true);
     }
     // 17 questions (2 with textarea alternates) + 4 compliance questions
-    // + the synthesized country picker (gitlab posts on job-boards)
-    expect(spec.questions).toHaveLength(24);
+    // + the synthesized country and Hispanic/Latino questions (gitlab
+    // posts on job-boards and ships the EEOC block)
+    expect(spec.questions).toHaveLength(25);
   });
 });
 
@@ -906,6 +909,8 @@ describe('form-only questions', () => {
       'start-year--0',
       'end-month--0',
       'end-year--0',
+      // the stripe payload ships an EEOC block, so Race's gate comes too
+      'hispanic_ethnicity',
     ]);
     expect(spec.questions.find((q) => q.id === 'school--0')).toMatchObject({
       label: 'School',
@@ -936,5 +941,53 @@ describe('form-only questions', () => {
       education: 'education_required',
     });
     expect(spec.questions.some((q) => q.formOnly === true)).toBe(false);
+  });
+});
+
+describe('the question that reveals Race', () => {
+  const adapter = new GreenhouseAdapter();
+  const gitlabRef: PlatformRef = {
+    platform: 'greenhouse',
+    tenant: 'gitlab',
+    externalId: '8565469002',
+  };
+  const gitlabUrl = 'https://job-boards.greenhouse.io/gitlab/jobs/8565469002';
+
+  async function discoverWith(
+    payload: Record<string, unknown>,
+  ): Promise<JobSpec> {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => payload,
+      }),
+    );
+    return await adapter.discover(gitlabRef, gitlabUrl);
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('synthesizes Hispanic/Latino wherever the EEOC block ships', async () => {
+    // The board describes Race but not the question that reveals it, so a
+    // fill can never reach Race without this one.
+    const spec = await discoverWith(gitlabFixture);
+    expect(
+      spec.questions.find((q) => q.id === 'hispanic_ethnicity'),
+    ).toMatchObject({
+      label: 'Are you Hispanic/Latino?',
+      formOnly: true,
+    });
+    expect(spec.questions.some((q) => q.id === 'race')).toBe(true);
+  });
+
+  it('leaves it out when the board ships no EEOC block', async () => {
+    const spec = await discoverWith({ ...gitlabFixture, compliance: [] });
+    expect(spec.questions.some((q) => q.id === 'hispanic_ethnicity')).toBe(
+      false,
+    );
   });
 });
