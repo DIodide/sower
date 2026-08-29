@@ -455,11 +455,14 @@ describe('GreenhouseAdapter.discover — gitlab compliance fixture', () => {
   it('includes all EEOC compliance questions with string option values', async () => {
     const spec = await adapter.discover(gitlabRef, gitlabUrl);
     const ids = spec.questions.map((q) => q.id);
-    expect(ids.slice(-4)).toEqual([
+    // gitlab posts on job-boards, so the synthesized country question
+    // trails the EEOC block.
+    expect(ids.slice(-5)).toEqual([
       'disability_status',
       'veteran_status',
       'race',
       'gender',
+      'country',
     ]);
     for (const id of [
       'disability_status',
@@ -475,7 +478,8 @@ describe('GreenhouseAdapter.discover — gitlab compliance fixture', () => {
       ).toBe(true);
     }
     // 17 questions (2 with textarea alternates) + 4 compliance questions
-    expect(spec.questions).toHaveLength(23);
+    // + the synthesized country picker (gitlab posts on job-boards)
+    expect(spec.questions).toHaveLength(24);
   });
 });
 
@@ -842,5 +846,95 @@ describe('GreenhouseAdapter.submit — double-gated realSubmit', () => {
     });
     // The recorder must never capture the real applyUrl as the submit target.
     expect(call.url).not.toBe(sampleSpec.applyUrl);
+  });
+});
+
+describe('form-only questions', () => {
+  // The board API answers `education` with a bare flag and never mentions
+  // the country picker beside the phone field, so both are synthesized
+  // from what the form is known to render.
+  const adapter = new GreenhouseAdapter();
+
+  async function discoverWith(
+    payload: Record<string, unknown>,
+  ): Promise<JobSpec> {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => payload,
+      }),
+    );
+    return await adapter.discover(ref, url);
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // fixture.json is an embedded board (its absolute_url is stripe.com), so
+  // these run against the same payload posted on greenhouse's own board.
+  const modern = {
+    ...fixture,
+    absolute_url: 'https://job-boards.greenhouse.io/stripe/jobs/7954688',
+  };
+
+  it('synthesizes the country picker on the modern board', async () => {
+    const spec = await discoverWith(modern);
+    expect(spec.questions.find((q) => q.id === 'country')).toMatchObject({
+      label: 'Country',
+      type: 'text',
+      required: false,
+      formOnly: true,
+    });
+  });
+
+  it('synthesizes the education block when the board renders it', async () => {
+    const spec = await discoverWith({
+      ...modern,
+      education: 'education_optional',
+    });
+    expect(
+      spec.questions.filter((q) => q.formOnly === true).map((q) => q.id),
+    ).toEqual([
+      'country',
+      'school--0',
+      'degree--0',
+      'discipline--0',
+      'start-month--0',
+      'start-year--0',
+      'end-month--0',
+      'end-year--0',
+    ]);
+    expect(spec.questions.find((q) => q.id === 'school--0')).toMatchObject({
+      label: 'School',
+      type: 'text',
+    });
+  });
+
+  it('leaves education alone when the flag says the board hides it', async () => {
+    const spec = await discoverWith({
+      ...modern,
+      education: 'education_hidden',
+    });
+    expect(spec.questions.some((q) => q.id === 'school--0')).toBe(false);
+  });
+
+  it('marks nothing form-only that the API actually described', async () => {
+    const spec = await discoverWith(modern);
+    expect(spec.questions.find((q) => q.id === 'first_name')?.formOnly).toBe(
+      undefined,
+    );
+  });
+
+  it('assumes nothing about an embedded board on a company site', async () => {
+    // fixture.json's absolute_url is stripe.com: a different form whose
+    // chrome we have not seen, so nothing is synthesized for it.
+    const spec = await discoverWith({
+      ...fixture,
+      education: 'education_required',
+    });
+    expect(spec.questions.some((q) => q.formOnly === true)).toBe(false);
   });
 });

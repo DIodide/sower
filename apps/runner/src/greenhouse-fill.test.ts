@@ -1,15 +1,18 @@
 import { readFileSync } from 'node:fs';
 import type { Page } from 'playwright-core';
 import { describe, expect, it } from 'vitest';
+import type { FillAction } from './greenhouse-fill.js';
 import {
   isTransientDomError,
   looseLabelKey,
+  markAbsentFormOnly,
   normalizeLabel,
+  pickOptionIndex,
   planFill,
   stripLineBreaks,
   waitForFormReady,
 } from './greenhouse-fill.js';
-import type { FillQuestion } from './sower-client.js';
+import type { FillQuestion, FillReportItem } from './sower-client.js';
 
 /**
  * Pure planner coverage (normalization, per-type actions, duplicate-label
@@ -75,6 +78,7 @@ describe('planFill', () => {
         label: 'Full Name*',
         matchLabel: 'full name',
         matchIndex: 0,
+        formOnly: false,
         value: 'Ada Lovelace',
       },
       {
@@ -83,6 +87,7 @@ describe('planFill', () => {
         label: 'Cover Letter',
         matchLabel: 'cover letter',
         matchIndex: 0,
+        formOnly: false,
         value: 'Dear team',
       },
     ]);
@@ -111,6 +116,7 @@ describe('planFill', () => {
       label: 'Are you authorized to work? *',
       matchLabel: 'are you authorized to work?',
       matchIndex: 0,
+      formOnly: false,
       selection: { value: '1', optionLabel: 'Yes' },
     });
   });
@@ -158,6 +164,7 @@ describe('planFill', () => {
       label: 'Resume/CV*',
       matchLabel: 'resume/cv',
       matchIndex: 0,
+      formOnly: false,
       detail: 'attach manually in the live view',
     });
   });
@@ -347,5 +354,111 @@ describe('waitForFormReady', () => {
       waitForTimeout: async () => undefined,
     } as unknown as Page;
     await expect(waitForFormReady(page, 1_000)).rejects.toThrow(/Timeout/);
+  });
+});
+
+describe('pickOptionIndex', () => {
+  it('takes an exact match over any partial', () => {
+    expect(
+      pickOptionIndex(['bachelor of arts', 'bachelors'], 'bachelors'),
+    ).toBe(1);
+  });
+
+  it('accepts a lone containment match on the narrowed list', () => {
+    // The typed text already filtered the widget's list.
+    expect(pickOptionIndex(["bachelor's degree"], 'bachelors degree')).toBe(-1);
+    expect(pickOptionIndex(['princeton university'], 'princeton')).toBe(0);
+  });
+
+  it('refuses to guess between two candidates', () => {
+    expect(
+      pickOptionIndex(
+        ['computer science', 'computer science and engineering'],
+        'computer',
+      ),
+    ).toBe(-1);
+  });
+
+  it('ignores empty option text', () => {
+    expect(pickOptionIndex(['', 'princeton university'], 'princeton')).toBe(1);
+  });
+});
+
+describe('markAbsentFormOnly', () => {
+  const action = (id: string, formOnly: boolean): FillAction => ({
+    kind: 'text',
+    questionId: id,
+    label: id,
+    matchLabel: id,
+    matchIndex: 0,
+    formOnly,
+    value: 'v',
+  });
+
+  it('turns a missing form-only control into a skip', () => {
+    // Boards differ over which education sub-fields they render, so an
+    // absent one is a fact about the posting, not a failure.
+    const report: FillReportItem[] = [
+      {
+        questionId: 'start-month--0',
+        label: 'Start date month',
+        outcome: 'failed',
+        detail: 'no form control labeled "start date month"',
+      },
+    ];
+    markAbsentFormOnly([action('start-month--0', true)], report);
+    expect(report[0]).toEqual({
+      questionId: 'start-month--0',
+      label: 'Start date month',
+      outcome: 'skipped',
+      detail: 'not on this form',
+    });
+  });
+
+  it('leaves an API-described question failing', () => {
+    const report: FillReportItem[] = [
+      {
+        questionId: 'first_name',
+        label: 'First Name',
+        outcome: 'failed',
+        detail: 'no form control labeled "first name"',
+      },
+    ];
+    markAbsentFormOnly([action('first_name', false)], report);
+    expect(report[0]?.outcome).toBe('failed');
+  });
+
+  it('leaves a form-only question that failed for another reason', () => {
+    const report: FillReportItem[] = [
+      {
+        questionId: 'school--0',
+        label: 'School',
+        outcome: 'failed',
+        detail: "option list did not show 'Princeton University'",
+      },
+    ];
+    markAbsentFormOnly([action('school--0', true)], report);
+    expect(report[0]?.outcome).toBe('failed');
+  });
+});
+
+describe('planFill form-only passthrough', () => {
+  it('carries the synthesized marker onto the action', () => {
+    const actions = planFill([
+      question({ id: 'country', label: 'Country', values: ['United States'] }),
+      question({ id: 'email', label: 'Email', values: ['a@b.c'] }),
+    ]);
+    expect(actions.map((a) => a.formOnly)).toEqual([false, false]);
+    const marked = planFill([
+      {
+        ...question({
+          id: 'country',
+          label: 'Country',
+          values: ['United States'],
+        }),
+        formOnly: true,
+      },
+    ]);
+    expect(marked[0]?.formOnly).toBe(true);
   });
 });

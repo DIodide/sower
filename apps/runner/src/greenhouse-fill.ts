@@ -24,6 +24,7 @@ export type FillAction =
       label: string;
       matchLabel: string;
       matchIndex: number;
+      formOnly: boolean;
       value: string;
     }
   | {
@@ -32,6 +33,7 @@ export type FillAction =
       label: string;
       matchLabel: string;
       matchIndex: number;
+      formOnly: boolean;
       selection: PlannedSelection;
     }
   | {
@@ -40,6 +42,7 @@ export type FillAction =
       label: string;
       matchLabel: string;
       matchIndex: number;
+      formOnly: boolean;
       selections: PlannedSelection[];
     }
   | {
@@ -48,6 +51,7 @@ export type FillAction =
       label: string;
       matchLabel: string;
       matchIndex: number;
+      formOnly: boolean;
       detail: string;
     };
 
@@ -104,6 +108,7 @@ export function planFill(questions: FillQuestion[]): FillAction[] {
       label: question.label,
       matchLabel,
       matchIndex,
+      formOnly: question.formOnly === true,
     };
     if (question.type === 'file') {
       return {
@@ -245,7 +250,35 @@ export async function executeFill(
     settleMs,
     deadline,
   );
+  markAbsentFormOnly(actions, report);
   return report;
+}
+
+/**
+ * A form-only question was synthesized from a form-level signal, not read
+ * off an API that promised the field, so a posting that does not render it
+ * is a fact about that posting — report it as skipped rather than as a
+ * failure the human has to interpret.
+ */
+export function markAbsentFormOnly(
+  actions: FillAction[],
+  report: FillReportItem[],
+): void {
+  const formOnly = new Set(
+    actions
+      .filter((action) => action.formOnly)
+      .map((action) => action.questionId),
+  );
+  for (const item of report) {
+    if (
+      item.outcome === 'failed' &&
+      MISSING_CONTROL.test(item.detail ?? '') &&
+      formOnly.has(item.questionId)
+    ) {
+      item.outcome = 'skipped';
+      item.detail = 'not on this form';
+    }
+  }
 }
 
 /** Failures that mean the control was absent, not that filling it broke. */
@@ -528,9 +561,26 @@ async function fillOne(
         `"${action.label}" is a checkbox group, not a text control`,
       );
     }
-    const tag = await control.evaluate((el) => el.tagName.toLowerCase());
+    const shape = await control.evaluate((element) => ({
+      tag: element.tagName.toLowerCase(),
+      role: element.getAttribute('role'),
+      autocomplete: element.getAttribute('aria-autocomplete'),
+    }));
+    if (shape.role === 'combobox' || shape.autocomplete === 'list') {
+      // A typeahead wearing a text input (greenhouse's school, degree,
+      // discipline, and country pickers): typed text alone is a search
+      // string the widget discards, so the option has to be picked.
+      await pickComboboxOption(
+        page,
+        control,
+        container,
+        { value: action.value, optionLabel: null },
+        settleMs,
+      );
+      return;
+    }
     const value =
-      tag === 'textarea' ? action.value : stripLineBreaks(action.value);
+      shape.tag === 'textarea' ? action.value : stripLineBreaks(action.value);
     await control.fill(value, { timeout: ACTION_TIMEOUT_MS });
     return;
   }
@@ -603,15 +653,36 @@ async function pickComboboxOption(
   if (list !== null) {
     const options = list.locator('[role="option"]');
     const total = await options.count();
+    const texts: string[] = [];
     for (let index = 0; index < total; index++) {
-      const option = options.nth(index);
-      if (normalizeLabel((await option.textContent()) ?? '') === target) {
-        await option.click({ timeout: ACTION_TIMEOUT_MS });
-        return;
-      }
+      texts.push(
+        normalizeLabel((await options.nth(index).textContent()) ?? ''),
+      );
+    }
+    const index = pickOptionIndex(texts, target);
+    if (index >= 0) {
+      await options.nth(index).click({ timeout: ACTION_TIMEOUT_MS });
+      return;
     }
   }
   throw new Error(`option list did not show '${wanted}'`);
+}
+
+/**
+ * Which option the typed text meant. Exact wins; otherwise the typed text
+ * has already narrowed the list, so a single containment match is the
+ * widget's own answer to it ('bachelors' -> "bachelor's degree"). A tie is
+ * left alone — better a reported miss than a wrong degree.
+ */
+export function pickOptionIndex(texts: string[], target: string): number {
+  const exact = texts.indexOf(target);
+  if (exact >= 0) {
+    return exact;
+  }
+  const matches = texts.filter(
+    (text) => text !== '' && (text.includes(target) || target.includes(text)),
+  );
+  return matches.length === 1 ? texts.indexOf(matches[0] as string) : -1;
 }
 
 /**

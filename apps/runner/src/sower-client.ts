@@ -25,6 +25,12 @@ export interface FillQuestion {
   options: FillOption[];
   /** Raw input values to enter; null when unanswered (file questions always null). */
   values: string[] | null;
+  /**
+   * Synthesized by the platform adapter from a form-level signal rather
+   * than described by the API (greenhouse's education block, its country
+   * picker). A posting that does not render the control is a skip.
+   */
+  formOnly?: boolean;
 }
 
 export interface ClaimedFillJob {

@@ -98,6 +98,8 @@ export interface FillQuestion {
   required: boolean;
   options: { label: string; value: string }[];
   values: string[] | null;
+  /** Synthesized from a form-level signal: absent on a posting = skip. */
+  formOnly?: boolean;
 }
 
 /**
@@ -153,7 +155,7 @@ export function buildFillQuestions(
         values = input.length > 0 ? input : null;
       }
     }
-    return {
+    const fill: FillQuestion = {
       id: question.id,
       label: question.label,
       type: question.type,
@@ -164,6 +166,10 @@ export function buildFillQuestions(
       })),
       values,
     };
+    if (question.formOnly === true) {
+      fill.formOnly = true;
+    }
+    return fill;
   });
 }
 

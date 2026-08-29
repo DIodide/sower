@@ -75,6 +75,14 @@ export interface Question {
   help?: string;
   /** Source-declared answer cap. Display + client-validation only; never fabricated. */
   limit?: { kind: 'characters' | 'words'; max: number };
+  /**
+   * True when the platform's API never described this question and it was
+   * synthesized from a form-level signal — greenhouse answers `education`
+   * with a bare flag and says nothing at all about its country picker, so
+   * the fields exist on the page but in no payload. A posting that turns
+   * out not to render one is a skip for a browser fill, never a failure.
+   */
+  formOnly?: boolean;
 }
 
 export interface JobSpec {

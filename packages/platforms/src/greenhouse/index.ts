@@ -87,6 +87,11 @@ interface GreenhouseJobPayload {
   location_questions?: GreenhouseQuestion[] | null;
   compliance?: GreenhouseComplianceBlock[] | null;
   demographic_questions?: GreenhouseDemographicSection | null;
+  /**
+   * Whether the board renders its education section — a bare flag
+   * ('education_optional'), never the fields themselves.
+   */
+  education?: string | null;
 }
 
 const FIELD_TYPE_MAP: Record<string, Question['type']> = {
@@ -153,6 +158,75 @@ function toQuestions(raw: GreenhouseQuestion): Question[] {
   });
 }
 
+/**
+ * Fields the board renders but the API never describes. `education` comes
+ * back as a flag with no ids, labels, or option lists, and the country
+ * picker beside the phone field is absent from the payload entirely, so a
+ * fill can only reach them if the questions are synthesized here. Ids and
+ * labels mirror the board's own DOM (school--0 / 'School'), which is what
+ * a browser fill matches on, and formOnly marks them absent-tolerant.
+ */
+const COUNTRY_QUESTION: Readonly<Question> = {
+  id: 'country',
+  label: 'Country',
+  type: 'text',
+  required: false,
+  formOnly: true,
+};
+
+const EDUCATION_FIELDS: ReadonlyArray<readonly [string, string]> = [
+  ['school--0', 'School'],
+  ['degree--0', 'Degree'],
+  ['discipline--0', 'Discipline'],
+  ['start-month--0', 'Start date month'],
+  ['start-year--0', 'Start date year'],
+  ['end-month--0', 'End date month'],
+  ['end-year--0', 'End date year'],
+];
+
+/**
+ * Greenhouse's own modern board. Its form asks for a country and renders
+ * the education block; a posting whose canonical home is a company site
+ * (an embedded board) is a different form, so nothing is assumed there.
+ */
+function rendersModernBoardForm(
+  absoluteUrl: string | null | undefined,
+): boolean {
+  return (absoluteUrl ?? '').includes('job-boards.greenhouse.io');
+}
+
+/**
+ * Boards that keep the section off say so in the flag itself; anything
+ * else that names education renders it (optional or required).
+ */
+function rendersEducation(flag: string | null | undefined): boolean {
+  if (typeof flag !== 'string') {
+    return false;
+  }
+  const value = flag.toLowerCase();
+  return value.includes('education') && !/hidden|disabled|none|off/.test(value);
+}
+
+function formOnlyQuestions(payload: GreenhouseJobPayload): Question[] {
+  const questions: Question[] = [];
+  if (!rendersModernBoardForm(payload.absolute_url)) {
+    return questions;
+  }
+  questions.push({ ...COUNTRY_QUESTION });
+  if (rendersEducation(payload.education)) {
+    for (const [id, label] of EDUCATION_FIELDS) {
+      questions.push({
+        id,
+        label,
+        type: 'text',
+        required: false,
+        formOnly: true,
+      });
+    }
+  }
+  return questions;
+}
+
 function toDemographicQuestion(raw: GreenhouseDemographicQuestion): Question {
   const options = (raw.answer_options ?? []).map(
     (option): QuestionOption => ({ label: option.label, value: option.id }),
@@ -214,6 +288,7 @@ export class GreenhouseAdapter implements PlatformAdapter {
     for (const raw of payload.demographic_questions?.questions ?? []) {
       questions.push(toDemographicQuestion(raw));
     }
+    questions.push(...formOnlyQuestions(payload));
 
     const spec: JobSpec = {
       platform: 'greenhouse',
