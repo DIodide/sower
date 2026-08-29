@@ -7,7 +7,7 @@ them off silently: every task stops for human review.
 
 This repo is dependent on the following sibling repositories:
 - DIodide/opentab (Turns a Mac-Mini into a residential proxy + CDP browser farm over Tailscale)
-- DIodide/sower-infra (private Terraform infrastructure for deployment to GCP)
+- DIodide/sower-infra (Terraform infrastructure for deployment to GCP)
 - DIodide/information (private repository containing answers // profile information
 
 ## Architecture
