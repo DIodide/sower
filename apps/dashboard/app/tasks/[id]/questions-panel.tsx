@@ -7,6 +7,7 @@
 // optional), then answers already SAVED to the bank but not yet applied by a
 // run, then auto-filled answers — so the eye lands on what still needs doing.
 import type { Tone } from '../../../lib/format';
+import { staysAnswerable } from '../../../lib/question-sections.js';
 import { Empty, ExpandableText } from '../../../lib/ui';
 import {
   type AnswerLimitView,
@@ -293,7 +294,7 @@ function MissingInput({
         <CountedTextarea
           inputId={inputId}
           name={`q:${view.id}`}
-          defaultValue={view.savedInput?.[0]}
+          defaultValue={view.savedInput?.[0] ?? view.resolvedValues?.[0]}
           required={view.required}
           limit={view.limit}
         />
@@ -309,7 +310,7 @@ function MissingInput({
       <CountedTextInput
         inputId={inputId}
         name={`q:${view.id}`}
-        defaultValue={view.savedInput?.[0]}
+        defaultValue={view.savedInput?.[0] ?? view.resolvedValues?.[0]}
         required={view.required}
         limit={view.limit}
       />
@@ -352,7 +353,9 @@ function QuestionRow({
           title={`${view.id} · ${view.type}`}
           htmlFor={
             interactive &&
-            (view.status === 'missing' || view.status === 'saved') &&
+            (view.status === 'missing' ||
+              view.status === 'saved' ||
+              staysAnswerable(view)) &&
             view.type !== 'file' &&
             view.type !== 'multiselect'
               ? `q-${view.id}`
@@ -393,7 +396,20 @@ function QuestionRow({
         </p>
       ) : null}
       {view.status === 'resolved' ? (
-        <ResolvedValue view={view} />
+        interactive && staysAnswerable(view) ? (
+          // Answered, but written for this job: show what is there and
+          // leave it editable rather than collapsing it out of reach.
+          <div style={{ display: 'grid', gap: '0.4rem' }}>
+            <ResolvedValue view={view} />
+            <MissingInput
+              view={view}
+              documents={documents}
+              scopeCompany={scopeCompany}
+            />
+          </div>
+        ) : (
+          <ResolvedValue view={view} />
+        )
       ) : view.status === 'saved' ? (
         // The saved value first (it visibly stuck), then — while answering —
         // the prefilled input so the user can still revise it.
@@ -453,13 +469,18 @@ export function QuestionsPanel({
     (a, b) => Number(b.required) - Number(a.required),
   );
   const saved = views.filter((v) => v.status === 'saved');
-  const resolved = views.filter((v) => v.status === 'resolved');
+  // A resolved essay is answered but not a repeat fact, so it stays beside
+  // the unanswered questions where it can be read and revised.
+  const answerable = interactive ? views.filter(staysAnswerable) : [];
+  const resolved = views.filter(
+    (v) => v.status === 'resolved' && !answerable.includes(v),
+  );
   const unknown = views.filter((v) => v.status === 'unknown');
 
   const rowProps = { interactive, documents, scopeCompany };
 
   const missingSection =
-    missing.length > 0 ? (
+    missing.length > 0 || answerable.length > 0 ? (
       <section aria-label="unanswered questions">
         <h3
           className="section-title"
@@ -467,13 +488,19 @@ export function QuestionsPanel({
         >
           {interactive ? 'Waiting on you' : 'Unanswered'}{' '}
           <span className="count">{missing.length}</span>
+          {answerable.length > 0 ? (
+            <span className="hint" style={{ fontWeight: 600 }}>
+              plus {answerable.length} answered from your library — edit any of
+              them
+            </span>
+          ) : null}
           {!interactive && missing.every((v) => !v.required) ? (
             <span className="hint" style={{ fontWeight: 600 }}>
               all optional — left blank on purpose
             </span>
           ) : null}
         </h3>
-        {missing.map((view) => (
+        {[...missing, ...answerable].map((view) => (
           <QuestionRow key={view.id} view={view} {...rowProps} />
         ))}
       </section>
