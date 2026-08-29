@@ -61,7 +61,9 @@ const reportEntrySchema = z.object({
   // echoes it back, and a successful fill must never 400 its own report.
   label: z.string(),
   outcome: z.enum(['filled', 'skipped', 'failed']),
-  detail: z.string().max(500).optional(),
+  // 600 = the runner's summarizeFailure budget, which keeps both ends of
+  // a Playwright call log so the reason survives the trim.
+  detail: z.string().max(600).optional(),
 });
 
 const reportBodySchema = z.object({

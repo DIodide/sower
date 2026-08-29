@@ -575,6 +575,45 @@ describe('POST /fill-jobs/:id/report', () => {
     await app.close();
   });
 
+  it('accepts a failure detail as long as the runner may send', async () => {
+    // The runner trims each failure to 600 characters (summarizeFailure,
+    // which keeps both ends of a Playwright call log). A tighter cap here
+    // rejected the whole report and lost a finished fill.
+    for (const [length, expected] of [
+      [600, 200],
+      [601, 400],
+    ] as const) {
+      const row = fillJobRow({ status: 'running' });
+      const app = buildServer(
+        createDeps(
+          createFakeDb({
+            selectResults: [[row]],
+            updateResults: [[{ ...row, status: 'ready' }]],
+            insertResults: [[]],
+          }),
+        ),
+      );
+      const response = await app.inject({
+        method: 'POST',
+        url: `/fill-jobs/${FILL_ID}/report`,
+        headers: AUTH,
+        payload: {
+          status: 'ready',
+          report: [
+            {
+              questionId: 'q1',
+              label: 'Q',
+              outcome: 'failed',
+              detail: 'x'.repeat(length),
+            },
+          ],
+        },
+      });
+      expect(response.statusCode).toBe(expected);
+      await app.close();
+    }
+  });
+
   it('409s unless the job is claimed/running', async () => {
     for (const status of ['requested', 'ready', 'failed']) {
       const app = buildServer(
