@@ -10,6 +10,7 @@ import {
   pickOptionIndex,
   planFill,
   stripLineBreaks,
+  summarizeFailure,
   waitForFormReady,
 } from './greenhouse-fill.js';
 import type { FillQuestion, FillReportItem } from './sower-client.js';
@@ -471,5 +472,23 @@ describe('planFill form-only passthrough', () => {
       },
     ]);
     expect(marked[0]?.formOnly).toBe(true);
+  });
+});
+
+describe('summarizeFailure', () => {
+  it('leaves a short message alone', () => {
+    expect(summarizeFailure(new Error('no form control labeled "race"'))).toBe(
+      'no form control labeled "race"',
+    );
+  });
+
+  it('keeps the reason at the end of a long call log', () => {
+    // Playwright's diagnosis is its last line; trimming from the front
+    // alone would throw away the only part that says why.
+    const message = `locator.click: Timeout 10000ms exceeded.\nCall log:\n${'  - waiting\n'.repeat(80)}  - <div class="iti__dropdown"> intercepts pointer events`;
+    const summary = summarizeFailure(new Error(message));
+    expect(summary.length).toBeLessThanOrEqual(600);
+    expect(summary).toContain('locator.click: Timeout');
+    expect(summary).toContain('intercepts pointer events');
   });
 });

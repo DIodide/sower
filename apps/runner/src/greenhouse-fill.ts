@@ -237,9 +237,7 @@ export async function executeFill(
       });
       continue;
     }
-    const detail = (
-      failure instanceof Error ? failure.message : String(failure)
-    ).slice(0, 500);
+    const detail = summarizeFailure(failure);
     report.push({
       questionId: action.questionId,
       label: action.label,
@@ -328,6 +326,21 @@ async function retryRevealedQuestions(
       // Still absent (or newly broken): the first failure stands.
     }
   }
+}
+
+/**
+ * A failure trimmed for the report, keeping BOTH ends of it. Playwright
+ * writes the error first and its call log after, and the log's last line
+ * is the reason — what intercepted the click, what never became stable —
+ * so trimming from the front alone throws away the answer.
+ */
+export function summarizeFailure(error: unknown, max = 600): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.length <= max) {
+    return message;
+  }
+  const head = Math.floor(max * 0.35);
+  return `${message.slice(0, head)} […] ${message.slice(head - max + 5)}`;
 }
 
 /**
