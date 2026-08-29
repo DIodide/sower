@@ -485,6 +485,27 @@ async function locateQuestionControl(
 }
 
 /**
+ * The control whose id the payload question carries, found through its
+ * own label so the question container (and with it any dropdown menu)
+ * stays the one the label path would have used. Null when the board does
+ * not use that id, which puts the lookup back on label text.
+ */
+async function locateByQuestionId(
+  page: Page,
+  scope: Locator,
+  questionId: string,
+): Promise<Located | null> {
+  if (questionId === '') {
+    return null;
+  }
+  const label = scope.locator(`label[for="${questionId}"]`).first();
+  if ((await label.count()) === 0) {
+    return null;
+  }
+  return await locateQuestionControl(page, label, questionId);
+}
+
+/**
  * Occurrence-indexed, label-bound lookup: the plan's matchIndex picks
  * among duplicate labels in DOM order, so one control never receives two
  * questions' values. Candidates are question labels (locateQuestionControl)
@@ -493,10 +514,20 @@ async function locateQuestionControl(
 async function findControl(
   page: Page,
   scope: Locator,
+  questionId: string,
   matchLabel: string,
   matchIndex: number,
   wants: 'text' | 'options',
 ): Promise<Located> {
+  // Greenhouse's field names ARE the form's element ids, so the payload
+  // already knows which control it means. That beats matching on label
+  // text, which the board is free to word differently from the API: the
+  // EEOC question the payload calls 'Race' is headed "Please identify
+  // your race" on the page.
+  const byId = await locateByQuestionId(page, scope, questionId);
+  if (byId !== null) {
+    return byId;
+  }
   const roots = scope.locator(CANDIDATE_ROOT_SELECTOR);
   const infos = await scanCandidateRoots(scope);
   // A fieldset legend can repeat the label of a plain input it wraps
@@ -552,6 +583,7 @@ async function fillOne(
   const { control, container } = await findControl(
     page,
     scope,
+    action.questionId,
     action.matchLabel,
     action.matchIndex,
     action.kind === 'text' ? 'text' : 'options',
