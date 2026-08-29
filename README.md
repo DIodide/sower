@@ -5,6 +5,11 @@ work through Cloud Tasks, and walks each application through an explicit
 review-first state machine. It is built to prepare applications, never to fire
 them off silently: every task stops for human review.
 
+This repo is dependent on the following sibling repositories:
+- DIodide/opentab (Turns a Mac-Mini into a residential proxy + CDP browser farm over Tailscale)
+- DIodide/sower-infra (private Terraform infrastructure for deployment to GCP)
+- DIodide/information (private repository containing answers // profile information
+
 ## Architecture
 
 The motivation for this architecture is that tasks though ill-defined in general, must pass through some form of deterministic finite automata to provide the structure needed foran application to be able to reason about the task lifecycle.
