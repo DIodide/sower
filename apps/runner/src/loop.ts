@@ -34,6 +34,8 @@ export interface TickDeps {
 
 const DEFAULT_HEARTBEAT_MS = 30_000;
 const DEFAULT_TTL_SECONDS = 4 * 3600;
+/** OpenTab profile the fill tabs live on — its own browsing identity. */
+const FILL_PROFILE = 'sower';
 
 /** Claim and process one job; false when the queue was empty. */
 export async function runTick(deps: TickDeps): Promise<boolean> {
@@ -58,7 +60,12 @@ export async function runTick(deps: TickDeps): Promise<boolean> {
   }, deps.heartbeatMs ?? DEFAULT_HEARTBEAT_MS);
   try {
     session = await deps.opentab.createSession({
-      isolation: 'context',
+      // A dedicated, persistent profile: cookies and logins survive
+      // between fills, which is what an application form wants (and what
+      // an autofill extension will need). 'context' would have given each
+      // fill a fresh incognito-style context that remembers nothing.
+      isolation: 'profile',
+      profile: FILL_PROFILE,
       // Headful: the tab exists to be handed to a person, who finishes the
       // application in a real window — on the host's screen or through the
       // live view. OpenTab locks a profile to one mode at a time, so a

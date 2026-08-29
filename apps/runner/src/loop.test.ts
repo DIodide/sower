@@ -84,7 +84,9 @@ describe('runTick', () => {
     deps.fill.mockResolvedValueOnce(report);
     expect(await runTick(deps)).toBe(true);
     expect(deps.opentab.createSession).toHaveBeenCalledWith({
-      isolation: 'context',
+      // Its own persistent profile, so logins survive between fills.
+      isolation: 'profile',
+      profile: 'sower',
       // A person finishes this application, so the tab is a real window.
       headless: false,
       url: payload.applyUrl,
