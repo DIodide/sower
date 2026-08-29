@@ -3,7 +3,7 @@ import type { Page } from 'playwright-core';
 import { describe, expect, it } from 'vitest';
 import type { FillAction } from './greenhouse-fill.js';
 import {
-  isTransientDomError,
+  isRetryableFailure,
   looseLabelKey,
   markAbsentFormOnly,
   normalizeLabel,
@@ -282,21 +282,32 @@ describe('looseLabelKey', () => {
   });
 });
 
-describe('isTransientDomError', () => {
+describe('isRetryableFailure', () => {
   it('recognises a re-render that killed the action', () => {
     expect(
-      isTransientDomError(
+      isRetryableFailure(
         new Error('locator.evaluateAll: Execution context was destroyed'),
       ),
     ).toBe(true);
     expect(
-      isTransientDomError(new Error('Element is not attached to the DOM')),
+      isRetryableFailure(new Error('Element is not attached to the DOM')),
+    ).toBe(true);
+  });
+
+  it('recognises an action that could not land in time', () => {
+    // A few-pixel-wide combobox input, clicked while something was still
+    // animating over it.
+    expect(
+      isRetryableFailure(new Error('locator.click: Timeout 10000ms exceeded.')),
     ).toBe(true);
   });
 
   it('leaves a real miss alone', () => {
     expect(
-      isTransientDomError(new Error('no form control labeled "race"')),
+      isRetryableFailure(new Error('no form control labeled "race"')),
+    ).toBe(false);
+    expect(
+      isRetryableFailure(new Error("option list did not show 'Princeton'")),
     ).toBe(false);
   });
 });

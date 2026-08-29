@@ -217,7 +217,7 @@ export async function executeFill(
     } catch (error) {
       failure = error;
     }
-    if (failure !== null && isTransientDomError(failure)) {
+    if (failure !== null && isRetryableFailure(failure)) {
       // The board re-rendered under this action. Let it settle and take
       // one more pass before calling the question failed.
       failure = null;
@@ -330,13 +330,19 @@ async function retryRevealedQuestions(
   }
 }
 
-/** Errors that mean 'the DOM moved under us', not 'the field is missing'. */
-const TRANSIENT_DOM_ERROR =
-  /execution context was destroyed|not attached to the dom|node is detached|frame was detached|element is not attached/i;
+/**
+ * Failures that say the page moved under us, or that an action could not
+ * land right then — never that the field is missing or the value wrong. A
+ * combobox's real target is the few pixels of sizing input react-select
+ * keeps in its value container, so a menu still closing over it, or a
+ * scroll still settling, is enough to time an otherwise fine click out.
+ */
+const RETRYABLE_FAILURE =
+  /execution context was destroyed|not attached to the dom|node is detached|frame was detached|element is not attached|timeout \d+ms exceeded/i;
 
-export function isTransientDomError(error: unknown): boolean {
+export function isRetryableFailure(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return TRANSIENT_DOM_ERROR.test(message);
+  return RETRYABLE_FAILURE.test(message);
 }
 
 /**
@@ -675,7 +681,14 @@ async function pickComboboxOption(
 ): Promise<void> {
   const wanted = selection.optionLabel ?? selection.value;
   const target = normalizeLabel(wanted);
-  await control.click({ timeout: ACTION_TIMEOUT_MS });
+  // Open the menu by clicking the control a person would click. The input
+  // itself can be a few pixels wide (react-select sizes it to its text),
+  // which anything mid-animation is wide enough to intercept.
+  const shell = control
+    .locator('xpath=ancestor::*[contains(@class,"select__control")][1]')
+    .first();
+  const opener = (await shell.count()) > 0 ? shell : control;
+  await opener.click({ timeout: ACTION_TIMEOUT_MS });
   const isInput =
     (await control.evaluate((el) => el.tagName.toLowerCase())) === 'input';
   const input = isInput ? control : control.locator('input').first();
