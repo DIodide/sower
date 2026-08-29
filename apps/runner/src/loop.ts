@@ -59,7 +59,11 @@ export async function runTick(deps: TickDeps): Promise<boolean> {
   try {
     session = await deps.opentab.createSession({
       isolation: 'context',
-      headless: true,
+      // Headful: the tab exists to be handed to a person, who finishes the
+      // application in a real window — on the host's screen or through the
+      // live view. OpenTab locks a profile to one mode at a time, so a
+      // headless instance holding this profile must be stopped first.
+      headless: false,
       url: payload.applyUrl,
       ttl: deps.ttlSeconds ?? DEFAULT_TTL_SECONDS,
     });

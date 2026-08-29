@@ -85,7 +85,8 @@ describe('runTick', () => {
     expect(await runTick(deps)).toBe(true);
     expect(deps.opentab.createSession).toHaveBeenCalledWith({
       isolation: 'context',
-      headless: true,
+      // A person finishes this application, so the tab is a real window.
+      headless: false,
       url: payload.applyUrl,
       ttl: 4 * 3600,
     });
