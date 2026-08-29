@@ -158,6 +158,11 @@ const DEFAULT_READY_TIMEOUT_MS = 30_000;
 const FORM_SETTLE_POLL_MS = 300;
 /** Pause before the single retry of an action lost to a re-render. */
 const TRANSIENT_RETRY_PAUSE_MS = 750;
+/** How long a typeahead gets to answer its own search before giving up. */
+const OPTION_WAIT_MS = 6_000;
+const OPTION_POLL_MS = 150;
+/** A menu row that is the widget talking about itself, not an answer. */
+const PLACEHOLDER_OPTION = /^(loading|searching|no options|no results)/;
 
 /** A question control is never a checkbox/radio — those are option inputs. */
 const QUESTION_CONTROL_SELECTOR =
@@ -648,8 +653,13 @@ async function pickComboboxOption(
       timeout: ACTION_TIMEOUT_MS,
     });
   }
-  await page.waitForTimeout(Math.max(settleMs, 250));
-  const list = await resolveOptionList(page, input, control, container);
+  const list = await waitForOptionList(
+    page,
+    input,
+    control,
+    container,
+    Math.max(settleMs, OPTION_WAIT_MS),
+  );
   if (list !== null) {
     const options = list.locator('[role="option"]');
     const total = await options.count();
@@ -666,6 +676,39 @@ async function pickComboboxOption(
     }
   }
   throw new Error(`option list did not show '${wanted}'`);
+}
+
+/**
+ * Greenhouse's school, degree, and discipline pickers answer a typed
+ * search over the network, so the menu is empty or still saying 'Loading'
+ * for a moment after the keystrokes land. Wait for a row that is an
+ * actual answer before reading the list.
+ */
+async function waitForOptionList(
+  page: Page,
+  input: Locator,
+  control: Locator,
+  container: Locator,
+  timeoutMs: number,
+): Promise<Locator | null> {
+  const deadline = Date.now() + timeoutMs;
+  let list = await resolveOptionList(page, input, control, container);
+  while (Date.now() < deadline) {
+    if (list !== null) {
+      const options = list.locator('[role="option"]');
+      if ((await options.count()) > 0) {
+        const first = normalizeLabel(
+          (await options.first().textContent()) ?? '',
+        );
+        if (!PLACEHOLDER_OPTION.test(first)) {
+          return list;
+        }
+      }
+    }
+    await page.waitForTimeout(OPTION_POLL_MS);
+    list = await resolveOptionList(page, input, control, container);
+  }
+  return list;
 }
 
 /**
