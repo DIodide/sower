@@ -1,4 +1,4 @@
-import { events, fillJobs } from '@sower/db';
+import { applicationTasks, events, fillJobs } from '@sower/db';
 import { describe, expect, it } from 'vitest';
 import type { Config } from './config.js';
 import { buildServer } from './server.js';
@@ -194,6 +194,14 @@ function taskJoin(state = 'NEEDS_INPUT', platform = 'greenhouse') {
   ];
 }
 
+/**
+ * The reads POST /tasks/:id/fill performs before it looks for an open job:
+ * the resolution refresh pulls the profile, the answer bank and the stored
+ * documents. Empty here, so the recompute resolves nothing and the refresh
+ * discards it rather than overwriting RESOLUTION — see the guard test.
+ */
+const REFRESH_READS: unknown[][] = [[], [], []];
+
 /** A fill_jobs row as the db returns it. */
 function fillJobRow(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -286,7 +294,10 @@ describe('POST /tasks/:id/fill', () => {
     const writes: DbWrite[] = [];
     const app = buildServer(
       createDeps(
-        createFakeDb({ selectResults: [taskJoin('REVIEW'), [active]], writes }),
+        createFakeDb({
+          selectResults: [taskJoin('REVIEW'), ...REFRESH_READS, [active]],
+          writes,
+        }),
       ),
     );
     const response = await app.inject({
@@ -309,7 +320,11 @@ describe('POST /tasks/:id/fill', () => {
       heartbeatAt: new Date(Date.now() - 60_000),
     });
     const app = buildServer(
-      createDeps(createFakeDb({ selectResults: [taskJoin(), [active]] })),
+      createDeps(
+        createFakeDb({
+          selectResults: [taskJoin(), ...REFRESH_READS, [active]],
+        }),
+      ),
     );
     const response = await app.inject({
       method: 'POST',
@@ -319,6 +334,37 @@ describe('POST /tasks/:id/fill', () => {
     expect(response.statusCode).toBe(409);
     expect(response.json().job).toMatchObject({ id: FILL_ID });
     await app.close();
+  });
+
+  it('never lets a degraded recompute overwrite the stored resolution', async () => {
+    // A fill refreshes the task's resolution first, so an answer saved since
+    // the last pipeline run reaches the form. But an unreadable profile
+    // resolves as the EMPTY profile instead of throwing, and persisting that
+    // would wipe good answers off the task — a snapshot that answers fewer
+    // questions than the stored one is discarded.
+    const inserted = fillJobRow({ id: 'ffffffff-0000-4000-8000-000000000003' });
+    const writes: DbWrite[] = [];
+    const app = buildServer(
+      createDeps(
+        createFakeDb({
+          selectResults: [taskJoin(), ...REFRESH_READS, []],
+          insertResults: [[inserted], []],
+          writes,
+        }),
+      ),
+    );
+    const response = await app.inject({
+      method: 'POST',
+      url: `/tasks/${TASK_ID}/fill`,
+      headers: AUTH,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(
+      writes.some(
+        (write) =>
+          write.method === 'update' && write.table === applicationTasks,
+      ),
+    ).toBe(false);
   });
 
   it('inserts a job + FILL_REQUESTED event despite a stale claimed job', async () => {
@@ -334,7 +380,7 @@ describe('POST /tasks/:id/fill', () => {
     const app = buildServer(
       createDeps(
         createFakeDb({
-          selectResults: [taskJoin(), [stale]],
+          selectResults: [taskJoin(), ...REFRESH_READS, [stale]],
           insertResults: [[inserted], []],
           writes,
         }),

@@ -15,8 +15,9 @@ import {
   jobs,
 } from '@sower/db';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { computeResolution } from './process.js';
 import {
   buildQuestions,
   type DocumentInfo,
@@ -240,6 +241,63 @@ async function buildClaimPayload(deps: Deps, taskId: string) {
   };
 }
 
+/**
+ * Bring the task's stored resolution up to date with the answer bank before
+ * a fill reads it.
+ *
+ * The stored resolution is a snapshot from the task's last pipeline run, and
+ * the bank moves on without it: an answer saved since then — or one that now
+ * supersedes a curated decline, which is how "Gender" kept typing "Decline
+ * To Self Identify" for someone who had answered it — is invisible to a fill
+ * that trusts the snapshot. Recomputing with the SAME resolver the pipeline
+ * uses keeps the dashboard and the fill agreeing on what is about to be
+ * typed, without re-running discovery (which can fail a task whose posting
+ * has since gone).
+ *
+ * A recompute is never allowed to make the task worse. An unreadable profile
+ * resolves as the EMPTY profile rather than throwing, so a degraded run would
+ * quietly wipe good answers off the task; a snapshot that resolves fewer
+ * questions than the stored one is discarded instead.
+ */
+async function refreshResolution(
+  deps: Deps,
+  log: FastifyBaseLogger,
+  row: {
+    task: typeof applicationTasks.$inferSelect;
+    job: typeof jobs.$inferSelect;
+  },
+): Promise<void> {
+  const spec = row.task.jobSpec;
+  if (!spec) {
+    return;
+  }
+  try {
+    const fresh = await computeResolution(deps, row.job, spec);
+    const stored = row.task.resolution;
+    if (stored !== null && fresh.resolved.length < stored.resolved.length) {
+      log.warn(
+        {
+          taskId: row.task.id,
+          freshResolved: fresh.resolved.length,
+          storedResolved: stored.resolved.length,
+        },
+        'fill: recomputed resolution answers fewer questions than the stored one — keeping the stored one',
+      );
+      return;
+    }
+    await deps.db
+      .update(applicationTasks)
+      .set({ resolution: fresh, updatedAt: new Date() })
+      .where(eq(applicationTasks.id, row.task.id));
+    row.task.resolution = fresh;
+  } catch (error) {
+    log.warn(
+      { err: error, taskId: row.task.id },
+      'fill: could not refresh the resolution — falling back to the stored one',
+    );
+  }
+}
+
 export function registerFillJobRoutes(app: FastifyInstance, deps: Deps): void {
   // Dashboard: request a browser fill for a greenhouse task the human is
   // working on (NEEDS_INPUT/REVIEW). One active job per task — a second
@@ -274,6 +332,7 @@ export function registerFillJobRoutes(app: FastifyInstance, deps: Deps): void {
         .code(409)
         .send({ error: `cannot fill a task in state '${row.task.state}'` });
     }
+    await refreshResolution(deps, request.log, row);
     const now = new Date();
     const openJobs = await deps.db
       .select()
