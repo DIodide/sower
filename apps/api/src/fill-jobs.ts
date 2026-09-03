@@ -1,6 +1,7 @@
 import type { BankEntry, BankValue } from '@sower/answers';
 import type {
   JobSpec,
+  Platform,
   Question,
   ResolutionResult,
   TaskState,
@@ -14,6 +15,7 @@ import {
   fillJobs,
   jobs,
 } from '@sower/db';
+import { getAdapter } from '@sower/platforms';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
 import { z } from 'zod';
@@ -302,6 +304,85 @@ async function buildClaimPayload(deps: Deps, taskId: string) {
 }
 
 /**
+ * Questions the board asks today that the stored spec does not know about:
+ * the ones the adapter has since learned to synthesize (country, the
+ * education block, the Hispanic/Latino gate) and any the employer added
+ * after the task was discovered. Existing questions are never touched —
+ * the investigator may have enriched them — so this only ever grows the
+ * spec. Pure, so the merge rule is testable without an adapter.
+ */
+export function mergeDiscoveredQuestions(
+  stored: JobSpec,
+  fresh: JobSpec,
+): JobSpec | null {
+  const known = new Set(stored.questions.map((question) => question.id));
+  const added = fresh.questions.filter((question) => !known.has(question.id));
+  if (added.length === 0) {
+    return null;
+  }
+  return { ...stored, questions: [...stored.questions, ...added] };
+}
+
+/**
+ * Re-discover the posting and fold in any question the stored spec lacks,
+ * before a fill reads it. A task discovered before the adapter learned to
+ * synthesize a question keeps filling without it forever otherwise — the
+ * resolution refresh below can only answer questions the spec has.
+ *
+ * Failure is not a task failure: a posting that has gone quiet since
+ * (which is exactly what requeueing such a task turns into FAILED) just
+ * fills from the spec it has.
+ */
+async function refreshSpecQuestions(
+  deps: Deps,
+  log: FastifyBaseLogger,
+  row: {
+    task: typeof applicationTasks.$inferSelect;
+    job: typeof jobs.$inferSelect;
+  },
+): Promise<void> {
+  const spec = row.task.jobSpec;
+  if (!spec || !spec.tenant || !spec.externalId) {
+    return;
+  }
+  try {
+    const adapter = getAdapter(row.job.platform as Platform);
+    if (!adapter) {
+      return;
+    }
+    const fresh = await adapter.discover(
+      {
+        platform: row.job.platform as Platform,
+        tenant: spec.tenant,
+        externalId: spec.externalId,
+      },
+      row.job.url,
+    );
+    const merged = mergeDiscoveredQuestions(spec, fresh);
+    if (merged === null) {
+      return;
+    }
+    await deps.db
+      .update(applicationTasks)
+      .set({ jobSpec: merged, updatedAt: new Date() })
+      .where(eq(applicationTasks.id, row.task.id));
+    row.task.jobSpec = merged;
+    log.info(
+      {
+        taskId: row.task.id,
+        added: merged.questions.length - spec.questions.length,
+      },
+      'fill: folded newly discovered questions into the spec',
+    );
+  } catch (error) {
+    log.warn(
+      { err: error, taskId: row.task.id },
+      'fill: could not re-discover the posting — filling from the stored spec',
+    );
+  }
+}
+
+/**
  * Bring the task's stored resolution up to date with the answer bank before
  * a fill reads it.
  *
@@ -392,6 +473,7 @@ export function registerFillJobRoutes(app: FastifyInstance, deps: Deps): void {
         .code(409)
         .send({ error: `cannot fill a task in state '${row.task.state}'` });
     }
+    await refreshSpecQuestions(deps, request.log, row);
     await refreshResolution(deps, request.log, row);
     const now = new Date();
     const openJobs = await deps.db

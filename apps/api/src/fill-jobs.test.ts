@@ -1,8 +1,24 @@
 import type { JobSpec } from '@sower/core';
 import { applicationTasks, events, fillJobs } from '@sower/db';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+// The fill request re-discovers the posting to fold in questions the stored
+// spec lacks. Unit tests must never reach the board api: the stub returns
+// the stored spec unchanged (no new questions), so the route's DB queue
+// stays exactly what each test lays out.
+vi.mock('@sower/platforms', () => ({
+  detectPlatform: () => ({
+    platform: 'unknown',
+    tenant: null,
+    externalId: null,
+  }),
+  getAdapter: () => ({
+    discover: async () => SPEC,
+  }),
+}));
+
 import type { Config } from './config.js';
-import { fillTargetUrl } from './fill-jobs.js';
+import { fillTargetUrl, mergeDiscoveredQuestions } from './fill-jobs.js';
 import { buildServer } from './server.js';
 import type { Deps } from './types.js';
 
@@ -986,5 +1002,43 @@ describe('fillTargetUrl', () => {
     expect(fillTargetUrl(anonymous, url)).toBe(url);
     expect(fillTargetUrl(null, url)).toBe(url);
     expect(fillTargetUrl(spec, 'not a url')).toBe('not a url');
+  });
+});
+
+describe('mergeDiscoveredQuestions', () => {
+  const stored = { ...SPEC, tenant: 'acme', externalId: '1' } as JobSpec;
+
+  it('appends questions the stored spec lacks and keeps every existing one', () => {
+    const fresh = {
+      ...stored,
+      questions: [
+        { ...stored.questions[0], label: 'RENAMED — must not win' },
+        {
+          id: 'country',
+          label: 'Country',
+          type: 'text',
+          required: false,
+          formOnly: true,
+        },
+        {
+          id: 'hispanic_ethnicity',
+          label: 'Are you Hispanic/Latino?',
+          type: 'text',
+          required: false,
+          formOnly: true,
+        },
+      ],
+    } as JobSpec;
+    const merged = mergeDiscoveredQuestions(stored, fresh);
+    expect(merged?.questions.slice(0, stored.questions.length)).toEqual(
+      stored.questions,
+    );
+    expect(
+      merged?.questions.slice(stored.questions.length).map((q) => q.id),
+    ).toEqual(['country', 'hispanic_ethnicity']);
+  });
+
+  it('reports nothing to do when the board asks nothing new', () => {
+    expect(mergeDiscoveredQuestions(stored, stored)).toBeNull();
   });
 });
