@@ -409,6 +409,25 @@ describe('pickOptionIndex', () => {
   it('ignores empty option text', () => {
     expect(pickOptionIndex(['', 'princeton university'], 'princeton')).toBe(1);
   });
+
+  it('takes a ranked search’s top suggestion when it begins with the typed city', () => {
+    const places = [
+      'lowell, massachusetts, united states',
+      'lowell, maine, united states',
+      'south lowell, massachusetts, united states',
+    ];
+    expect(pickOptionIndex(places, 'lowell, ma', { topSuggestion: true })).toBe(
+      0,
+    );
+    // Not for an ordinary list: a degree menu is alphabetical, not ranked.
+    expect(pickOptionIndex(places, 'lowell, ma')).toBe(-1);
+    // And not when the search found something else entirely.
+    expect(
+      pickOptionIndex(['boston, massachusetts, united states'], 'lowell, ma', {
+        topSuggestion: true,
+      }),
+    ).toBe(-1);
+  });
 });
 
 describe('markAbsentFormOnly', () => {

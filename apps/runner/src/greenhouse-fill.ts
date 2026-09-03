@@ -733,6 +733,8 @@ async function fillOne(
         container,
         { value: action.value, optionLabel: null },
         settleMs,
+        // The board's location field is a ranked places search.
+        { topSuggestion: action.questionId === 'location' },
       );
       return;
     }
@@ -792,6 +794,7 @@ async function pickComboboxOption(
   container: Locator,
   selection: PlannedSelection,
   settleMs: number,
+  pick: { topSuggestion?: boolean } = {},
 ): Promise<void> {
   const wanted = selection.optionLabel ?? selection.value;
   const target = normalizeLabel(wanted);
@@ -828,7 +831,7 @@ async function pickComboboxOption(
         normalizeLabel((await options.nth(index).textContent()) ?? ''),
       );
     }
-    const index = pickOptionIndex(texts, target);
+    const index = pickOptionIndex(texts, target, pick);
     if (index >= 0) {
       await options.nth(index).click({ timeout: ACTION_TIMEOUT_MS });
       return;
@@ -876,7 +879,11 @@ async function waitForOptionList(
  * widget's own answer to it ('bachelors' -> "bachelor's degree"). A tie is
  * left alone — better a reported miss than a wrong degree.
  */
-export function pickOptionIndex(texts: string[], target: string): number {
+export function pickOptionIndex(
+  texts: string[],
+  target: string,
+  options: { topSuggestion?: boolean } = {},
+): number {
   const exact = texts.indexOf(target);
   if (exact >= 0) {
     return exact;
@@ -884,7 +891,22 @@ export function pickOptionIndex(texts: string[], target: string): number {
   const matches = texts.filter(
     (text) => text !== '' && (text.includes(target) || target.includes(text)),
   );
-  return matches.length === 1 ? texts.indexOf(matches[0] as string) : -1;
+  if (matches.length === 1) {
+    return texts.indexOf(matches[0] as string);
+  }
+  // A places search ranks its answers, and never spells a city the way a
+  // profile does ("Lowell, MA" vs "Lowell, Massachusetts, United States").
+  // For a control like that, the top suggestion is the answer — provided
+  // it begins with the city that was typed, so a search that found
+  // nothing relevant still fails rather than filling the wrong place.
+  if (options.topSuggestion === true) {
+    const city = (target.split(',')[0] ?? '').trim();
+    const top = texts[0] ?? '';
+    if (city !== '' && top.startsWith(city)) {
+      return 0;
+    }
+  }
+  return -1;
 }
 
 /**
