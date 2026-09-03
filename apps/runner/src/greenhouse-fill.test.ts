@@ -3,6 +3,7 @@ import type { Page } from 'playwright-core';
 import { describe, expect, it } from 'vitest';
 import type { FillAction } from './greenhouse-fill.js';
 import {
+  controlIdCandidates,
   isRetryableFailure,
   looseLabelKey,
   markAbsentFormOnly,
@@ -312,12 +313,17 @@ describe('isRetryableFailure', () => {
     ).toBe(true);
   });
 
+  it('gives an async menu that showed nothing one more try', () => {
+    // Discipline's search answered "Computer Science" a moment after the
+    // first look; a second pass after the settle is cheap.
+    expect(
+      isRetryableFailure(new Error("option list did not show 'Princeton'")),
+    ).toBe(true);
+  });
+
   it('leaves a real miss alone', () => {
     expect(
       isRetryableFailure(new Error('no form control labeled "race"')),
-    ).toBe(false);
-    expect(
-      isRetryableFailure(new Error("option list did not show 'Princeton'")),
     ).toBe(false);
   });
 });
@@ -527,5 +533,20 @@ describe('planFill file questions', () => {
       kind: 'skip',
       detail: 'attach manually in the live view',
     });
+  });
+});
+
+describe('controlIdCandidates', () => {
+  it("tries the board's own id for a renamed field after the payload's", () => {
+    // The api's `location` question is the "Location (City)" typeahead the
+    // board renders as #candidate-location.
+    expect(controlIdCandidates('location')).toEqual([
+      'location',
+      'candidate-location',
+    ]);
+  });
+
+  it('is just the id itself for everything else', () => {
+    expect(controlIdCandidates('first_name')).toEqual(['first_name']);
   });
 });

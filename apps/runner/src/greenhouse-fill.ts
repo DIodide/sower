@@ -389,7 +389,7 @@ export function summarizeFailure(error: unknown, max = 600): string {
  * scroll still settling, is enough to time an otherwise fine click out.
  */
 const RETRYABLE_FAILURE =
-  /execution context was destroyed|not attached to the dom|node is detached|frame was detached|element is not attached|timeout \d+ms exceeded/i;
+  /execution context was destroyed|not attached to the dom|node is detached|frame was detached|element is not attached|timeout \d+ms exceeded|option list did not show/i;
 
 export function isRetryableFailure(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -542,10 +542,25 @@ async function locateQuestionControl(
 }
 
 /**
+ * The few API field names the board renders under an id of its own. The
+ * payload's `location` question is the "Location (City)" places typeahead
+ * with id candidate-location — neither the id nor the label matches.
+ */
+const CONTROL_ID_ALIASES: Readonly<Record<string, readonly string[]>> = {
+  location: ['candidate-location'],
+};
+
+/** Every id a question's control might carry, the payload's own first. */
+export function controlIdCandidates(questionId: string): string[] {
+  return [questionId, ...(CONTROL_ID_ALIASES[questionId] ?? [])];
+}
+
+/**
  * The control whose id the payload question carries, found through its
  * own label so the question container (and with it any dropdown menu)
  * stays the one the label path would have used. Null when the board does
- * not use that id, which puts the lookup back on label text.
+ * not use that id (or an alias of it), which puts the lookup back on
+ * label text.
  */
 async function locateByQuestionId(
   page: Page,
@@ -555,11 +570,13 @@ async function locateByQuestionId(
   if (questionId === '') {
     return null;
   }
-  const label = scope.locator(`label[for="${questionId}"]`).first();
-  if ((await label.count()) === 0) {
-    return null;
+  for (const id of controlIdCandidates(questionId)) {
+    const label = scope.locator(`label[for="${id}"]`).first();
+    if ((await label.count()) > 0) {
+      return await locateQuestionControl(page, label, id);
+    }
   }
-  return await locateQuestionControl(page, label, questionId);
+  return null;
 }
 
 /**
