@@ -31,6 +31,15 @@ export interface FillQuestion {
    * picker). A posting that does not render the control is a skip.
    */
   formOnly?: boolean;
+  /** File questions: the stored document to upload, when one is attached. */
+  document?: { id: string; filename: string };
+}
+
+/** A document's bytes as the api serves them. */
+export interface DocumentContent {
+  filename: string;
+  mimeType: string;
+  bytes: Buffer;
 }
 
 export interface ClaimedFillJob {
@@ -72,6 +81,8 @@ export interface SowerClient {
   report(jobId: string, body: FillReportBody): Promise<void>;
   fail(jobId: string, error: string): Promise<void>;
   heartbeat(jobId: string): Promise<void>;
+  /** GET /documents/:id/content — the bytes a file question uploads. */
+  document(id: string): Promise<DocumentContent>;
 }
 
 export interface SowerClientDeps {
@@ -137,6 +148,27 @@ export function makeSowerClient(deps: SowerClientDeps): SowerClient {
     },
     async heartbeat(jobId) {
       await post(deps, `/fill-jobs/${jobId}/heartbeat`);
+    },
+    async document(id) {
+      const response = await deps.fetch(
+        `${deps.base}/documents/${encodeURIComponent(id)}/content`,
+        { headers: { 'x-api-key': deps.token } },
+      );
+      if (!response.ok) {
+        throw new Error(`/documents/${id}/content: HTTP ${response.status}`);
+      }
+      const disposition = response.headers.get('content-disposition') ?? '';
+      const starred = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+      const plain = /filename="([^"]*)"/i.exec(disposition);
+      const filename = starred
+        ? decodeURIComponent(starred[1] ?? '')
+        : (plain?.[1] ?? 'document');
+      return {
+        filename: filename || 'document',
+        mimeType:
+          response.headers.get('content-type') ?? 'application/octet-stream',
+        bytes: Buffer.from(await response.arrayBuffer()),
+      };
     },
   };
 }

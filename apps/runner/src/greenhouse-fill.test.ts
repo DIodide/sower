@@ -501,3 +501,31 @@ describe('summarizeFailure', () => {
     expect(summary).toContain('intercepts pointer events');
   });
 });
+
+describe('planFill file questions', () => {
+  it('uploads the attached document', () => {
+    const [action] = planFill([
+      question({
+        id: 'resume',
+        label: 'Resume/CV',
+        type: 'file',
+        document: { id: 'doc-1', filename: 'Ibraheem_Amin_Resume.pdf' },
+      }),
+    ]);
+    expect(action).toMatchObject({
+      kind: 'file',
+      questionId: 'resume',
+      document: { id: 'doc-1', filename: 'Ibraheem_Amin_Resume.pdf' },
+    });
+  });
+
+  it('leaves an unattached file question to the live view', () => {
+    const [action] = planFill([
+      question({ id: 'cover_letter', label: 'Cover Letter', type: 'file' }),
+    ]);
+    expect(action).toMatchObject({
+      kind: 'skip',
+      detail: 'attach manually in the live view',
+    });
+  });
+});

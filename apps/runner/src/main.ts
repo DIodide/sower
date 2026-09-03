@@ -2,7 +2,9 @@ import { readFileSync } from 'node:fs';
 import { fillSessionOverCdp } from './browser.js';
 import { resolveOpenTabConfig, resolveSowerConfig } from './config.js';
 import { runTick } from './loop.js';
+import type { OpenTabSession } from './opentab-client.js';
 import { makeOpenTabClient } from './opentab-client.js';
+import type { FillPayload } from './sower-client.js';
 import { makeSowerClient } from './sower-client.js';
 
 /**
@@ -39,18 +41,21 @@ async function main(): Promise<void> {
   }
   const pollSeconds =
     Number(process.env.POLL_SECONDS ?? '') || DEFAULT_POLL_SECONDS;
+  const sower = makeSowerClient({
+    base: sowerConfig.base,
+    token: sowerConfig.token,
+    fetch,
+  });
   const deps = {
-    sower: makeSowerClient({
-      base: sowerConfig.base,
-      token: sowerConfig.token,
-      fetch,
-    }),
+    sower,
     opentab: makeOpenTabClient({
       base: opentabConfig.base,
       token: opentabConfig.token,
       fetch,
     }),
-    fill: fillSessionOverCdp,
+    // File questions upload the stored document; its bytes come from the api.
+    fill: (session: OpenTabSession, payload: FillPayload) =>
+      fillSessionOverCdp(session, payload, sower),
     log,
     // Scrubbed from every outbound string (fail errors, report details, logs).
     secrets: [opentabConfig.token, sowerConfig.token],

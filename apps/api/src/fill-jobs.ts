@@ -103,6 +103,12 @@ export interface FillQuestion {
   values: string[] | null;
   /** Synthesized from a form-level signal: absent on a posting = skip. */
   formOnly?: boolean;
+  /**
+   * File questions: the stored document to put in the form's file input,
+   * fetched by the runner from GET /documents/:id/content. Absent when no
+   * document is attached — the human attaches one in the live view.
+   */
+  document?: { id: string; filename: string };
 }
 
 /**
@@ -138,9 +144,27 @@ export function buildFillQuestions(
     filenameByPath,
     savedContext,
   );
+  const docById = new Map(
+    [...savedContext.docByPath.values()].map((doc) => [doc.id, doc]),
+  );
   return spec.questions.map((question, i) => {
     const summary = summaries[i];
     let values: string[] | null = null;
+    // A file question's answer is a document, not a value: the resolution
+    // holds its storagePath, a bank pick its document id.
+    let document: { id: string; filename: string } | undefined;
+    if (question.type === 'file' && summary !== undefined) {
+      const raw = rawById.get(question.id);
+      const doc =
+        summary.status === 'resolved' && typeof raw === 'string'
+          ? savedContext.docByPath.get(raw)
+          : summary.status === 'saved' && summary.savedDocId !== undefined
+            ? docById.get(summary.savedDocId)
+            : undefined;
+      if (doc) {
+        document = { id: doc.id, filename: doc.filename };
+      }
+    }
     if (question.type !== 'file' && summary !== undefined) {
       if (summary.status === 'resolved') {
         const raw = rawById.get(question.id);
@@ -171,6 +195,9 @@ export function buildFillQuestions(
     };
     if (question.formOnly === true) {
       fill.formOnly = true;
+    }
+    if (document !== undefined) {
+      fill.document = document;
     }
     return fill;
   });
@@ -232,7 +259,8 @@ async function buildClaimPayload(deps: Deps, taskId: string) {
       filename: documents.filename,
       storagePath: documents.storagePath,
     })
-    .from(documents);
+    .from(documents)
+    .orderBy(desc(documents.createdAt));
   const bankRows = await deps.db
     .select({
       normalizedLabel: answers.normalizedLabel,

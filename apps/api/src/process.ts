@@ -613,7 +613,10 @@ export async function computeResolution(
       storagePath: documents.storagePath,
       filename: documents.filename,
     })
-    .from(documents);
+    .from(documents)
+    // Newest first: the resolver takes the first document of a kind, and
+    // a resume re-uploaded or recompiled since must beat the original.
+    .orderBy(desc(documents.createdAt));
   const companyKey = (job.company ?? jobSpec.company ?? '')
     .toLowerCase()
     .trim();

@@ -18,7 +18,8 @@ import type {
  */
 
 export interface TickDeps {
-  sower: SowerClient;
+  /** The tick claims, reports and heartbeats; document bytes are the fill's concern. */
+  sower: Pick<SowerClient, 'claim' | 'report' | 'fail' | 'heartbeat'>;
   opentab: OpenTabClient;
   fill(
     session: OpenTabSession,

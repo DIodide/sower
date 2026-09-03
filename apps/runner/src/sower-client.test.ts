@@ -124,3 +124,47 @@ describe('makeSowerClient', () => {
     );
   });
 });
+
+describe('document', () => {
+  it('fetches the bytes with the filename from content-disposition', async () => {
+    const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]); // %PDF
+    const calls: string[] = [];
+    const client = makeSowerClient({
+      base: 'https://api.example',
+      token: 'k',
+      fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+        calls.push(String(input));
+        const headers = (init?.headers ?? {}) as Record<string, string>;
+        expect(headers['x-api-key']).toBe('k');
+        return new Response(bytes, {
+          status: 200,
+          headers: {
+            'content-type': 'application/pdf',
+            'content-disposition': `attachment; filename="Transcript.pdf"; filename*=UTF-8''Transcript%20IBRAHEEM.pdf`,
+          },
+        });
+      }) as typeof fetch,
+    });
+    const doc = await client.document('11111111-2222-4333-8444-555555555555');
+    expect(calls).toEqual([
+      'https://api.example/documents/11111111-2222-4333-8444-555555555555/content',
+    ]);
+    expect(doc.filename).toBe('Transcript IBRAHEEM.pdf');
+    expect(doc.mimeType).toBe('application/pdf');
+    expect([...doc.bytes]).toEqual([0x25, 0x50, 0x44, 0x46]);
+  });
+
+  it('surfaces a missing document as an error, not empty bytes', async () => {
+    const client = makeSowerClient({
+      base: 'https://api.example',
+      token: 'k',
+      fetch: (async () =>
+        new Response('{"error":"document not found"}', {
+          status: 404,
+        })) as typeof fetch,
+    });
+    await expect(
+      client.document('11111111-2222-4333-8444-555555555555'),
+    ).rejects.toThrow(/HTTP 404/);
+  });
+});

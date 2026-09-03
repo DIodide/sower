@@ -1,8 +1,17 @@
 import type { Browser, Page } from 'playwright-core';
 import { chromium } from 'playwright-core';
-import { executeFill, planFill } from './greenhouse-fill.js';
+import {
+  executeFill,
+  type FillAction,
+  planFill,
+  type UploadFile,
+} from './greenhouse-fill.js';
 import type { OpenTabSession } from './opentab-client.js';
-import type { FillPayload, FillReportItem } from './sower-client.js';
+import type {
+  DocumentContent,
+  FillPayload,
+  FillReportItem,
+} from './sower-client.js';
 
 /**
  * The playwright side of a fill: connect to the OpenTab instance over its
@@ -70,15 +79,57 @@ export async function findSessionPage(
   }
 }
 
+/** Where a file question's bytes come from — the sower api, in production. */
+export interface DocumentSource {
+  document(id: string): Promise<DocumentContent>;
+}
+
+/**
+ * Fetch every document the plan uploads before touching the page, so a
+ * download failure is a per-question outcome ('failed', with the reason)
+ * rather than a stall mid-form.
+ */
+async function downloadFiles(
+  actions: FillAction[],
+  documents: DocumentSource | undefined,
+): Promise<Map<string, UploadFile | { error: string }>> {
+  const files = new Map<string, UploadFile | { error: string }>();
+  for (const action of actions) {
+    if (action.kind !== 'file') {
+      continue;
+    }
+    if (documents === undefined) {
+      files.set(action.questionId, { error: 'no document source configured' });
+      continue;
+    }
+    try {
+      const content = await documents.document(action.document.id);
+      files.set(action.questionId, {
+        name: content.filename,
+        mimeType: content.mimeType,
+        buffer: content.bytes,
+      });
+    } catch (error) {
+      files.set(action.questionId, {
+        error: `document download failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  }
+  return files;
+}
+
 export async function fillSessionOverCdp(
   session: OpenTabSession,
   payload: FillPayload,
+  documents?: DocumentSource,
 ): Promise<FillReportItem[]> {
+  const actions = planFill(payload.questions);
+  const files = await downloadFiles(actions, documents);
   const browser = await chromium.connectOverCDP(session.urls.browser_http);
   try {
     const page = await findSessionPage(browser, session);
     await page.waitForLoadState('domcontentloaded');
-    return await executeFill(page, planFill(payload.questions));
+    return await executeFill(page, actions, { files });
   } finally {
     // Disconnects this CDP client only; the OpenTab session keeps running.
     await browser.close().catch(() => {});

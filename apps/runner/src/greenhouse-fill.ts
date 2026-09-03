@@ -28,6 +28,15 @@ export type FillAction =
       value: string;
     }
   | {
+      kind: 'file';
+      questionId: string;
+      label: string;
+      matchLabel: string;
+      matchIndex: number;
+      formOnly: boolean;
+      document: { id: string; filename: string };
+    }
+  | {
       kind: 'select';
       questionId: string;
       label: string;
@@ -119,6 +128,11 @@ export function planFill(questions: FillQuestion[]): FillAction[] {
       formOnly: question.formOnly === true,
     };
     if (question.type === 'file') {
+      // A stored document goes into the form's file input; with nothing
+      // attached the human picks a file in the live view.
+      if (question.document !== undefined) {
+        return { kind: 'file' as const, ...base, document: question.document };
+      }
       return {
         kind: 'skip' as const,
         ...base,
@@ -149,7 +163,20 @@ export function planFill(questions: FillQuestion[]): FillAction[] {
   });
 }
 
+/** A document's bytes, shaped for Playwright's setInputFiles. */
+export interface UploadFile {
+  name: string;
+  mimeType: string;
+  buffer: Buffer;
+}
+
 export interface ExecuteOptions {
+  /**
+   * Bytes for each file action, keyed by question id — downloaded up front
+   * so a fetch failure is reported per question instead of stalling the
+   * form. An entry with `error` records why the download did not happen.
+   */
+  files?: ReadonlyMap<string, UploadFile | { error: string }>;
   /** Wall-clock budget for the whole form. */
   capMs?: number;
   /** Settle pause after scrolling a control into view. */
@@ -196,6 +223,7 @@ export async function executeFill(
   const capMs = options.capMs ?? DEFAULT_CAP_MS;
   const settleMs = options.settleMs ?? DEFAULT_SETTLE_MS;
   const readyTimeoutMs = options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
+  const files = options.files ?? new Map<string, UploadFile>();
   const deadline = Date.now() + capMs;
   await waitForFormReady(page, readyTimeoutMs);
   const scope = await formScope(page);
@@ -221,7 +249,7 @@ export async function executeFill(
     }
     let failure: unknown = null;
     try {
-      await fillOne(page, scope, action, settleMs);
+      await fillOne(page, scope, action, settleMs, files);
     } catch (error) {
       failure = error;
     }
@@ -232,7 +260,7 @@ export async function executeFill(
       try {
         await page.waitForTimeout(TRANSIENT_RETRY_PAUSE_MS);
         await waitForFormReady(page, readyTimeoutMs);
-        await fillOne(page, scope, action, settleMs);
+        await fillOne(page, scope, action, settleMs, files);
       } catch (error) {
         failure = error;
       }
@@ -260,6 +288,7 @@ export async function executeFill(
     report,
     settleMs,
     deadline,
+    files,
   );
   markAbsentFormOnly(actions, report);
   return report;
@@ -308,6 +337,7 @@ async function retryRevealedQuestions(
   report: FillReportItem[],
   settleMs: number,
   deadline: number,
+  files: ReadonlyMap<string, UploadFile | { error: string }>,
 ): Promise<void> {
   const missing = report.filter(
     (item) =>
@@ -327,7 +357,7 @@ async function retryRevealedQuestions(
       continue;
     }
     try {
-      await fillOne(page, scope, action, settleMs);
+      await fillOne(page, scope, action, settleMs, files);
       item.outcome = 'filled';
       delete item.detail;
     } catch {
@@ -627,6 +657,7 @@ async function fillOne(
   scope: Locator,
   action: Exclude<FillAction, { kind: 'skip' }>,
   settleMs: number,
+  files: ReadonlyMap<string, UploadFile | { error: string }>,
 ): Promise<void> {
   await dismissOpenOverlays(page);
   const { control, container } = await findControl(
@@ -635,12 +666,35 @@ async function fillOne(
     action.questionId,
     action.matchLabel,
     action.matchIndex,
-    action.kind === 'text' ? 'text' : 'options',
+    action.kind === 'select' || action.kind === 'multiselect'
+      ? 'options'
+      : 'text',
   );
   await (control ?? container).scrollIntoViewIfNeeded({
     timeout: ACTION_TIMEOUT_MS,
   });
   await page.waitForTimeout(settleMs);
+  if (action.kind === 'file') {
+    if (control === null) {
+      throw new Error(
+        `"${action.label}" is a checkbox group, not a file input`,
+      );
+    }
+    const file = files.get(action.questionId);
+    if (file === undefined) {
+      throw new Error('document was not downloaded');
+    }
+    if ('error' in file) {
+      throw new Error(file.error);
+    }
+    // The bytes go straight into the input — the same as a person choosing
+    // the file in the picker, and nothing here sends the form.
+    await control.setInputFiles(
+      { name: file.name, mimeType: file.mimeType, buffer: file.buffer },
+      { timeout: ACTION_TIMEOUT_MS },
+    );
+    return;
+  }
   if (action.kind === 'text') {
     if (control === null) {
       throw new Error(

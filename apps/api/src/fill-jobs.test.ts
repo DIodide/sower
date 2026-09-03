@@ -588,6 +588,12 @@ describe('POST /fill-jobs/claim', () => {
         required: true,
         options: [],
         values: null,
+        // The resolution's storagePath, mapped to the library row: what the
+        // runner downloads and puts in the form's file input.
+        document: {
+          id: 'eeeeeeee-0000-4000-8000-000000000001',
+          filename: 'resume-v3.pdf',
+        },
       },
       {
         id: 'q-cover',
