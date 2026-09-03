@@ -1219,7 +1219,10 @@ export default async function TaskPage({
               </Empty>
             ) : (
               <div className="card">
-                {task.state === 'NEEDS_INPUT' ? (
+                {/* REVIEW is still before anything is sent: a document
+                    choice or a rewritten essay is as editable there as in
+                    NEEDS_INPUT, and the fill re-resolves from the bank. */}
+                {task.state === 'NEEDS_INPUT' || task.state === 'REVIEW' ? (
                   <NeedsInputForm
                     taskId={task.id}
                     views={views}
