@@ -55,9 +55,17 @@ export type FillAction =
       detail: string;
     };
 
-/** Trim, collapse whitespace, strip a trailing required marker '*', lowercase. */
+/**
+ * Trim, collapse whitespace, strip a trailing required marker '*', fold
+ * typographic quotes to ASCII, lowercase. The quote folding is what lets a
+ * saved "Bachelor's Degree" pick the option a board renders as
+ * "Bachelor’s Degree" — the typeahead itself treats the two as one, so
+ * the comparison must too.
+ */
 export function normalizeLabel(raw: string): string {
   return raw
+    .replace(/[\u2018\u2019\u201B\u2032`´]/g, "'")
+    .replace(/[\u201C\u201D\u2033]/g, '"')
     .replace(/\s+/g, ' ')
     .trim()
     .replace(/\s*\*$/, '')

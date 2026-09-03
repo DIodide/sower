@@ -35,6 +35,15 @@ function question(overrides: Partial<FillQuestion>): FillQuestion {
 }
 
 describe('normalizeLabel', () => {
+  it("folds a board's curly apostrophe onto the saved straight one", () => {
+    // Stripe's Degree list renders "Bachelor’s Degree"; the bank holds
+    // "Bachelor's Degree". The typeahead already treats them as one.
+    expect(normalizeLabel('Bachelor\u2019s Degree')).toBe(
+      normalizeLabel("Bachelor's Degree"),
+    );
+    expect(normalizeLabel('\u201CQuoted\u201D')).toBe('"quoted"');
+  });
+
   it('trims and collapses whitespace', () => {
     expect(normalizeLabel('  First   Name \n')).toBe('first name');
   });
