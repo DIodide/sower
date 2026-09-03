@@ -37,6 +37,12 @@ describe('staysAnswerable', () => {
     expect(staysAnswerable(question({ type: 'textarea' }))).toBe(true);
   });
 
+  it('keeps a resolved file question editable', () => {
+    // The auto-picked resume is a default; which one goes to this company
+    // is decided here, with the file in view.
+    expect(staysAnswerable(question({ type: 'file' }))).toBe(true);
+  });
+
   it('collapses a resolved repeat fact', () => {
     expect(staysAnswerable(question({ type: 'text' }))).toBe(false);
     expect(staysAnswerable(question({ type: 'select' }))).toBe(false);

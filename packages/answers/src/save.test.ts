@@ -140,8 +140,17 @@ describe('planAnswerWrites', () => {
   });
 
   it('file answers are document ids of the right kind, stored as the storagePath', () => {
+    // A pick is scoped to the company by default — which resume goes to
+    // which employer is decided per application — and global on request.
     const ok = plan([{ questionId: 'q-resume', value: DOC_ID }]);
     expect(ok.writes[0]).toMatchObject({
+      value: 'documents/x/resume.pdf',
+      company: 'acme corp',
+    });
+    const everywhere = plan([
+      { questionId: 'q-resume', value: DOC_ID, scope: 'global' },
+    ]);
+    expect(everywhere.writes[0]).toMatchObject({
       value: 'documents/x/resume.pdf',
       company: '',
     });

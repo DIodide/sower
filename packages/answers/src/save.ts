@@ -16,9 +16,10 @@ import {
  * - keys: (company, normalizeLabel(question.label)) — the answers table's
  *   unique index; an upsert per key, so a re-save replaces, never duplicates
  * - scope: text/textarea answers are COMPANY-SCOPED by default (they only
- *   auto-fill future applications at the same company); scope 'global'
- *   saves them for every company. Select/multiselect/file answers are
- *   always global. No company → everything is global.
+ *   auto-fill future applications at the same company), and so are file
+ *   picks (which resume goes to which company); scope 'global' saves them
+ *   for every company. Select/multiselect answers are always global. No
+ *   company → everything is global.
  * - select/multiselect values must EXACTLY match one of the question's
  *   option values and are stored as {value,label} pairs (resolvable by
  *   value on this form, by label on any other tenant's variant)
@@ -44,7 +45,7 @@ export interface AnswerInput {
    * is accepted as a one-item pick); file: a documents row id.
    */
   value: string | string[];
-  /** text/textarea only; ignored for other types. Default 'company'. */
+  /** text/textarea and file picks; ignored for selects. Default 'company'. */
   scope?: AnswerScope;
 }
 
@@ -93,6 +94,8 @@ function planFile(
   question: Question,
   value: string | string[],
   documentRows: DocumentRow[],
+  scope: AnswerScope,
+  companyKey: string,
 ): Planned {
   if (Array.isArray(value)) {
     return { error: 'a file answer is one document id' };
@@ -110,15 +113,17 @@ function planFile(
       error: `selected document is kind "${doc.kind}", expected "${kind}"`,
     };
   }
-  // Document picks are global: the same resume/cover letter is reusable
-  // across companies. The stored value is the storagePath (what the
+  // A document pick is scoped like a written answer: which resume goes to
+  // which company is a per-company decision (a tailored copy must never
+  // follow the applicant to another employer), so 'company' by default and
+  // 'global' only when asked. The stored value is the storagePath (what the
   // resolver binds to).
   return {
     write: {
       questionId: question.id,
       question,
       value: doc.storagePath,
-      company: '',
+      company: scope === 'global' ? '' : companyKey,
     },
   };
 }
@@ -238,7 +243,13 @@ export function planAnswerWrites(
     let planned: Planned;
     switch (question.type) {
       case 'file':
-        planned = planFile(question, input.value, context.documents);
+        planned = planFile(
+          question,
+          input.value,
+          context.documents,
+          input.scope ?? 'company',
+          companyKey,
+        );
         break;
       case 'multiselect':
         planned = planMultiselect(question, input.value);

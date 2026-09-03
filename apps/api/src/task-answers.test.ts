@@ -320,7 +320,11 @@ describe('POST /tasks/:id/answers', () => {
             value: { value: '0', label: 'No' },
             company: '',
           },
-          { normalizedLabel: 'resume', value: 'docs/resume.pdf', company: '' },
+          {
+            normalizedLabel: 'resume',
+            value: 'docs/resume.pdf',
+            company: 'acme corp',
+          },
         ],
         [{ kind: 'resume', storagePath: 'docs/resume.pdf', filename: 'r.pdf' }],
       ],
@@ -385,7 +389,7 @@ describe('POST /tasks/:id/answers', () => {
         normalizedLabel: 'resume',
         value: 'docs/resume.pdf',
         source: 'user',
-        company: '',
+        company: 'acme corp',
       },
     ]);
     // Preview only: the process-owned resolution and the timeline are

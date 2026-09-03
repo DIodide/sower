@@ -252,10 +252,13 @@ function buildQuestionViews(
             ? answer.value
             : [answer.value];
       let display = rawValues;
+      let resolvedDocId: string | undefined;
       if (answer.source === 'document') {
-        // The stored value is a storage path; show the document's filename.
+        // The stored value is a storage path; show the document's filename,
+        // and keep the id so the picker can offer it as the current choice.
         display = rawValues.map((path) => {
           const doc = docByPath.get(path);
+          resolvedDocId ??= doc?.id;
           return doc ? `${doc.filename} (${doc.kind})` : path;
         });
       } else if (
@@ -271,6 +274,7 @@ function buildQuestionViews(
         status: 'resolved' as const,
         resolvedSource: answer.source,
         resolvedValues: display,
+        ...(resolvedDocId !== undefined ? { resolvedDocId } : {}),
       };
     }
 

@@ -24,8 +24,13 @@ export function isJobSpecificProse(question: SectionQuestion): boolean {
 
 /**
  * True when an already-resolved question should still be shown editable
- * next to the unanswered ones rather than collapsed away.
+ * next to the unanswered ones rather than collapsed away: prose written for
+ * this job, and file questions — which document goes to which company is a
+ * per-application choice, and the auto-pick is only a default.
  */
 export function staysAnswerable(question: SectionQuestion): boolean {
-  return question.status === 'resolved' && isJobSpecificProse(question);
+  return (
+    question.status === 'resolved' &&
+    (isJobSpecificProse(question) || question.type === 'file')
+  );
 }

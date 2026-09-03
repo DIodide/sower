@@ -196,6 +196,10 @@ export async function saveAnswers(
           inputs.push({
             questionId: question.id,
             value: await storeUpload(db, question, upload),
+            scope:
+              formData.get(`global:${question.id}`) === '1'
+                ? 'global'
+                : 'company',
           });
           uploaded.add(question.id);
         } catch (err) {
@@ -209,7 +213,14 @@ export async function saveAnswers(
       // reference (exists, right kind) and binds it to this question.
       const docId = formData.get(`doc:${question.id}`);
       if (typeof docId === 'string' && docId !== '') {
-        inputs.push({ questionId: question.id, value: docId });
+        inputs.push({
+          questionId: question.id,
+          value: docId,
+          scope:
+            formData.get(`global:${question.id}`) === '1'
+              ? 'global'
+              : 'company',
+        });
       }
       continue;
     }

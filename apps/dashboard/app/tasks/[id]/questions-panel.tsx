@@ -14,6 +14,7 @@ import {
   CountedTextarea,
   CountedTextInput,
 } from './counted-input';
+import { DocumentPicker } from './document-picker';
 import { Badge } from './ui';
 
 export interface QuestionOptionView {
@@ -53,6 +54,8 @@ export interface QuestionView {
   savedInput?: string[];
   /** status 'saved', file questions: id of the picked stored document. */
   savedDocId?: string;
+  /** status 'resolved', file questions: id of the auto-picked document. */
+  resolvedDocId?: string;
   /** Branch/conditional question — only applies based on a prior answer. */
   conditional?: boolean;
   /** Human hint under the label (e.g. which parent answer reveals this one). */
@@ -187,24 +190,13 @@ function MissingInput({
     return (
       <div style={{ display: 'grid', gap: '0.4rem', maxWidth: '34rem' }}>
         {matching.length > 0 ? (
-          <>
-            <label htmlFor={`doc-${view.id}`} className="field-label">
-              Use a stored {kindLabel}
-            </label>
-            <select
-              id={`doc-${view.id}`}
-              name={`doc:${view.id}`}
-              defaultValue={view.savedDocId ?? ''}
-              className="field"
-            >
-              <option value="">— none —</option>
-              {matching.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.filename} ({d.createdLabel})
-                </option>
-              ))}
-            </select>
-          </>
+          <DocumentPicker
+            inputId={`doc-${view.id}`}
+            name={`doc:${view.id}`}
+            options={matching}
+            defaultDocId={view.savedDocId ?? view.resolvedDocId ?? ''}
+            kindLabel={kindLabel}
+          />
         ) : (
           <p className="hint" style={{ margin: 0 }}>
             No stored {kindLabel} yet — upload one below.
@@ -214,10 +206,13 @@ function MissingInput({
           {matching.length > 0 ? 'Or upload a new file' : 'Upload a file'}
         </label>
         <input id={`file-${view.id}`} name={`file:${view.id}`} type="file" />
+        {scopeCompany ? (
+          <EssayScopeChoice questionId={view.id} company={scopeCompany} />
+        ) : null}
         {view.docKind === 'other' ? (
           <p className="hint faint" style={{ margin: 0, fontSize: '0.75rem' }}>
-            Uploads are stored in the vault, but only resume / cover letter
-            questions are auto-attached on re-run.
+            Only resume / cover letter questions are attached automatically; a
+            document chosen here is attached on the next run and fill.
           </p>
         ) : null}
       </div>
