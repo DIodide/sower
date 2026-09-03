@@ -47,6 +47,15 @@ const sampleSpec: JobSpec = {
   questions: [],
 };
 
+/**
+ * The questions the board API described, without the ones the adapter
+ * synthesizes for every posting (country, the education block, the
+ * Hispanic/Latino gate) — those have their own suite below.
+ */
+function described(spec: JobSpec): Question[] {
+  return spec.questions.filter((q) => q.formOnly !== true);
+}
+
 function findQuestion(spec: JobSpec, id: string): Question {
   const question = spec.questions.find((q) => q.id === id);
   if (!question) {
@@ -186,15 +195,23 @@ describe('GreenhouseAdapter.discover', () => {
     const spec = await adapter.discover(ref, url);
     // 17 questions (2 of which have a textarea alternate) + 3
     // location_questions (2 hidden-only, omitted) + 4 compliance questions
-    expect(spec.questions).toHaveLength(24);
+    expect(described(spec)).toHaveLength(24);
     // location_questions then compliance questions are appended after the
-    // main questions
-    expect(spec.questions.slice(19).map((q) => q.id)).toEqual([
+    // main questions; the synthesized questions trail everything.
+    expect(
+      described(spec)
+        .slice(19)
+        .map((q) => q.id),
+    ).toEqual([
       'location',
       'disability_status',
       'veteran_status',
       'race',
       'gender',
+    ]);
+    expect(spec.questions.slice(24).map((q) => q.id)).toEqual([
+      'country',
+      'hispanic_ethnicity',
     ]);
   });
 
@@ -382,7 +399,7 @@ describe('GreenhouseAdapter.discover — stripe location/demographic fixture', (
     expect(ids).toContain('location');
     // 19 questions (2 with textarea alternates) + 1 visible location
     // question + 0 compliance + 1 demographic
-    expect(spec.questions).toHaveLength(23);
+    expect(described(spec)).toHaveLength(23);
   });
 
   it('maps demographic_questions to Questions with numeric option values', async () => {
@@ -399,8 +416,8 @@ describe('GreenhouseAdapter.discover — stripe location/demographic fixture', (
         { label: 'Decline to Self Identify', value: 3250 },
       ],
     });
-    // Demographic questions are appended last.
-    expect(spec.questions.at(-1)?.id).toBe('demographic_question_591[]');
+    // Demographic questions are the last the API describes.
+    expect(described(spec).at(-1)?.id).toBe('demographic_question_591[]');
   });
 });
 
@@ -527,7 +544,7 @@ describe('GreenhouseAdapter.discover — field type edge cases', () => {
       },
     ]);
     const spec = await adapter.discover(ref, url);
-    expect(spec.questions).toEqual([
+    expect(described(spec)).toEqual([
       {
         id: 'pronouns',
         label: 'Pronouns',
@@ -550,7 +567,7 @@ describe('GreenhouseAdapter.discover — field type edge cases', () => {
       },
     ]);
     const spec = await adapter.discover(ref, url);
-    expect(spec.questions).toEqual([
+    expect(described(spec)).toEqual([
       { id: 'signature', label: 'Signature', type: 'text', required: false },
     ]);
   });
@@ -565,7 +582,7 @@ describe('GreenhouseAdapter.discover — field type edge cases', () => {
       },
     ]);
     const spec = await adapter.discover(ref, url);
-    expect(spec.questions).toEqual([]);
+    expect(described(spec)).toEqual([]);
     expect(debugSpy).toHaveBeenCalledTimes(1);
     expect(debugSpy).toHaveBeenCalledWith(
       expect.stringContaining('tracking_token'),
@@ -584,7 +601,7 @@ describe('GreenhouseAdapter.discover — field type edge cases', () => {
       },
     ]);
     const spec = await adapter.discover(ref, url);
-    expect(spec.questions).toEqual([
+    expect(described(spec)).toEqual([
       { id: 'location', label: 'Location', type: 'text', required: true },
     ]);
   });
@@ -933,14 +950,21 @@ describe('form-only questions', () => {
     );
   });
 
-  it('assumes nothing about an embedded board on a company site', async () => {
-    // fixture.json's absolute_url is stripe.com: a different form whose
-    // chrome we have not seen, so nothing is synthesized for it.
+  it('treats an embedded board exactly like a hosted one', async () => {
+    // fixture.json's absolute_url is stripe.com. A browser fill never opens
+    // that page — it opens greenhouse's embed page for the posting, which
+    // is the same form the hosted board renders — so the synthesized
+    // questions apply there too.
     const spec = await discoverWith({
       ...fixture,
       education: 'education_required',
     });
-    expect(spec.questions.some((q) => q.formOnly === true)).toBe(false);
+    const ids = spec.questions
+      .filter((q) => q.formOnly === true)
+      .map((q) => q.id);
+    expect(ids).toContain('country');
+    expect(ids).toContain('school--0');
+    expect(ids).toContain('hispanic_ethnicity');
   });
 });
 

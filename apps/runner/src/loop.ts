@@ -71,7 +71,7 @@ export async function runTick(deps: TickDeps): Promise<boolean> {
       // live view. OpenTab locks a profile to one mode at a time, so a
       // headless instance holding this profile must be stopped first.
       headless: false,
-      url: payload.applyUrl,
+      url: payload.fillUrl ?? payload.applyUrl,
       ttl: deps.ttlSeconds ?? DEFAULT_TTL_SECONDS,
     });
     await deps.sower.report(job.id, {

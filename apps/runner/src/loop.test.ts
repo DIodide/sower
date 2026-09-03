@@ -75,6 +75,24 @@ describe('runTick', () => {
     expect(deps.sower.fail).not.toHaveBeenCalled();
   });
 
+  it('opens the tab on fillUrl when the payload carries one', async () => {
+    // An embedded posting: applyUrl is the company site, fillUrl is the
+    // greenhouse embed page that actually holds the form.
+    const embedded = {
+      ...payload,
+      applyUrl: 'https://www.jumptrading.com/hr/job?gh_jid=8007788',
+      fillUrl:
+        'https://job-boards.greenhouse.io/embed/job_app?for=jumptrading&token=8007788',
+    };
+    const deps = makeDeps();
+    deps.sower.claim.mockResolvedValueOnce({ job, payload: embedded });
+    deps.fill.mockResolvedValueOnce([]);
+    expect(await runTick(deps)).toBe(true);
+    expect(deps.opentab.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ url: embedded.fillUrl }),
+    );
+  });
+
   it('opens a session, reports running with the live-view url, then ready', async () => {
     const deps = makeDeps();
     deps.sower.claim.mockResolvedValueOnce({ job, payload });

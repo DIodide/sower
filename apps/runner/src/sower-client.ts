@@ -40,6 +40,12 @@ export interface ClaimedFillJob {
 
 export interface FillPayload {
   applyUrl: string;
+  /**
+   * Where to open the browser for the fill, when that differs from
+   * applyUrl: an embedded posting is filled on greenhouse's own embed page
+   * rather than the company site that wraps (or replaces) it.
+   */
+  fillUrl?: string;
   company: string;
   title: string;
   questions: FillQuestion[];

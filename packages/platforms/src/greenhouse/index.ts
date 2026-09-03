@@ -199,17 +199,6 @@ const EDUCATION_FIELDS: ReadonlyArray<readonly [string, string]> = [
 ];
 
 /**
- * Greenhouse's own modern board. Its form asks for a country and renders
- * the education block; a posting whose canonical home is a company site
- * (an embedded board) is a different form, so nothing is assumed there.
- */
-function rendersModernBoardForm(
-  absoluteUrl: string | null | undefined,
-): boolean {
-  return (absoluteUrl ?? '').includes('job-boards.greenhouse.io');
-}
-
-/**
  * Boards that keep the section off say so in the flag itself; anything
  * else that names education renders it (optional or required).
  */
@@ -231,11 +220,11 @@ function hasEeocRaceQuestion(payload: GreenhouseJobPayload): boolean {
 }
 
 function formOnlyQuestions(payload: GreenhouseJobPayload): Question[] {
-  const questions: Question[] = [];
-  if (!rendersModernBoardForm(payload.absolute_url)) {
-    return questions;
-  }
-  questions.push({ ...COUNTRY_QUESTION });
+  // Every greenhouse posting renders this form: a hosted board directly,
+  // an embedded one through greenhouse's embed page, which is where a
+  // browser fill opens it (the company site around it is not a form the
+  // filler knows). So there is no board this does not apply to.
+  const questions: Question[] = [{ ...COUNTRY_QUESTION }];
   if (rendersEducation(payload.education)) {
     for (const [id, label] of EDUCATION_FIELDS) {
       questions.push({

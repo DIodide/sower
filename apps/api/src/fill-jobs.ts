@@ -177,6 +177,37 @@ export function buildFillQuestions(
 }
 
 /**
+ * Where the browser fill should open. A posting that greenhouse hosts is
+ * filled where it lives. An EMBEDDED posting — one whose apply URL is the
+ * company's own site — is not: that page either wraps the greenhouse form
+ * in a cross-origin iframe (Jump Trading) or renders a form of its own
+ * against greenhouse's API (Stripe), and neither is the DOM the filler
+ * knows. The form those pages embed is a page of its own at greenhouse's
+ * embed endpoint, addressed by board tenant + job id, and it is the same
+ * form the hosted board renders: same field ids, same submission.
+ *
+ * Falls back to the apply URL when the spec cannot name the board.
+ */
+export function fillTargetUrl(spec: JobSpec | null, applyUrl: string): string {
+  let host = '';
+  try {
+    host = new URL(applyUrl).hostname;
+  } catch {
+    return applyUrl;
+  }
+  if (host === 'greenhouse.io' || host.endsWith('.greenhouse.io')) {
+    return applyUrl;
+  }
+  const tenant = spec?.tenant;
+  const externalId = spec?.externalId;
+  if (!tenant || !externalId) {
+    return applyUrl;
+  }
+  const params = new URLSearchParams({ for: tenant, token: externalId });
+  return `https://job-boards.greenhouse.io/embed/job_app?${params.toString()}`;
+}
+
+/**
  * The claimed job's payload: identity + applyUrl via the task-views
  * fallbacks, questions via buildFillQuestions. Reads the whole (small,
  * personal) documents + answers tables — the /cli detail's same reads — so
@@ -231,6 +262,7 @@ async function buildClaimPayload(deps: Deps, taskId: string) {
   }));
   return {
     applyUrl: spec?.applyUrl ?? row.job.url,
+    fillUrl: fillTargetUrl(spec, spec?.applyUrl ?? row.job.url),
     company: identity.company,
     title: identity.title,
     questions: buildFillQuestions(spec, row.task.resolution ?? null, {

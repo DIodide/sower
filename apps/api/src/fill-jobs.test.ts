@@ -1,6 +1,8 @@
+import type { JobSpec } from '@sower/core';
 import { applicationTasks, events, fillJobs } from '@sower/db';
 import { describe, expect, it } from 'vitest';
 import type { Config } from './config.js';
+import { fillTargetUrl } from './fill-jobs.js';
 import { buildServer } from './server.js';
 import type { Deps } from './types.js';
 
@@ -944,5 +946,39 @@ describe('POST /fill-jobs/:id/heartbeat', () => {
     const heartbeatSet = writes[0]?.arg as { heartbeatAt: unknown };
     expect(heartbeatSet.heartbeatAt).toBeInstanceOf(Date);
     await app.close();
+  });
+});
+
+describe('fillTargetUrl', () => {
+  const spec = {
+    ...SPEC,
+    tenant: 'jumptrading',
+    externalId: '8007788',
+  } as JobSpec;
+
+  it('fills a greenhouse-hosted posting where it lives', () => {
+    const hosted = 'https://job-boards.greenhouse.io/acme/jobs/1';
+    expect(fillTargetUrl(spec, hosted)).toBe(hosted);
+    expect(
+      fillTargetUrl(spec, 'https://boards.greenhouse.io/acme/jobs/1'),
+    ).toBe('https://boards.greenhouse.io/acme/jobs/1');
+  });
+
+  it('opens an embedded posting on the greenhouse embed page instead', () => {
+    // The company page wraps the form in a cross-origin iframe (or renders
+    // its own); the embed endpoint IS that form, addressed by tenant + id.
+    expect(
+      fillTargetUrl(spec, 'https://www.jumptrading.com/hr/job?gh_jid=8007788'),
+    ).toBe(
+      'https://job-boards.greenhouse.io/embed/job_app?for=jumptrading&token=8007788',
+    );
+  });
+
+  it('falls back to the apply url when the spec cannot name the board', () => {
+    const anonymous: JobSpec = { ...spec, tenant: '', externalId: '' };
+    const url = 'https://stripe.com/jobs/search?gh_jid=8128745';
+    expect(fillTargetUrl(anonymous, url)).toBe(url);
+    expect(fillTargetUrl(null, url)).toBe(url);
+    expect(fillTargetUrl(spec, 'not a url')).toBe('not a url');
   });
 });
