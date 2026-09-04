@@ -35,6 +35,7 @@ const session: OpenTabSession = {
 };
 
 const payload: FillPayload = {
+  platform: 'greenhouse',
   applyUrl: 'https://job-boards.greenhouse.io/acme/jobs/123',
   company: 'Acme',
   title: 'Software Engineer',

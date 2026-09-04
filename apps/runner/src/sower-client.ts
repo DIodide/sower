@@ -48,6 +48,8 @@ export interface ClaimedFillJob {
 }
 
 export interface FillPayload {
+  /** Which form executor to run — 'greenhouse' | 'ashby' today. */
+  platform: string;
   applyUrl: string;
   /**
    * Where to open the browser for the fill, when that differs from

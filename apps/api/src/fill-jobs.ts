@@ -218,6 +218,11 @@ export function buildFillQuestions(
  * Falls back to the apply URL when the spec cannot name the board.
  */
 export function fillTargetUrl(spec: JobSpec | null, applyUrl: string): string {
+  // Only greenhouse has an embed page to redirect to; every other platform
+  // fills the apply url as it is.
+  if (spec !== null && spec.platform !== 'greenhouse') {
+    return applyUrl;
+  }
   let host = '';
   try {
     host = new URL(applyUrl).hostname;
@@ -291,6 +296,7 @@ async function buildClaimPayload(deps: Deps, taskId: string) {
     company: entry.company,
   }));
   return {
+    platform: row.job.platform,
     applyUrl: spec?.applyUrl ?? row.job.url,
     fillUrl: fillTargetUrl(spec, spec?.applyUrl ?? row.job.url),
     company: identity.company,
@@ -439,6 +445,12 @@ async function refreshResolution(
   }
 }
 
+/** Platforms the runner has a form executor for. */
+export const FILLABLE_PLATFORMS: ReadonlySet<string> = new Set([
+  'greenhouse',
+  'ashby',
+]);
+
 export function registerFillJobRoutes(app: FastifyInstance, deps: Deps): void {
   // Dashboard: request a browser fill for a greenhouse task the human is
   // working on (NEEDS_INPUT/REVIEW). One active job per task — a second
@@ -463,9 +475,9 @@ export function registerFillJobRoutes(app: FastifyInstance, deps: Deps): void {
     if (!row) {
       return reply.code(404).send({ error: 'task not found' });
     }
-    if (row.job.platform !== 'greenhouse') {
+    if (!FILLABLE_PLATFORMS.has(row.job.platform)) {
       return reply.code(409).send({
-        error: `browser fill is greenhouse-only (v1); task platform is '${row.job.platform}'`,
+        error: `browser fill supports ${[...FILLABLE_PLATFORMS].join(', ')}; task platform is '${row.job.platform}'`,
       });
     }
     if (!FILLABLE_STATES.includes(row.task.state)) {

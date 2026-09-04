@@ -220,13 +220,43 @@ export async function executeFill(
   actions: FillAction[],
   options: ExecuteOptions = {},
 ): Promise<FillReportItem[]> {
+  return await runFill(page, actions, options, {
+    scope: formScope,
+    fillOne,
+  });
+}
+
+/**
+ * What a platform contributes to the fill loop: where lookups are scoped,
+ * and how one planned action lands on that platform's widgets. The loop —
+ * readiness, the time budget, one retry for a transient failure, a second
+ * pass for questions revealed by earlier answers, and the report — is the
+ * same for every platform.
+ */
+export interface FillDriver {
+  scope(page: Page): Promise<Locator>;
+  fillOne(
+    page: Page,
+    scope: Locator,
+    action: Exclude<FillAction, { kind: 'skip' }>,
+    settleMs: number,
+    files: ReadonlyMap<string, UploadFile | { error: string }>,
+  ): Promise<void>;
+}
+
+export async function runFill(
+  page: Page,
+  actions: FillAction[],
+  options: ExecuteOptions,
+  driver: FillDriver,
+): Promise<FillReportItem[]> {
   const capMs = options.capMs ?? DEFAULT_CAP_MS;
   const settleMs = options.settleMs ?? DEFAULT_SETTLE_MS;
   const readyTimeoutMs = options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
   const files = options.files ?? new Map<string, UploadFile>();
   const deadline = Date.now() + capMs;
   await waitForFormReady(page, readyTimeoutMs);
-  const scope = await formScope(page);
+  const scope = await driver.scope(page);
   const report: FillReportItem[] = [];
   for (const action of actions) {
     if (action.kind === 'skip') {
@@ -249,7 +279,7 @@ export async function executeFill(
     }
     let failure: unknown = null;
     try {
-      await fillOne(page, scope, action, settleMs, files);
+      await driver.fillOne(page, scope, action, settleMs, files);
     } catch (error) {
       failure = error;
     }
@@ -260,7 +290,7 @@ export async function executeFill(
       try {
         await page.waitForTimeout(TRANSIENT_RETRY_PAUSE_MS);
         await waitForFormReady(page, readyTimeoutMs);
-        await fillOne(page, scope, action, settleMs, files);
+        await driver.fillOne(page, scope, action, settleMs, files);
       } catch (error) {
         failure = error;
       }
@@ -289,6 +319,7 @@ export async function executeFill(
     settleMs,
     deadline,
     files,
+    driver,
   );
   markAbsentFormOnly(actions, report);
   return report;
@@ -338,6 +369,7 @@ async function retryRevealedQuestions(
   settleMs: number,
   deadline: number,
   files: ReadonlyMap<string, UploadFile | { error: string }>,
+  driver: FillDriver,
 ): Promise<void> {
   const missing = report.filter(
     (item) =>
@@ -357,7 +389,7 @@ async function retryRevealedQuestions(
       continue;
     }
     try {
-      await fillOne(page, scope, action, settleMs, files);
+      await driver.fillOne(page, scope, action, settleMs, files);
       item.outcome = 'filled';
       delete item.detail;
     } catch {

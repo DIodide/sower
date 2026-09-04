@@ -29,6 +29,7 @@ import type { ReactNode } from 'react';
 import { getDb } from '../../../lib/db';
 import { pickDeadline, toDateInputValue } from '../../../lib/deadline';
 import { DueDateControl } from '../../../lib/due-date-control';
+import { FILLABLE_PLATFORMS } from '../../../lib/fill-job';
 import {
   eventLabel,
   formatDeadline,
@@ -1065,9 +1066,10 @@ export default async function TaskPage({
           <>
             <hr className="divider-soft" />
             <div className="row" style={{ alignItems: 'flex-start' }}>
-              {/* Greenhouse only (v1), and only while the task is actionable —
-                  the same gate the api enforces on POST /tasks/:id/fill. */}
-              {job?.platform === 'greenhouse' &&
+              {/* Only platforms the runner can fill, and only while the task
+                  is actionable — the same gate the api enforces on
+                  POST /tasks/:id/fill. */}
+              {FILLABLE_PLATFORMS.has(job?.platform ?? '') &&
               ['NEEDS_INPUT', 'REVIEW'].includes(task.state) ? (
                 <TaskActions taskId={task.id} mode="fill" />
               ) : null}
@@ -1081,10 +1083,10 @@ export default async function TaskPage({
         ) : null}
       </section>
 
-      {/* ---- browser fill (greenhouse): the runner fills the real form in
-           a browser on the user's machine; the human always submits in the
-           live view — nothing here ever submits. ---- */}
-      {job?.platform === 'greenhouse' ? (
+      {/* ---- browser fill: the runner fills the real form in a browser on
+           the user's machine; the human always submits in the live view —
+           nothing here ever submits. ---- */}
+      {FILLABLE_PLATFORMS.has(job?.platform ?? '') ? (
         <FillJobPanel taskId={task.id} />
       ) : null}
 

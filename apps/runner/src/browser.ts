@@ -1,5 +1,6 @@
 import type { Browser, Page } from 'playwright-core';
 import { chromium } from 'playwright-core';
+import { executeAshbyFill } from './ashby-fill.js';
 import {
   executeFill,
   type FillAction,
@@ -129,7 +130,10 @@ export async function fillSessionOverCdp(
   try {
     const page = await findSessionPage(browser, session);
     await page.waitForLoadState('domcontentloaded');
-    return await executeFill(page, actions, { files });
+    // The platform names the widgets; the loop around them is shared.
+    const execute =
+      payload.platform === 'ashby' ? executeAshbyFill : executeFill;
+    return await execute(page, actions, { files });
   } finally {
     // Disconnects this CDP client only; the OpenTab session keeps running.
     await browser.close().catch(() => {});

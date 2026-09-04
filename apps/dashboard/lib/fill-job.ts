@@ -89,3 +89,13 @@ export function parseFillReport(value: unknown): FillReportEntry[] {
   }
   return entries;
 }
+
+/**
+ * Platforms the runner has a form executor for. Mirrors the api's
+ * FILLABLE_PLATFORMS (fill-jobs.ts) — the page hides the button where the
+ * api would answer 409.
+ */
+export const FILLABLE_PLATFORMS: ReadonlySet<string> = new Set([
+  'greenhouse',
+  'ashby',
+]);

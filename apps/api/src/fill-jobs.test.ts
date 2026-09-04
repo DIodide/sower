@@ -270,7 +270,7 @@ describe('POST /tasks/:id/fill', () => {
     await app.close();
   });
 
-  it('409s for a non-greenhouse task (v1)', async () => {
+  it('409s for a platform the runner cannot fill', async () => {
     const writes: DbWrite[] = [];
     const app = buildServer(
       createDeps(
@@ -286,7 +286,9 @@ describe('POST /tasks/:id/fill', () => {
       headers: AUTH,
     });
     expect(response.statusCode).toBe(409);
-    expect(response.json().error).toMatch(/greenhouse-only/);
+    expect(response.json().error).toMatch(
+      /browser fill supports greenhouse, ashby/,
+    );
     expect(writes).toEqual([]);
     await app.close();
   });
