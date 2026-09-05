@@ -38,6 +38,8 @@ const OPTION_WAIT_MS = 6_000;
 const OPTION_POLL_MS = 150;
 /** Lever reads an uploaded resume and fills fields from it; let it finish. */
 const RESUME_PARSE_PAUSE_MS = 4_000;
+/** A location result row shows its text a beat before the place is bound. */
+const LOCATION_BIND_PAUSE_MS = 500;
 
 /** A name attribute selector; the ids carry brackets, which quoting keeps. */
 function byName(id: string, suffix = ''): string {
@@ -99,11 +101,43 @@ async function pickLocation(
       text === normalizeLabel(value) ||
       (city !== '' && text.startsWith(city))
     ) {
+      // The row shows its text before Lever binds the place to it; a click
+      // in that gap updates the visible input and nothing else. Let it
+      // settle, then check the hidden field the form actually reads.
+      await page.waitForTimeout(LOCATION_BIND_PAUSE_MS);
       await rows.nth(index).click({ timeout: ACTION_TIMEOUT_MS });
-      return;
+      if (await locationBound(page)) {
+        return;
+      }
+      await input.click({ timeout: ACTION_TIMEOUT_MS });
+      await page.waitForTimeout(LOCATION_BIND_PAUSE_MS);
+      const again = page.locator('.dropdown-results > *').first();
+      if ((await again.count()) > 0) {
+        await again.click({ timeout: ACTION_TIMEOUT_MS });
+      }
+      if (await locationBound(page)) {
+        return;
+      }
+      throw new Error(`location '${value}' was shown but never bound`);
     }
   }
   throw new Error(`option list did not show '${value}'`);
+}
+
+/** Lever records a picked place in #selected-location as JSON with a name. */
+async function locationBound(page: Page): Promise<boolean> {
+  await page.waitForTimeout(LOCATION_BIND_PAUSE_MS);
+  const raw = await page
+    .locator('#selected-location')
+    .first()
+    .inputValue()
+    .catch(() => '');
+  try {
+    const parsed = JSON.parse(raw) as { name?: unknown };
+    return typeof parsed.name === 'string' && parsed.name !== '';
+  } catch {
+    return false;
+  }
 }
 
 /** The text control with the question's name: an input or a textarea. */
