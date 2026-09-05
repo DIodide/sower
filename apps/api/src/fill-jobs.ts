@@ -220,6 +220,14 @@ export function buildFillQuestions(
 export function fillTargetUrl(spec: JobSpec | null, applyUrl: string): string {
   // Only greenhouse has an embed page to redirect to; every other platform
   // fills the apply url as it is.
+  if (spec !== null && spec.platform === 'lever') {
+    // The posting page and the form are different pages; the spec usually
+    // carries the /apply one already.
+    const base = applyUrl.split(/[?#]/)[0] ?? applyUrl;
+    return /\/apply\/?$/.test(base)
+      ? applyUrl
+      : `${base.replace(/\/$/, '')}/apply`;
+  }
   if (spec !== null && spec.platform !== 'greenhouse') {
     return applyUrl;
   }
@@ -449,6 +457,7 @@ async function refreshResolution(
 export const FILLABLE_PLATFORMS: ReadonlySet<string> = new Set([
   'greenhouse',
   'ashby',
+  'lever',
 ]);
 
 export function registerFillJobRoutes(app: FastifyInstance, deps: Deps): void {

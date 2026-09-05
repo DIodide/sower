@@ -98,4 +98,5 @@ export function parseFillReport(value: unknown): FillReportEntry[] {
 export const FILLABLE_PLATFORMS: ReadonlySet<string> = new Set([
   'greenhouse',
   'ashby',
+  'lever',
 ]);
