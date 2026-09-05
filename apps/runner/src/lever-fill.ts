@@ -73,9 +73,20 @@ async function pickLocation(
     timeout: ACTION_TIMEOUT_MS,
   });
   const rows = page.locator('.dropdown-results > *');
-  const deadline = Date.now() + OPTION_WAIT_MS;
-  while ((await rows.count()) === 0 && Date.now() < deadline) {
-    await page.waitForTimeout(OPTION_POLL_MS);
+  // Lever's geocoder answers in its own time and occasionally not at all
+  // for a first query; a second, retyped query usually gets an answer.
+  for (let attempt = 0; attempt < 2 && (await rows.count()) === 0; attempt++) {
+    if (attempt > 0) {
+      await input.fill('');
+      await input.pressSequentially(stripLineBreaks(value), {
+        delay: 40,
+        timeout: ACTION_TIMEOUT_MS,
+      });
+    }
+    const deadline = Date.now() + OPTION_WAIT_MS;
+    while ((await rows.count()) === 0 && Date.now() < deadline) {
+      await page.waitForTimeout(OPTION_POLL_MS);
+    }
   }
   const total = await rows.count();
   if (total === 0) {
