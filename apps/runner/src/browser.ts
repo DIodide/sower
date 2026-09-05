@@ -7,6 +7,7 @@ import {
   planFill,
   type UploadFile,
 } from './greenhouse-fill.js';
+import { executeLeverFill } from './lever-fill.js';
 import type { OpenTabSession } from './opentab-client.js';
 import type {
   DocumentContent,
@@ -132,7 +133,11 @@ export async function fillSessionOverCdp(
     await page.waitForLoadState('domcontentloaded');
     // The platform names the widgets; the loop around them is shared.
     const execute =
-      payload.platform === 'ashby' ? executeAshbyFill : executeFill;
+      payload.platform === 'ashby'
+        ? executeAshbyFill
+        : payload.platform === 'lever'
+          ? executeLeverFill
+          : executeFill;
     return await execute(page, actions, { files });
   } finally {
     // Disconnects this CDP client only; the OpenTab session keeps running.
