@@ -287,7 +287,7 @@ describe('POST /tasks/:id/fill', () => {
     });
     expect(response.statusCode).toBe(409);
     expect(response.json().error).toMatch(
-      /browser fill supports greenhouse, ashby/,
+      /browser fill supports greenhouse, ashby, lever/,
     );
     expect(writes).toEqual([]);
     await app.close();
@@ -996,6 +996,16 @@ describe('fillTargetUrl', () => {
     ).toBe(
       'https://job-boards.greenhouse.io/embed/job_app?for=jumptrading&token=8007788',
     );
+  });
+
+  it('opens a lever posting on its /apply page', () => {
+    const lever = { ...spec, platform: 'lever' } as JobSpec;
+    expect(fillTargetUrl(lever, 'https://jobs.lever.co/palantir/abc')).toBe(
+      'https://jobs.lever.co/palantir/abc/apply',
+    );
+    expect(
+      fillTargetUrl(lever, 'https://jobs.lever.co/palantir/abc/apply'),
+    ).toBe('https://jobs.lever.co/palantir/abc/apply');
   });
 
   it('falls back to the apply url when the spec cannot name the board', () => {
